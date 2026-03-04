@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  alert-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alert-service
+    ports:
+      - "${ALERT_SERVICE_PORT:-8002}:8002"
+    environment:
+      # Database Configuration
+      DATABASE_URL: ${DATABASE_URL:-postgresql://goec:goec@postgres:5432/goec}
+      
+      # Service Configuration
+      ALERT_SERVICE_HOST: ${ALERT_SERVICE_HOST:-0.0.0.0}
+      ALERT_SERVICE_PORT: ${ALERT_SERVICE_PORT:-8002}
+      
+      # Alert Channel Configuration - Email
+      ALERT_EMAIL_ENABLED: ${ALERT_EMAIL_ENABLED:-false}
+      ALERT_EMAIL_SMTP_HOST: ${ALERT_EMAIL_SMTP_HOST:-smtp.gmail.com}
+      ALERT_EMAIL_SMTP_PORT: ${ALERT_EMAIL_SMTP_PORT:-587}
+      ALERT_EMAIL_USERNAME: ${ALERT_EMAIL_USERNAME:-}
+      ALERT_EMAIL_PASSWORD: ${ALERT_EMAIL_PASSWORD:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-alerts@goec.com}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-admin@goec.com}
+      
+      # Alert Channel Configuration - SMS
+      ALERT_SMS_ENABLED: ${ALERT_SMS_ENABLED:-false}
+      ALERT_SMS_PROVIDER: ${ALERT_SMS_PROVIDER:-twilio}
+      ALERT_SMS_ACCOUNT_SID: ${ALERT_SMS_ACCOUNT_SID:-}
+      ALERT_SMS_AUTH_TOKEN: ${ALERT_SMS_AUTH_TOKEN:-}
+      ALERT_SMS_FROM: ${ALERT_SMS_FROM:-}
+      ALERT_SMS_TO: ${ALERT_SMS_TO:-}
+      
+      # Alert Channel Configuration - Webhook
+      ALERT_WEBHOOK_ENABLED: ${ALERT_WEBHOOK_ENABLED:-false}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_METHOD: ${ALERT_WEBHOOK_METHOD:-POST}
+      ALERT_WEBHOOK_HEADERS: ${ALERT_WEBHOOK_HEADERS:-}
+      ALERT_WEBHOOK_AUTH_TOKEN: ${ALERT_WEBHOOK_AUTH_TOKEN:-}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    
+    volumes:
+      # Mount logs directory for persistence
+      - ./logs:/app/logs
+      
+    depends_on:
+      - postgres
+    
+    networks:
+      - goec-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # PostgreSQL Database (shared across all services)
+  postgres:
+    image: postgres:15-alpine
+    container_name: goec-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-goec}
+      POSTGRES_USER: ${POSTGRES_USER:-goec}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goec}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - goec-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goec-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
