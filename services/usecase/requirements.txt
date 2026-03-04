@@ -1,0 +1,16 @@
+# Usecase Evaluation Service Dependencies
+# Minimal dependencies for rule evaluation and API
+
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.12.1
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0

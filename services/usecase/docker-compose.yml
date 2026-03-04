@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  usecase-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: usecase-service
+    ports:
+      - "${PORT:-8001}:8001"
+    environment:
+      # Database Configuration
+      DATABASE_URL: ${DATABASE_URL:-postgresql://goec:goec@postgres:5432/goec}
+      
+      # Service Configuration
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-8001}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    
+    volumes:
+      # Mount logs directory for persistence
+      - ./logs:/app/logs
+      
+    depends_on:
+      - postgres
+    
+    networks:
+      - goec-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # PostgreSQL Database (shared across all services)
+  postgres:
+    image: postgres:15-alpine
+    container_name: goec-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-goec}
+      POSTGRES_USER: ${POSTGRES_USER:-goec}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goec}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - goec-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goec-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
