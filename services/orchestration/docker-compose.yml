@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  orchestration:
+    build: .
+    container_name: orchestration-service
+    ports:
+      - "8000:8000"
+    environment:
+      # Service URLs (update these based on your deployment)
+      - CAMERA_DETECTION_URL=${CAMERA_DETECTION_URL:-http://camera-detection:8001}
+      - USECASE_SERVICE_URL=${USECASE_SERVICE_URL:-http://usecase:8002}
+      - ALERT_SERVICE_URL=${ALERT_SERVICE_URL:-http://alert:8003}
+      
+      # Request configuration
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_BACKOFF_FACTOR=${RETRY_BACKOFF_FACTOR:-0.5}
+      
+      # Database (optional - for logging pipeline executions)
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/goec}
+      
+      # Application settings
+      - PORT=${PORT:-8000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    volumes:
+      - ./logs:/app/logs
+    
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Network mode for connecting to other services
+    # Uncomment and adjust if using external network
+    # networks:
+    #   - goec-network
+
+# Uncomment if using external network
+# networks:
+#   goec-network:
+#     external: true
