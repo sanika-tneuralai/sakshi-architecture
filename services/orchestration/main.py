@@ -35,9 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Service URLs from environment variables
-CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://localhost:8000")
-USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://localhost:8001")
-ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://localhost:8002")
+CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://13.204.83.61:8000")
+USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
+ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
 
 # Request timeout in seconds
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
