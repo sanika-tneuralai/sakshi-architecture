@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  analytics:
+    build: .
+    container_name: analytics-service
+    ports:
+      - "${PORT:-8003}:8003"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8003}
+      - RELOAD=${RELOAD:-false}
+      - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
+      - SCHEDULER_HOUR=${SCHEDULER_HOUR:-0}
+      - SCHEDULER_MINUTE=${SCHEDULER_MINUTE:-30}
+      - SCHEDULER_TIMEZONE=${SCHEDULER_TIMEZONE:-UTC}
+    restart: unless-stopped
+    networks:
+      - goec-network
+    depends_on:
+      - postgres
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: analytics-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-goec}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-goec123}
+      - POSTGRES_DB=${POSTGRES_DB:-goec}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - goec-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goec-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
