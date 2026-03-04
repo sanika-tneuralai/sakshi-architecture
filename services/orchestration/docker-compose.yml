@@ -8,9 +8,9 @@ services:
       - "8000:8000"
     environment:
       # Service URLs (update these based on your deployment)
-      - CAMERA_DETECTION_URL=${CAMERA_DETECTION_URL:-http://camera-detection:8001}
-      - USECASE_SERVICE_URL=${USECASE_SERVICE_URL:-http://usecase:8002}
-      - ALERT_SERVICE_URL=${ALERT_SERVICE_URL:-http://alert:8003}
+      - CAMERA_DETECTION_URL=${CAMERA_DETECTION_URL:-http://camera-detection:8000}
+      - USECASE_SERVICE_URL=${USECASE_SERVICE_URL:-http://usecase:8001}
+      - ALERT_SERVICE_URL=${ALERT_SERVICE_URL:-http://alert:8002}
       
       # Request configuration
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
