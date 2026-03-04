@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  camera-detection:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: camera-detection-service:latest
+    container_name: camera-detection
+    restart: unless-stopped
+    
+    # GPU support for NVIDIA DeepStream and YOLO
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      # Database connection
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/goec}
+      
+      # DeepStream configuration
+      DEEPSTREAM_PATH: ${DEEPSTREAM_PATH:-/opt/nvidia/deepstream/deepstream-6.4/lib}
+      
+      # Model configuration
+      YOLO_MODEL_PATH: ${YOLO_MODEL_PATH:-/app/models/yolo11n.pt}
+      
+      # Detection parameters
+      DEFAULT_CONFIDENCE_THRESHOLD: ${DEFAULT_CONFIDENCE_THRESHOLD:-0.5}
+      DEFAULT_IOU_THRESHOLD: ${DEFAULT_IOU_THRESHOLD:-0.45}
+      
+      # Storage paths
+      SCREENSHOTS_DIR: ${SCREENSHOTS_DIR:-/app/screenshots}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    
+    ports:
+      - "8000:8000"
+    
+    volumes:
+      # Mount models directory
+      - ./models:/app/models:ro
+      
+      # Mount screenshots directory (persistent storage)
+      - ./screenshots:/app/screenshots
+      
+      # Mount logs directory (optional)
+      - ./logs:/app/logs
+    
+    networks:
+      - goec-network
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL database (shared across all services)
+  postgres:
+    image: postgres:15-alpine
+    container_name: goec-postgres
+    restart: unless-stopped
+    
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-goec}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    
+    ports:
+      - "5432:5432"
+    
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+    networks:
+      - goec-network
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goec-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local

@@ -1,0 +1,36 @@
+# API Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+requests==2.31.0
+
+# System Utilities
+psutil==5.9.8
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# Core numeric (LOCKED - required for compatibility)
+numpy==1.26.4
+
+# OpenCV (headless for server deployment)
+opencv-python-headless==4.10.0.84
+
+# Machine Learning - YOLO
+ultralytics==8.3.40
+
+# PyTorch (for YOLO)
+# Install separately with CUDA support:
+# pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
+
+# DeepStream dependencies
+# Note: DeepStream and related GStreamer libraries must be installed separately
+# This service requires:
+# - NVIDIA DeepStream SDK 6.4+
+# - GStreamer 1.0
+# - PyGObject (gi)
+# - pyds (DeepStream Python bindings)
+#
+# Installation guide: https://docs.nvidia.com/metropolis/deepstream/dev-guide/
