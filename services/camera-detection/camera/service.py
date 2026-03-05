@@ -1,6 +1,4 @@
 import logging
-import threading
-import time
 from typing import Dict, Optional, List
 from camera.streams.opencv import OpenCVCamera
 from camera.schemas import RTSPConfig, CameraStatus
@@ -23,8 +21,6 @@ class CameraManager:
     def __init__(self):
         self.single_cameras: Dict[str, OpenCVCamera] = {}
         self.multi_stream_manager: Optional[MultiStreamManager] = None
-        self.pipeline_workers: Dict[str, threading.Thread] = {}
-        self.pipeline_stop_events: Dict[str, threading.Event] = {}
         
     async def start_single_camera(self, config: RTSPConfig) -> bool:
         """Start a single camera stream"""
@@ -43,9 +39,6 @@ class CameraManager:
         
         await camera.start()
         self.single_cameras[config.camera_id] = camera
-        
-        # Start background pipeline worker
-        self._start_pipeline_worker(config.camera_id)
         
         logger.info(f"Started single camera: {config.camera_id}")
         logger.info(f"✓ CameraManager.start_single_camera completed for {config.camera_id}")
@@ -76,9 +69,6 @@ class CameraManager:
         """Stop a single camera"""
         if camera_id not in self.single_cameras:
             raise ValueError(f"Camera {camera_id} not found")
-        
-        # Stop pipeline worker first
-        self._stop_pipeline_worker(camera_id)
         
         camera = self.single_cameras[camera_id]
         await camera.stop()
@@ -158,124 +148,6 @@ class CameraManager:
         
         logger.info(f"✓ CameraManager.get_camera_stream completed for {camera_id}")
         return None
-    
-    def _start_pipeline_worker(self, camera_id: str):
-        """Start background pipeline worker for a camera"""
-        if camera_id in self.pipeline_workers:
-            logger.warning(f"Pipeline worker already running for {camera_id}")
-            return
-        
-        stop_event = threading.Event()
-        self.pipeline_stop_events[camera_id] = stop_event
-        
-        worker = threading.Thread(
-            target=self._pipeline_worker,
-            args=(camera_id, stop_event),
-            daemon=True,
-            name=f"pipeline-{camera_id}"
-        )
-        self.pipeline_workers[camera_id] = worker
-        worker.start()
-        
-        logger.info(f"Started pipeline worker for {camera_id}")
-    
-    def _stop_pipeline_worker(self, camera_id: str):
-        """Stop background pipeline worker for a camera"""
-        if camera_id not in self.pipeline_stop_events:
-            return
-        
-        # Signal worker to stop
-        self.pipeline_stop_events[camera_id].set()
-        
-        # Wait for worker to finish
-        if camera_id in self.pipeline_workers:
-            self.pipeline_workers[camera_id].join(timeout=5.0)
-            del self.pipeline_workers[camera_id]
-        
-        del self.pipeline_stop_events[camera_id]
-        logger.info(f"Stopped pipeline worker for {camera_id}")
-    
-    def _pipeline_worker(self, camera_id: str, stop_event: threading.Event):
-        """Background worker that runs pipeline continuously"""
-        print(f"[WORKER] Pipeline worker started for {camera_id}")
-        
-        while not stop_event.is_set():
-            try:
-                # Run pipeline once
-                _run_pipeline_once(camera_id)
-                
-                # Throttle: run every 2 seconds
-                time.sleep(2)
-                
-            except Exception as e:
-                logger.error(f"[WORKER] Pipeline error for {camera_id}: {str(e)}")
-                # Continue running even on errors
-                time.sleep(5)  # Wait longer on error
-        
-        print(f"[WORKER] Pipeline worker stopped for {camera_id}")
-
-
-def _run_pipeline_once(camera_id: str):
-    """Run complete pipeline once for a camera (direct service calls)"""
-    from detection.service import get_detection_service
-    from usecase.service import evaluate_usecases
-    from alert.service import process_pipeline_alerts
-    from alert.schemas import PipelineAlertRequest
-    
-    print(f"\n[PIPELINE] Running pipeline for {camera_id}")
-    
-    try:
-        # Step 1: Get camera and frame
-        camera = camera_manager.get_camera_stream(camera_id)
-        if not camera:
-            return
-        
-        frame = camera.get_frame()
-        if frame is None:
-            return
-        
-        # Step 2: Run detection
-        detection_service = get_detection_service()
-        roi_points = camera.roi_points if hasattr(camera, 'roi_points') else None
-        roi_mask = camera.roi_mask if hasattr(camera, 'roi_mask') else None
-        
-        detection_result = detection_service.detect(
-            frame=frame,
-            camera_id=camera_id,
-            roi_points=roi_points,
-            roi_mask=roi_mask,
-            confidence_threshold=0.5,
-            iou_threshold=0.45,
-            classes=None
-        )
-        
-        detection_output = detection_result.model_dump() if hasattr(detection_result, 'model_dump') else detection_result.dict()
-        
-        print(f"[PIPELINE] Detection: {detection_result.total_detections_count} total, {detection_result.roi_detections_count} in ROI")
-        
-        # Step 3: Evaluate usecases
-        usecases = ["person_in_roi", "crowd_in_roi", "restricted_zone_breach"]
-        usecase_result = evaluate_usecases(
-            camera_id=camera_id,
-            detection_output=detection_output,
-            usecases=usecases
-        )
-        
-        triggered_count = sum(1 for r in usecase_result['results'] if r.triggered)
-        print(f"[PIPELINE] Usecases: {triggered_count}/{len(usecases)} triggered")
-        
-        # Step 4: Send alerts
-        alert_request = PipelineAlertRequest(
-            camera_id=camera_id,
-            usecase_results=[r.model_dump() if hasattr(r, 'model_dump') else r.dict() for r in usecase_result['results']]
-        )
-        alert_result = process_pipeline_alerts(alert_request)
-        
-        print(f"[PIPELINE] Alerts: {alert_result.total_alerts_sent} sent\n")
-        
-    except Exception as e:
-        logger.error(f"[PIPELINE] Error: {str(e)}")
-        raise
 
 
 # Global camera manager instance
