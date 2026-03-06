@@ -828,6 +828,9 @@ async def execute_pipeline_once(request: PipelineRequest):
             response.raise_for_status()
             camera_list_data = response.json()
             
+            # DEBUG: Log the raw response
+            logger.info(f"DEBUG: Camera list response: {camera_list_data}")
+            
             # Extract camera IDs from both single_stream_cameras and multi_stream_cameras
             camera_ids = []
             if 'single_stream_cameras' in camera_list_data:
@@ -835,7 +838,11 @@ async def execute_pipeline_once(request: PipelineRequest):
             if 'multi_stream_cameras' in camera_list_data:
                 camera_ids.extend(camera_list_data['multi_stream_cameras'])
             
+            # DEBUG: Log extracted camera IDs
+            logger.info(f"DEBUG: Extracted camera_ids: {camera_ids}")
+            
             if not camera_ids:
+                logger.warning("No active cameras found in response")
                 return {
                     "status": "no_active_cameras",
                     "message": "No active cameras found",
@@ -848,15 +855,23 @@ async def execute_pipeline_once(request: PipelineRequest):
         async def process_single_camera(camera_id: str) -> dict:
             """Process pipeline for a single camera"""
             try:
+                logger.info(f"DEBUG: Starting pipeline for camera {camera_id}")
+                
                 # Detection
+                logger.info(f"DEBUG: [{camera_id}] Calling run_detection...")
                 detection_data = await run_detection(camera_id, confidence_threshold)
+                logger.info(f"DEBUG: [{camera_id}] Detection completed: {detection_data.get('total_detections_count', 0)} detections")
                 
                 # Evaluate usecases
+                logger.info(f"DEBUG: [{camera_id}] Calling evaluate_usecases...")
                 usecase_data = await evaluate_usecases(camera_id, detection_data, usecases)
+                logger.info(f"DEBUG: [{camera_id}] Usecases evaluated: {len(usecase_data.get('results', []))} results")
                 
                 # Send alerts (non-critical)
                 try:
+                    logger.info(f"DEBUG: [{camera_id}] Calling send_alerts...")
                     alert_data = await send_alerts(camera_id, usecase_data.get('results', []))
+                    logger.info(f"DEBUG: [{camera_id}] Alerts sent: {len(alert_data.get('alerts_sent', []))}")
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Alert sending failed (non-critical): {str(e)}")
                     alert_data = {"alerts_sent": [], "status": "failed"}
@@ -892,14 +907,18 @@ async def execute_pipeline_once(request: PipelineRequest):
                 }
         
         # Process all cameras in parallel
+        logger.info(f"DEBUG: Starting parallel processing for {len(camera_ids)} cameras...")
         results = await asyncio.gather(
             *[process_single_camera(camera_id) for camera_id in camera_ids],
             return_exceptions=False
         )
+        logger.info(f"DEBUG: Parallel processing completed. Got {len(results)} results")
         
         # Aggregate results
         successful_results = [r for r in results if r.get('status') == 'success']
         failed_results = [r for r in results if r.get('status') == 'failed']
+        
+        logger.info(f"DEBUG: Aggregation - {len(successful_results)} successful, {len(failed_results)} failed")
         
         return {
             "status": "completed",
