@@ -122,18 +122,40 @@ class CameraManager:
         return None
     
     def list_cameras(self) -> Dict:
-        """List all active cameras"""
-        single = list(self.single_cameras.keys())
-        multi = []
+        """List all active cameras with detailed information"""
+        cameras_info = []
         
+        # Get info from single cameras
+        for camera_id, camera in self.single_cameras.items():
+            status_dict = camera.get_status()
+            cameras_info.append({
+                'camera_id': camera_id,
+                'status': 'running' if status_dict.get('is_running') else 'stopped',
+                'fps': status_dict.get('fps', 5),
+                'frame_count': status_dict.get('frame_count', 0),
+                'has_roi_mask': hasattr(camera, 'roi_mask') and camera.roi_mask is not None,
+                'rtsp_url': status_dict.get('rtsp_url', ''),
+                'backend': status_dict.get('backend', 'opencv-ffmpeg')
+            })
+        
+        # Get info from multi-stream cameras if active
         if self.multi_stream_manager and self.multi_stream_manager.is_running:
-            multi = list(self.multi_stream_manager.cameras.keys())
+            for camera_id in self.multi_stream_manager.cameras.keys():
+                status_dict = self.multi_stream_manager.get_camera_status(camera_id)
+                if status_dict:
+                    cameras_info.append({
+                        'camera_id': camera_id,
+                        'status': 'running' if status_dict.get('is_running') else 'stopped',
+                        'fps': status_dict.get('fps', 5),
+                        'frame_count': status_dict.get('frame_count', 0),
+                        'has_roi_mask': False,  # Multi-stream ROI info may vary
+                        'rtsp_url': status_dict.get('rtsp_url', ''),
+                        'backend': 'deepstream-multi'
+                    })
         
         result = {
-            'single_stream_cameras': single,
-            'multi_stream_cameras': multi,
-            'total_count': len(single) + len(multi),
-            'mode': 'multi-stream' if multi else 'single-stream' if single else 'idle'
+            'cameras': cameras_info,
+            'total': len(cameras_info)
         }
         logger.info("✓ CameraManager.list_cameras completed")
         return result

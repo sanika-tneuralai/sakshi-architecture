@@ -68,3 +68,20 @@ class FrameResponse(BaseModel):
     frame_count: int
     status: str
     backend: str
+
+
+class CameraInfo(BaseModel):
+    """Detailed camera information for list response"""
+    camera_id: str
+    status: str
+    fps: int
+    frame_count: int
+    has_roi_mask: bool
+    rtsp_url: str
+    backend: str = "opencv-ffmpeg"
+
+
+class CameraListResponse(BaseModel):
+    """Response containing list of all active cameras"""
+    cameras: List[CameraInfo]
+    total: int

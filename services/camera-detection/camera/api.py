@@ -4,7 +4,7 @@ import logging
 import cv2
 import base64
 
-from camera.schemas import RTSPConfig, MultiStreamConfig, CameraStatus
+from camera.schemas import RTSPConfig, MultiStreamConfig, CameraStatus, CameraListResponse
 from camera.service import camera_manager
 from shared.common.utils import validate_rtsp_url
 
@@ -164,19 +164,30 @@ async def get_camera_status(camera_id: str):
     return status
 
 
-@router.get("/list", response_model=dict)
+@router.get("/list", response_model=CameraListResponse)
 async def list_cameras():
     """
-    List all active cameras
+    List all active cameras with detailed information
     
     **Returns:**
-    - List of single-stream cameras
-    - List of multi-stream cameras
-    - Total count
-    - Current mode (single-stream/multi-stream/idle)
+    - List of all active cameras with:
+      - camera_id
+      - status (running/stopped)
+      - fps
+      - frame_count
+      - has_roi_mask
+      - rtsp_url
+      - backend type
+    - Total count of active cameras
+    
+    **Use Case:**
+    - Get list of all cameras before batch detection
+    - Monitor which cameras are currently active
+    - Check camera status and metadata
     """
-    logger.info("✓ list_cameras completed")
-    return camera_manager.list_cameras()
+    result = camera_manager.list_cameras()
+    logger.info(f"✓ list_cameras completed - {result['total']} active cameras")
+    return result
 
 
 @router.get("/frame/{camera_id}")

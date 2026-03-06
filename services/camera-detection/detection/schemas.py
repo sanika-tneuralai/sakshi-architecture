@@ -54,4 +54,32 @@ class DetectionStats(BaseModel):
     is_active: bool
 
 
+class DetectBatchRequest(BaseModel):
+    """Request to run detection on multiple cameras"""
+    camera_ids: Optional[List[str]] = Field(None, description="List of camera IDs to detect from (None = all active cameras)")
+    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    iou_threshold: Optional[float] = Field(0.45, ge=0.0, le=1.0, description="IOU threshold for NMS")
+    classes: Optional[List[int]] = Field(None, description="Filter specific class IDs (None = all classes)")
+
+
+class CameraDetectionResult(BaseModel):
+    """Detection result for a single camera in batch operation"""
+    camera_id: str
+    status: str = Field(..., description="success or failed")
+    total_detections_count: int
+    roi_detections_count: int
+    processing_time_ms: float
+    detections: List[Detection]
+    error: Optional[str] = None
+
+
+class DetectBatchResponse(BaseModel):
+    """Batch detection results for multiple cameras"""
+    status: str
+    total_cameras: int
+    successful: int
+    failed: int
+    results: List[CameraDetectionResult]
+
+
 print("✓ detection.schemas loaded")

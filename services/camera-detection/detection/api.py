@@ -4,9 +4,14 @@ Detection API endpoints.
 from fastapi import APIRouter, HTTPException
 import logging
 import requests
-from typing import Optional, Dict, Any
+import time
+from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from detection.schemas import DetectionRequest, DetectionResponse, DetectionStats
+from detection.schemas import (
+    DetectionRequest, DetectionResponse, DetectionStats,
+    DetectBatchRequest, DetectBatchResponse, CameraDetectionResult
+)
 from detection.service import get_detection_service
 from camera.service import camera_manager
 
@@ -157,6 +162,193 @@ async def detect_objects(request: DetectionRequest):
     print(f"✓ detect_objects completed for {request.camera_id}")
     
     return result
+
+
+def _detect_single_camera(
+    camera_id: str,
+    confidence_threshold: float,
+    iou_threshold: float,
+    classes: Optional[List[int]]
+) -> CameraDetectionResult:
+    """
+    Internal function to run detection on a single camera.
+    Used by batch detection to avoid code duplication.
+    """
+    start_time = time.time()
+    
+    try:
+        # Get camera object
+        camera = camera_manager.get_camera_stream(camera_id)
+        if not camera:
+            return CameraDetectionResult(
+                camera_id=camera_id,
+                status="failed",
+                total_detections_count=0,
+                roi_detections_count=0,
+                processing_time_ms=0,
+                detections=[],
+                error=f"Camera {camera_id} not found or not running"
+            )
+        
+        # Get frame from camera
+        frame = camera.get_frame()
+        if frame is None:
+            return CameraDetectionResult(
+                camera_id=camera_id,
+                status="failed",
+                total_detections_count=0,
+                roi_detections_count=0,
+                processing_time_ms=0,
+                detections=[],
+                error="No frame available"
+            )
+        
+        # Get ROI data from camera
+        roi_points = camera.roi_points if hasattr(camera, 'roi_points') else None
+        roi_mask = camera.roi_mask if hasattr(camera, 'roi_mask') else None
+        
+        # Run detection
+        detection_service = get_detection_service()
+        result = detection_service.detect(
+            frame=frame,
+            camera_id=camera_id,
+            roi_points=roi_points,
+            roi_mask=roi_mask,
+            confidence_threshold=confidence_threshold,
+            iou_threshold=iou_threshold,
+            classes=classes
+        )
+        
+        processing_time_ms = (time.time() - start_time) * 1000
+        
+        return CameraDetectionResult(
+            camera_id=camera_id,
+            status="success",
+            total_detections_count=result.total_detections_count,
+            roi_detections_count=result.roi_detections_count,
+            processing_time_ms=processing_time_ms,
+            detections=result.detections,
+            error=None
+        )
+        
+    except Exception as e:
+        processing_time_ms = (time.time() - start_time) * 1000
+        logger.error(f"Detection failed for camera {camera_id}: {str(e)}")
+        return CameraDetectionResult(
+            camera_id=camera_id,
+            status="failed",
+            total_detections_count=0,
+            roi_detections_count=0,
+            processing_time_ms=processing_time_ms,
+            detections=[],
+            error=str(e)
+        )
+
+
+@router.post("/detect-batch", response_model=DetectBatchResponse)
+async def detect_objects_batch(request: DetectBatchRequest):
+    """
+    Run object detection on multiple cameras concurrently.
+    
+    **Process:**
+    1. Gets list of active cameras (or uses provided camera_ids)
+    2. Runs detection on all cameras in parallel using ThreadPoolExecutor
+    3. Returns combined results for all cameras
+    
+    **Request Body:**
+    - **camera_ids**: Optional list of camera IDs (if None, detects on all active cameras)
+    - **confidence_threshold**: Min confidence (default: 0.5)
+    - **iou_threshold**: IOU for NMS (default: 0.45)
+    - **classes**: Filter specific class IDs (optional)
+    
+    **Response:**
+    - Status and count summary
+    - Individual results for each camera (success or failure)
+    - Processing time per camera
+    
+    **Features:**
+    - Concurrent execution using thread pool
+    - Individual camera failures don't affect other cameras
+    - Optimal for orchestrator to detect on multiple cameras in one call
+    """
+    logger.info(f"Batch detection request for cameras: {request.camera_ids or 'all active'}")
+    
+    # Determine which cameras to process
+    if request.camera_ids:
+        camera_ids = request.camera_ids
+    else:
+        # Get all active cameras
+        camera_list = camera_manager.list_cameras()
+        camera_ids = [cam['camera_id'] for cam in camera_list.get('cameras', [])]
+    
+    if not camera_ids:
+        logger.warning("No cameras available for batch detection")
+        return DetectBatchResponse(
+            status="success",
+            total_cameras=0,
+            successful=0,
+            failed=0,
+            results=[]
+        )
+    
+    logger.info(f"Running batch detection on {len(camera_ids)} cameras")
+    
+    # Run detection on all cameras concurrently
+    results = []
+    max_workers = min(len(camera_ids), 10)  # Cap at 10 concurrent workers
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all detection tasks
+        future_to_camera = {
+            executor.submit(
+                _detect_single_camera,
+                camera_id,
+                request.confidence_threshold,
+                request.iou_threshold,
+                request.classes
+            ): camera_id
+            for camera_id in camera_ids
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_camera):
+            camera_id = future_to_camera[future]
+            try:
+                result = future.result()
+                results.append(result)
+                logger.info(
+                    f"Detection completed for {camera_id}: "
+                    f"{result.total_detections_count} detections, "
+                    f"status: {result.status}"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error processing {camera_id}: {str(e)}")
+                results.append(CameraDetectionResult(
+                    camera_id=camera_id,
+                    status="failed",
+                    total_detections_count=0,
+                    roi_detections_count=0,
+                    processing_time_ms=0,
+                    detections=[],
+                    error=f"Unexpected error: {str(e)}"
+                ))
+    
+    # Calculate summary statistics
+    successful = sum(1 for r in results if r.status == "success")
+    failed = sum(1 for r in results if r.status == "failed")
+    
+    logger.info(
+        f"Batch detection completed: {successful}/{len(camera_ids)} successful, "
+        f"{failed} failed"
+    )
+    
+    return DetectBatchResponse(
+        status="success",
+        total_cameras=len(camera_ids),
+        successful=successful,
+        failed=failed,
+        results=results
+    )
 
 
 @router.get("/stats/{camera_id}", response_model=DetectionStats)
