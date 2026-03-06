@@ -831,12 +831,19 @@ async def execute_pipeline_once(request: PipelineRequest):
             # DEBUG: Log the raw response
             logger.info(f"DEBUG: Camera list response: {camera_list_data}")
             
-            # Extract camera IDs from both single_stream_cameras and multi_stream_cameras
+            # Extract camera IDs - handle different response formats
             camera_ids = []
-            if 'single_stream_cameras' in camera_list_data:
-                camera_ids.extend(camera_list_data['single_stream_cameras'])
-            if 'multi_stream_cameras' in camera_list_data:
-                camera_ids.extend(camera_list_data['multi_stream_cameras'])
+            
+            # Format 1: cameras array with camera objects
+            if 'cameras' in camera_list_data and isinstance(camera_list_data['cameras'], list):
+                camera_ids = [cam['camera_id'] for cam in camera_list_data['cameras'] if 'camera_id' in cam]
+            
+            # Format 2: single_stream_cameras and multi_stream_cameras lists
+            elif 'single_stream_cameras' in camera_list_data or 'multi_stream_cameras' in camera_list_data:
+                if 'single_stream_cameras' in camera_list_data:
+                    camera_ids.extend(camera_list_data['single_stream_cameras'])
+                if 'multi_stream_cameras' in camera_list_data:
+                    camera_ids.extend(camera_list_data['multi_stream_cameras'])
             
             # DEBUG: Log extracted camera IDs
             logger.info(f"DEBUG: Extracted camera_ids: {camera_ids}")
