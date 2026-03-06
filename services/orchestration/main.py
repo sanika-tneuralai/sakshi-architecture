@@ -160,7 +160,7 @@ class PipelineStatus(BaseModel):
 
 class PipelineRequest(BaseModel):
     """Legacy single-shot pipeline execution request"""
-    camera_id: str = Field(..., description="Camera identifier")
+    camera_id: Optional[str] = Field(None, description="Camera identifier (optional - if not provided, processes all active cameras)")
     usecases: Optional[List[str]] = Field(
         None,
         description="List of usecases to evaluate. If None, uses defaults."
@@ -782,18 +782,27 @@ async def get_camera_pipeline_status(camera_id: str):
 @app.post("/pipeline/execute", tags=["pipeline - legacy"], response_model=dict)
 async def execute_pipeline_once(request: PipelineRequest):
     """
-    Execute pipeline once (single-shot, non-continuous).
+    Execute pipeline once for all active cameras (batch processing).
     
     **LEGACY ENDPOINT** - Kept for backward compatibility and testing.
     For production use, prefer `/pipeline/start/{camera_id}` for continuous execution.
     
     This endpoint runs the complete pipeline once and returns results immediately:
-    1. Fetch frame from camera
-    2. Run detection
-    3. Evaluate usecases
-    4. Send alerts
+    1. Get all active cameras (or use specified camera_id)
+    2. Run detection on all cameras (parallel)
+    3. Evaluate usecases for each camera (parallel)
+    4. Send alerts for each camera (parallel)
+    5. Return aggregated results for all cameras
     
-    **Example:**
+    **Example (all cameras):**
+    ```json
+    {
+      "confidence_threshold": 0.5,
+      "usecases": ["person_in_roi", "crowd_in_roi"]
+    }
+    ```
+    
+    **Example (single camera):**
     ```json
     {
       "camera_id": "s1_cam_1",
@@ -803,64 +812,114 @@ async def execute_pipeline_once(request: PipelineRequest):
     ```
     """
     usecases = request.usecases or ["person_in_roi", "crowd_in_roi", "restricted_zone_breach"]
-    
-    logger.info(f"[{request.camera_id}] Single-shot pipeline execution")
+    confidence_threshold = request.confidence_threshold
     
     try:
-        # STEP 1: Fetch frame
-        camera_data = await fetch_frame(request.camera_id)
+        # STEP 1: Get all active cameras (or use provided camera_id)
+        if request.camera_id:
+            camera_ids = [request.camera_id]
+            logger.info(f"Batch pipeline execution for single camera: {request.camera_id}")
+        else:
+            # Call GET /camera/list to get all active cameras
+            response = await http_client.get(
+                f"{CAMERA_DETECTION_URL}/camera/list",
+                timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            camera_list_data = response.json()
+            
+            # Extract camera IDs from both single_stream_cameras and multi_stream_cameras
+            camera_ids = []
+            if 'single_stream_cameras' in camera_list_data:
+                camera_ids.extend(camera_list_data['single_stream_cameras'])
+            if 'multi_stream_cameras' in camera_list_data:
+                camera_ids.extend(camera_list_data['multi_stream_cameras'])
+            
+            if not camera_ids:
+                return {
+                    "status": "no_active_cameras",
+                    "message": "No active cameras found",
+                    "results": []
+                }
+            
+            logger.info(f"Batch pipeline execution for {len(camera_ids)} active cameras: {camera_ids}")
         
-        # STEP 2: Run detection
-        detection_data = await run_detection(request.camera_id, request.confidence_threshold)
+        # STEP 2: Run detection on all cameras in parallel
+        async def process_single_camera(camera_id: str) -> dict:
+            """Process pipeline for a single camera"""
+            try:
+                # Detection
+                detection_data = await run_detection(camera_id, confidence_threshold)
+                
+                # Evaluate usecases
+                usecase_data = await evaluate_usecases(camera_id, detection_data, usecases)
+                
+                # Send alerts (non-critical)
+                try:
+                    alert_data = await send_alerts(camera_id, usecase_data.get('results', []))
+                except Exception as e:
+                    logger.warning(f"[{camera_id}] Alert sending failed (non-critical): {str(e)}")
+                    alert_data = {"alerts_sent": [], "status": "failed"}
+                
+                triggered_usecases = [r for r in usecase_data.get('results', []) if r.get('triggered')]
+                
+                return {
+                    "status": "success",
+                    "camera_id": camera_id,
+                    "pipeline_results": {
+                        "detection": {
+                            "total_detections": detection_data.get('total_detections_count'),
+                            "roi_detections": detection_data.get('roi_detections_count'),
+                            "processing_time_ms": detection_data.get('processing_time_ms')
+                        },
+                        "usecases": {
+                            "evaluated": len(usecase_data.get('results', [])),
+                            "triggered": len(triggered_usecases),
+                            "results": usecase_data.get('results', [])
+                        },
+                        "alerts": {
+                            "sent": len(alert_data.get('alerts_sent', [])),
+                            "details": alert_data.get('alerts_sent', [])
+                        }
+                    }
+                }
+            except Exception as e:
+                logger.error(f"[{camera_id}] Pipeline failed: {str(e)}")
+                return {
+                    "status": "failed",
+                    "camera_id": camera_id,
+                    "error": str(e)
+                }
         
-        # STEP 3: Evaluate usecases
-        usecase_data = await evaluate_usecases(request.camera_id, detection_data, usecases)
+        # Process all cameras in parallel
+        results = await asyncio.gather(
+            *[process_single_camera(camera_id) for camera_id in camera_ids],
+            return_exceptions=False
+        )
         
-        # STEP 4: Send alerts (non-critical)
-        try:
-            alert_data = await send_alerts(request.camera_id, usecase_data.get('results', []))
-        except Exception as e:
-            logger.warning(f"[{request.camera_id}] Alert sending failed (non-critical): {str(e)}")
-            alert_data = {"alerts_sent": [], "status": "failed"}
-        
-        triggered_usecases = [r for r in usecase_data.get('results', []) if r.get('triggered')]
+        # Aggregate results
+        successful_results = [r for r in results if r.get('status') == 'success']
+        failed_results = [r for r in results if r.get('status') == 'failed']
         
         return {
-            "status": "success",
-            "camera_id": request.camera_id,
-            "pipeline_results": {
-                "camera": {
-                    "status": camera_data.get('status'),
-                    "backend": camera_data.get('backend')
-                },
-                "detection": {
-                    "total_detections": detection_data.get('total_detections_count'),
-                    "roi_detections": detection_data.get('roi_detections_count'),
-                    "processing_time_ms": detection_data.get('processing_time_ms')
-                },
-                "usecases": {
-                    "evaluated": len(usecase_data.get('results', [])),
-                    "triggered": len(triggered_usecases),
-                    "results": usecase_data.get('results', [])
-                },
-                "alerts": {
-                    "sent": len(alert_data.get('alerts_sent', [])),
-                    "details": alert_data.get('alerts_sent', [])
-                }
-            }
+            "status": "completed",
+            "total_cameras": len(camera_ids),
+            "successful": len(successful_results),
+            "failed": len(failed_results),
+            "results": results
         }
         
     except httpx.HTTPStatusError as e:
-        logger.error(f"[{request.camera_id}] HTTP error: {e.response.status_code}")
+        logger.error(f"HTTP error: {e.response.status_code}")
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except httpx.ConnectError as e:
-        logger.error(f"[{request.camera_id}] Connection error: {str(e)}")
+        logger.error(f"Connection error: {str(e)}")
         raise HTTPException(status_code=503, detail=f"Service connection failed: {str(e)}")
     except httpx.TimeoutException as e:
-        logger.error(f"[{request.camera_id}] Timeout error: {str(e)}")
+        logger.error(f"Timeout error: {str(e)}")
         raise HTTPException(status_code=504, detail=f"Service timeout: {str(e)}")
     except Exception as e:
-        logger.error(f"[{request.camera_id}] Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
 
 
