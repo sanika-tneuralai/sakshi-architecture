@@ -1,68 +1,82 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  usecase-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: usecase-service
-    ports:
-      - "${PORT:-8001}:8001"
-    environment:
-      # Database Configuration
-      DATABASE_URL: ${DATABASE_URL:-postgresql://goec:goec@postgres:5432/goec}
-      
-      # Service Configuration
-      HOST: ${HOST:-0.0.0.0}
-      PORT: ${PORT:-8001}
-      
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    
-    volumes:
-      # Mount logs directory for persistence
-      - ./logs:/app/logs
-      
-    depends_on:
-      - postgres
-    
-    networks:
-      - goec-network
-    
-    restart: unless-stopped
-    
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
-  # PostgreSQL Database (shared across all services)
-  postgres:
-    image: postgres:15-alpine
-    container_name: goec-postgres
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-goec}
-      POSTGRES_USER: ${POSTGRES_USER:-goec}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goec}
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - goec-network
-    restart: unless-stopped
+      - '5672:5672' #AMQP port (Celery broker)
+      - '15672:15672' #management UI -> http://localhost:15672 (guest/guest)
+
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U goec"]
+      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
       interval: 10s
       timeout: 5s
       retries: 5
+  
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+  worker:
+    build: .
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=usecase_queue
+      --hostname=worker@%h
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    #scale with: docker compose up --scale worker=4
 
-networks:
-  goec-network:
-    driver: bridge
+  flower:
+    build: .
+    command: >
+      celery -A workers.celery_app flower
+      --port=5555
+      --broker=amqp://guest:guest@rabbitmq:5672//
+    ports:
+      - '5555:5555' # Flower UI -> http://localhost:5555
+    depends_on:
+      - rabbitmq
+      - worker
 
-volumes:
-  postgres_data:
-    driver: local
+  usecase:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+    ports:
+      - '8001:8001'
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      USEWORKER_QUEUE: 'true'
+      DATABASE_URL: ${DATABASE_URL}
+
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+
+
+

@@ -4,6 +4,11 @@ A standalone microservice for evaluating business rules against detection data.
 """
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 import logging
 from contextlib import asynccontextmanager
 
