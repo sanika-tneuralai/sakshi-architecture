@@ -1,111 +1,104 @@
 """
-Usecase evaluation service - orchestrates multiple usecase rules.
+Usecase/service.py - Orchestrator. Decides: direct path or queue path?
+
+Two Execution paths:
+1.Async path(default, production):
+submit_usecase_tasks() -> RabbitMQ -> Celery Worker -> Redis -> await results
+Best for 100 camereas, high throughput, parallel execution
+
+2. Direct path(fallback, testing):
+evaluate_all_usecases() -> sequential evaluation in the API process
+Best fir: development without RabbitMQ, unit tests, small deployments
+
+The path is selected by the USE_WORKER_QUEUE env variable. 
+This means you can develop locally without Docker/RabbbitMQ and 
+switch to queue mode in production with a simple environment variable change.
+
+100 cmaeras * 15 usecases = 1500 tasks per poll cycle(every one second)
+
+Async path: 1500 tasks distributed across N workers (camera processing time: slowest usecases)
+Direct path: 1500 evaluations in the API process(sequential per camera)(camera processing time: sum of all usecases, much slower, not scalable, but simple for testing and development)
 """
+
+import os
+import logging
 from typing import Dict, Any, List
-from usecase.rules import get_usecase_rule
-from usecase.schemas import UsecaseResult
 
+from usecase.schemas import UsecaseResult, UsecaseResponse
+from usecase.engine import evaluate_all_usecases
 
-def evaluate_usecases(camera_id: str, detection_output: Dict[str, Any], usecases: List[str]) -> Dict[str, Any]:
+logger = logging.getLogger(__name__)
+
+USE_WORKER_QUEUE = os.getenv("USE_WORKER_QUEUE", "false").lower() == "true"
+
+async def evaluate_usecases_service(
+        camera_id: str,
+        detection_output: Dict[str, Any],
+        usecases: List[str],
+        
+) -> UsecaseResponse:
     """
-    Evaluate multiple usecases against a single detection output.
+    Main service entry point. Routes to queue or direct path.
     
-    This is the orchestrator that:
-    - Takes ONE detection output
-    - Runs MULTIPLE usecase rules on it
-    - Returns aggregated results
+    The async signature even for direct is because the FastAPI endpoints are async. Having an async service function means  the API endpoint doesn't need to know which path is taken. The direct path runs synchronously inside the async function-thats fine for small loads. For heavy loadss, the queue path properly uses asyncio primitives.
     
     Args:
-        camera_id: Camera identifier
-        detection_output: Detection API response (computed ONCE)
-        usecases: List of usecase IDs to evaluate
-        
+        camera_id: the id of the camera that captured the detection
+        detection_output: the full detection output from the camera, which may contain many fields and data that are not relevant for usecase evaluation.
+        usecases: a list of usecase ID to evaluate.
+
     Returns:
-        Dictionary containing:
-            - camera_id: Camera identifier
-            - results: List of UsecaseResult objects
+        UsecaseResponse schema object
     """
-    print(f"\n[ORCHESTRATOR] ============================================================")
-    print(f"[ORCHESTRATOR] USECASE EVALUATION ORCHESTRATOR")
-    print(f"[ORCHESTRATOR] ============================================================")
-    print(f"[ORCHESTRATOR] Camera ID: {camera_id}")
-    print(f"[ORCHESTRATOR] Number of usecases to evaluate: {len(usecases)}")
-    print(f"[ORCHESTRATOR] Usecases: {', '.join(usecases)}")
-    
-    detections = detection_output.get("detections", [])
-    screenshot_path = detection_output.get("screenshot_path")
-    first_detection_id = detection_output.get("first_detection_id")
-    print(f"[ORCHESTRATOR] Detection output contains: {len(detections)} detections")
-    print(f"[ORCHESTRATOR] Screenshot path: {screenshot_path}")
-    print(f"[ORCHESTRATOR] First detection ID: {first_detection_id}")
-    print(f"[ORCHESTRATOR] Detection will be evaluated ONCE for ALL usecases")
-    print(f"[ORCHESTRATOR] ============================================================\n")
-    
-    results = []
-    
-    for idx, usecase_id in enumerate(usecases):
-        print(f"[ORCHESTRATOR] --- Evaluating Usecase {idx+1}/{len(usecases)}: '{usecase_id}' ---")
-        
-        try:
-            # Get the rule instance for this usecase
-            rule = get_usecase_rule(usecase_id)
-            print(f"[ORCHESTRATOR] Rule loaded: {rule.__class__.__name__}")
-            
-            # Evaluate the rule against detection output
-            print(f"[ORCHESTRATOR] Calling rule.evaluate() for '{usecase_id}'...")
-            evaluation_result = rule.evaluate(detection_output)
-            
-            # Build result object
-            result = UsecaseResult(
-                usecase_id=usecase_id,
-                triggered=evaluation_result["triggered"],
-                matched_count=len(evaluation_result["matched_objects"]),
-                matched_objects=evaluation_result["matched_objects"],
-                detection_id=first_detection_id,
-                screenshot_path=screenshot_path
-            )
-            
-            print(f"[ORCHESTRATOR] Usecase '{usecase_id}' result:")
-            print(f"[ORCHESTRATOR]   - Triggered: {result.triggered}")
-            print(f"[ORCHESTRATOR]   - Matched count: {result.matched_count}")
-            
-            results.append(result)
-            
-            # Persist to database
-            try:
-                from shared.database.persistence import persist_usecase_result
-                persist_usecase_result(
-                    camera_id=camera_id,
-                    usecase_name=usecase_id,
-                    triggered=result.triggered,
-                    detection_id=first_detection_id
-                )
-            except Exception as e:
-                print(f"[ORCHESTRATOR] DB Error: {str(e)}")
-            
-        except ValueError as e:
-            print(f"[ORCHESTRATOR] ERROR: {str(e)}")
-            # Skip unknown usecase, don't fail entire evaluation
-            continue
-        except Exception as e:
-            print(f"[ORCHESTRATOR] ERROR: Usecase '{usecase_id}' evaluation failed: {str(e)}")
-            # Skip failed usecase, don't fail entire evaluation
-            continue
-    
-    print(f"\n[ORCHESTRATOR] ============================================================")
-    print(f"[ORCHESTRATOR] ALL USECASES EVALUATED")
-    print(f"[ORCHESTRATOR] Total results: {len(results)}/{len(usecases)}")
-    
-    triggered_count = sum(1 for r in results if r.triggered)
-    print(f"[ORCHESTRATOR] Triggered usecases: {triggered_count}")
-    
-    for result in results:
-        status = "✓ TRIGGERED" if result.triggered else "✗ Not triggered"
-        print(f"[ORCHESTRATOR]   - {result.usecase_id}: {status} ({result.matched_count} matches)")
-    
-    print(f"[ORCHESTRATOR] ============================================================\n")
-    
-    return {
-        "camera_id": camera_id,
-        "results": results
-    }
+
+    logger.info(f"[SERVICE] Evaluating usecases for camera_id={camera_id}, usecases={usecases}, queue_mode={USE_WORKER_QUEUE}")
+
+    if USE_WORKER_QUEUE:
+        results = await _queue_path(camera_id, detection_output, usecases)
+    else:
+        results = _direct_path(camera_id, detection_output, usecases)
+    return UsecaseResponse(
+        camera_id=camera_id,
+        results=results)
+
+
+async def _queue_path(
+        camera_id: str,
+        detection_output: Dict[str, Any],
+        usecases: List[str],) -> List[UsecaseResult]:
+    """
+    Submit tasks to RabbitMQ workers and wait for results.
+    If RabbitMQ/Redis aren't running, importing workers.queue at module level would crash the entire service on startup. Lazy import means the service starts fine and only fails when actually trying to use the queue. This make development without docker much easier.
+    """
+    from workers.queue import submit_usecase_tasks, await_usecase_results
+
+    task_handles = submit_usecase_tasks(camera_id=camera_id, detection_output=detection_output, usecases=usecases)
+
+    results = await await_usecase_results(task_handles = task_handles,
+    camera_id=camera_id)
+    return results
+
+def _direct_path(
+        camera_id: str,
+        detection_output: Dict[str, Any],
+        usecases: List[str],) -> List[UsecaseResult]:
+    """
+    Evaluate usecases directly in the API process (no queue). 
+
+    Why this uses the same engine as the queue path. 
+    evaluate_all_usecases() calls the evaluate_single_uusecase() in a loop.
+    evaluate_usecase_task(the celery task) also calls evaluate_single_usecase().
+
+    same engine function -> identical behavior-> no behavioral divergence between dev and production. If you have different logic in the direct path vs the queue path, you might end up with bugs that only appear in production and are hard to debug. By using the same engine function for both paths, you ensure that the core logic is consistent regardless of how it's executed.
+    """
+    return evaluate_all_usecases(
+        camera_id = camera_id,
+        detection_output = detection_output,
+        usecases = usecases,
+    )
+
+
+  
+
+                                          
+
