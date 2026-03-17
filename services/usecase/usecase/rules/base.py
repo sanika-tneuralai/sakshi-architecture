@@ -1,22 +1,29 @@
 """
-Base class for all usecase rules.
+Abstract Base class for all usecase rules.
+Added USECASE_ID class attribute.
+
+If the ID is a class attribute, the registry scanner can read it Withour instantiating the class. This means:
+-Discover has no side effects
+-failed instantiation doesn't hide a valid registration
+-The ID is part of the class contract, not runtime state
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import ClassVar, Dict, Any, List
 
 
 class BaseUsecaseRule(ABC):
     """
-    Abstract base class for usecase rules.
-    
-    Each usecase rule must:
-    - Accept detection_output
-    - Return triggered (bool) and matched_objects (list)
-    - Never access camera streams
-    - Never access ROI geometry
-    - Never call external APIs
+    Abstract base for all usecase rules.
+    CONTRACT (what every subcalss must provide):
+    USECASE_ID: classVar[str] - uunique string ID for auto-discovery
+    evaluate() - evaluation logic
     """
-    
+    # subclass must define thhis as a classs level string
+    # example: USECASE_ID = 'person_in_roi'
+    # the auto-discovery scanner reads this without instantiating the class
+
+    USECASE_ID: ClassVar[str]
+
     def __init__(self, usecase_id: str):
         """
         Initialize the usecase rule.
@@ -34,6 +41,7 @@ class BaseUsecaseRule(ABC):
         
         Args:
             detection_output: Detection API response containing detections with in_roi flags
+            each detection has: class_name, confidence, in_roi,bbox
             
         Returns:
             Dictionary containing:
@@ -53,3 +61,31 @@ class BaseUsecaseRule(ABC):
             List of detection objects
         """
         return detection_output.get("detections", [])
+
+    def get_in_roi_detections(self,detection_output: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Helper: extract only detections that are inside ROI.
+
+        Most rules filter by in_roi=True as their first step.
+        This reduces boilerplate in each rules evaluate() method.
+
+        """
+        return [d for d in self.get_detections(detection_output) if d.get("in_roi", False)]
+    
+    def get_in_roi_by_class(
+            self,
+            detection_output: Dict[str, Any],
+            class_names: List[str],
+            ) -> List[Dict[str, Any]]:
+            """
+            Helper: get dtections inside ROI matching specific class names.
+
+            Args:
+                detection_output: ddetection payload
+                class_names: list of class names to watch, e.g ['person'] or ['car,'truck']
+            Returns:
+            List of matching detections inside ROI
+            """
+
+            return[
+                 d for d in self.get_in_roi_detections(detection_output) if d.get("class_name", "") in class_names]
