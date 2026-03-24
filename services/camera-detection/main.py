@@ -41,9 +41,12 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     log_system_info()
     
-    # Initialize database
-    init_db()
-    logger.info("Database initialized")
+    # Initialize database (non-fatal — service can run without DB)
+    try:
+        init_db()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.warning(f"Database initialization failed (continuing without DB): {e}")
     
     # Log GStreamer info
     try:
