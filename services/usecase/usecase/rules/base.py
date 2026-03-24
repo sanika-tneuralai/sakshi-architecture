@@ -62,30 +62,33 @@ class BaseUsecaseRule(ABC):
         """
         return detection_output.get("detections", [])
 
-    def get_in_roi_detections(self,detection_output: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def get_in_roi_detections(self, detection_output: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Helper: extract only detections that are inside ROI.
+        Helper: returns all detections.
 
-        Most rules filter by in_roi=True as their first step.
-        This reduces boilerplate in each rules evaluate() method.
-
+        ROI has been removed from the detection service — all detections are
+        now evaluated regardless of position. This method is kept for
+        backward compatibility with existing rules.
         """
-        return [d for d in self.get_detections(detection_output) if d.get("in_roi", False)]
-    
+        return self.get_detections(detection_output)
+
     def get_in_roi_by_class(
             self,
             detection_output: Dict[str, Any],
             class_names: List[str],
             ) -> List[Dict[str, Any]]:
             """
-            Helper: get dtections inside ROI matching specific class names.
+            Helper: get detections matching specific class names.
+
+            ROI filtering removed — returns all detections of the given classes.
 
             Args:
-                detection_output: ddetection payload
-                class_names: list of class names to watch, e.g ['person'] or ['car,'truck']
+                detection_output: detection payload
+                class_names: list of class names to match, e.g ['person'] or ['car', 'truck']
             Returns:
-            List of matching detections inside ROI
+                List of matching detections
             """
-
-            return[
-                 d for d in self.get_in_roi_detections(detection_output) if d.get("class_name", "") in class_names]
+            return [
+                d for d in self.get_detections(detection_output)
+                if d.get("class_name", "") in class_names
+            ]

@@ -124,12 +124,12 @@ def _safe_default_result(usecase_id:str, task_id: str) -> UsecaseResult:
         f'[Queue] Returning safe default result for usecase_id={usecase_id}, task_id={task_id}'
     )
     return UsecaseResult(
-        usecase_id=usecase_id, task_id=task_id,
+        usecase_id=usecase_id,
         triggered=False,
         matched_count=0,
         matched_objects=[],
         detection_id=None,
-        screenshot_path=None)
+        snapshot_b64=None)
     
 def get_task_status(task_id: str) -> Dict[str, Any]:
     """

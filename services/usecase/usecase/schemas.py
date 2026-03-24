@@ -19,7 +19,7 @@ class UsecaseResult(BaseModel):
     matched_count: int = Field(..., description="Number of matched objects")
     matched_objects: List[dict] = Field(default_factory=list, description="Objects that matched the rule")
     detection_id: Optional[int] = Field(None, description="ID of associated detection")
-    screenshot_path: Optional[str] = Field(None, description="Path to detection screenshot")
+    snapshot_b64: Optional[str] = Field(None, description="Base64 JPEG snapshot from detection (only when detections > 0)")
 
 
 class UsecaseResponse(BaseModel):

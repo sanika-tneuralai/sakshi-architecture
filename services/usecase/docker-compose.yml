@@ -72,7 +72,7 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
-      USEWORKER_QUEUE: 'true'
+      USE_WORKER_QUEUE: 'true'
       DATABASE_URL: ${DATABASE_URL}
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -9,33 +9,31 @@ logger = logging.getLogger(__name__)
 
 def _slim_detection(detetion: Dict[str, Any]):
     """
-    strip a detection dict down to only the fields usecase rules need.
-    bcoz the detection output contains bbox, coord, raw tensors, and other data that rules never use.
-
-    Rules need : class_name, confidence, in_roi, bbox is included for dashboard/alert display purpose.
+    Strip a detection dict down to only the fields usecase rules need.
+    ROI has been removed from the detection service — rules now evaluate
+    against all detections regardless of position.
     """
     return {
         "class_name": detetion.get("class_name"),
         "confidence": detetion.get("confidence"),
-        "in_roi": detetion.get("in_roi", False),
         "bbox": detetion.get("bbox", {})
     }
 
-def build_slim_payload(detection_output:Dict[str, Any]) -> Dict[str, Any]:
+def build_slim_payload(detection_output: Dict[str, Any]) -> Dict[str, Any]:
     """
-   Build a slim version of the detection ouptut for queueing.
-   The orchestrator or API calls this once before submitting the tasks.
-   Each celery task then receives this slim payload instead of the full detection output.
-   You build it once, reuse across all 15 tasks.
-    
-    Args: detection_output: The full detection output from the camera. which may contain many fields and data that are not relevant for usecase evaluation.
+    Build a slim version of the detection output for queueing.
+    The orchestrator or API calls this once before submitting the tasks.
+    Each celery task then receives this slim payload instead of the full detection output.
+    You build it once, reuse across all tasks.
+
+    Args: detection_output: The full detection output from the camera.
 
     Returns: slim dict with only what usecase rules need.
     """
     raw_detections = detection_output.get("detections", [])
-    return{
+    return {
         "detections": [_slim_detection(d) for d in raw_detections],
-        "screenshot_path": detection_output.get("screenshot_path"),
+        "snapshot_b64": detection_output.get("snapshot_b64"),
         "first_detection_id": detection_output.get("first_detection_id"),
         "camera_id": detection_output.get("camera_id")
     }
@@ -70,12 +68,12 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
         slim_matched = [_slim_detection(d) for d in matched]
 
         result = UsecaseResult(
-            usecase_id = usecase_id,
-            triggered = evaluation.get("triggered", False),
+            usecase_id=usecase_id,
+            triggered=evaluation.get("triggered", False),
             matched_count=len(matched),
             matched_objects=slim_matched,
             detection_id=slim_payload.get("first_detection_id"),
-            screenshot_path=slim_payload.get("screenshot_path"),
+            snapshot_b64=slim_payload.get("snapshot_b64"),
         )
         logger.info(
             f"[ENGINE] Usecase '{usecase_id}' evaluation completed. Triggered: {result.triggered}, Matched Count: {result.matched_count}, Matched Objects: {result.matched_objects}"
