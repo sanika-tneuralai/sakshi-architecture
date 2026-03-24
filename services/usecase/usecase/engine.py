@@ -83,16 +83,6 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
         return result
     
     except Exception as e:
-        logger.error(f"[ENGINE] Unknown usecase '{usecase_id}': {e}")
-        return UsecaseResult(
-            usecase_id=usecase_id,
-            triggered=False,
-            matched_count=0,
-            matched_objects=[],
-            detection_id=slim_payload.get("first_detection_id"),
-            screenshot_path=slim_payload.get("screenshot_path"),
-        )
-    except Exception as e:
         logger.exception(f"[ENGINE] Error evaluating usecase '{usecase_id}': {e}")
         raise
 

@@ -86,7 +86,7 @@ async def await_usecase_results(
         try:
             result_dict = await asyncio.to_thread(
                 handle.get,
-                timeout=asyncio.timeout,
+                timeout=timeeout,
                 propagate=False,
             )
 
