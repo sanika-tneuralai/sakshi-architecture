@@ -1,0 +1,28 @@
+# Edge requirements — Hailo backend only (INFERENCE_BACKEND=hailo)
+# Use this instead of requirements.txt on Hailo-equipped edge devices.
+# Removes torch/ultralytics to keep the image lightweight.
+
+# API Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+requests==2.31.0
+
+# System Utilities
+psutil==5.9.8
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# Core numeric
+numpy==1.26.4
+
+# OpenCV (headless for server deployment)
+opencv-python-headless==4.10.0.84
+
+# ultralytics==8.3.40  # NOT needed — Hailo backend does not use PyTorch/YOLO
+
+# hailo_platform is NOT on PyPI — install via HailoRT SDK.
+# Place your compiled .hef file in ./models/ and set HAILO_HEF_PATH=./models/your_model.hef

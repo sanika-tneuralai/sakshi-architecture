@@ -86,6 +86,44 @@ class Config:
     def use_gpu() -> bool:
         """Whether to use GPU for inference"""
         return os.getenv("USE_GPU", "true").lower() in ("true", "1", "yes")
+
+    # ==================== Inference Backend ====================
+    @staticmethod
+    def get_inference_backend() -> str:
+        """
+        Inference backend to use.
+        Options: 'pytorch' (default) | 'hailo'
+        Controlled via INFERENCE_BACKEND env var.
+        """
+        return os.getenv("INFERENCE_BACKEND", "pytorch").lower().strip()
+
+    # ==================== Hailo Settings ====================
+    @staticmethod
+    def get_hailo_hef_path() -> str:
+        """Path to compiled Hailo .hef model file.
+        Defaults to ./models/yolo11n.hef relative to the project root.
+        Override via HAILO_HEF_PATH env var.
+        """
+        default_path = str(Config.get_models_dir() / "yolo11n.hef")
+        return os.getenv("HAILO_HEF_PATH", default_path)
+
+    @staticmethod
+    def get_hailo_input_width() -> int:
+        """Hailo model input width (must match the compiled .hef)"""
+        return int(os.getenv("HAILO_INPUT_WIDTH", "640"))
+
+    @staticmethod
+    def get_hailo_input_height() -> int:
+        """Hailo model input height (must match the compiled .hef)"""
+        return int(os.getenv("HAILO_INPUT_HEIGHT", "640"))
+
+    @staticmethod
+    def get_hailo_labels_path() -> Optional[str]:
+        """
+        Path to a labels .txt file (one class name per line).
+        Falls back to built-in COCO-80 names when not set.
+        """
+        return os.getenv("HAILO_LABELS_PATH")
     
     # ==================== API Settings ====================
     @staticmethod

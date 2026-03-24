@@ -390,16 +390,11 @@ async def detection_health():
     """
     try:
         detection_service = get_detection_service()
-        device_info = {
-            "device": detection_service.device,
-            "model_path": detection_service.model_path,
-            "model_loaded": detection_service.model is not None
-        }
         print("✓ detection_health completed")
         return {
             "status": "healthy",
             "service": "detection",
-            **device_info
+            "backend": detection_service._detector.backend_name,
         }
     except Exception as e:
         logger.error(f"Detection health check failed: {e}")

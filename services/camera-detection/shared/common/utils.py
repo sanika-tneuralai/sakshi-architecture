@@ -5,7 +5,7 @@ These utilities are standalone and can be used across all services.
 import logging
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional, Dict
+from typing import Tuple, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -93,38 +93,6 @@ def resize_frame(frame: np.ndarray, width: int, height: int,
         return frame
 
 
-def preprocess_frame_for_detection(frame: np.ndarray, 
-                                   target_size: Optional[Tuple[int, int]] = None,
-                                   normalize: bool = False) -> np.ndarray:
-    """
-    Preprocess frame for object detection
-    
-    Args:
-        frame: Input frame
-        target_size: Optional (width, height) for resizing
-        normalize: Whether to normalize pixel values to [0, 1]
-    
-    Returns:
-        Preprocessed frame
-    """
-    try:
-        processed = frame.copy()
-        
-        # Resize if needed
-        if target_size:
-            processed = cv2.resize(processed, target_size, interpolation=cv2.INTER_AREA)
-        
-        # Normalize
-        if normalize:
-            processed = processed.astype(np.float32) / 255.0
-        
-        return processed
-        
-    except Exception as e:
-        logger.error(f"Failed to preprocess frame: {str(e)}")
-        return frame
-
-
 def format_timestamp(timestamp: Optional[float] = None) -> str:
     """
     Format timestamp to ISO format
@@ -140,120 +108,6 @@ def format_timestamp(timestamp: Optional[float] = None) -> str:
     else:
         result = datetime.fromtimestamp(timestamp).isoformat()
     return result
-
-
-def calculate_grid_layout(num_items: int) -> Tuple[int, int]:
-    """
-    Calculate optimal grid layout (rows, cols) for tiling
-    
-    Args:
-        num_items: Number of items to arrange
-    
-    Returns:
-        Tuple of (rows, cols)
-    """
-    rows = int(np.ceil(np.sqrt(num_items)))
-    cols = int(np.ceil(num_items / rows))
-    return rows, cols
-
-
-def get_frame_metadata(frame: np.ndarray, camera_id: str, 
-                       frame_count: int, timestamp: Optional[float] = None) -> Dict:
-    """
-    Extract frame metadata
-    
-    Args:
-        frame: Input frame
-        camera_id: Camera identifier
-        frame_count: Current frame number
-        timestamp: Frame timestamp
-    
-    Returns:
-        Dictionary with frame metadata
-    """
-    h, w = frame.shape[:2]
-    channels = frame.shape[2] if len(frame.shape) > 2 else 1
-    
-    result = {
-        'camera_id': camera_id,
-        'frame_count': frame_count,
-        'timestamp': format_timestamp(timestamp),
-        'width': w,
-        'height': h,
-        'channels': channels,
-        'dtype': str(frame.dtype),
-        'size_bytes': frame.nbytes
-    }
-    return result
-
-
-class PerformanceMonitor:
-    """Monitor and track performance metrics"""
-    
-    def __init__(self, window_size: int = 100):
-        """
-        Initialize performance monitor
-        
-        Args:
-            window_size: Number of recent frames to track for FPS calculation
-        """
-        self.window_size = window_size
-        self.frame_times = []
-        self.start_time = datetime.now()
-        
-    def add_frame(self):
-        """Record a frame processing time"""
-        current_time = datetime.now().timestamp()
-        self.frame_times.append(current_time)
-        
-        # Keep only recent frames
-        if len(self.frame_times) > self.window_size:
-            self.frame_times.pop(0)
-    
-    def get_fps(self) -> float:
-        """
-        Calculate current FPS based on recent frames
-        
-        Returns:
-            Current FPS value
-        """
-        if len(self.frame_times) < 2:
-            return 0.0
-        
-        time_diff = self.frame_times[-1] - self.frame_times[0]
-        if time_diff <= 0:
-            return 0.0
-        
-        return (len(self.frame_times) - 1) / time_diff
-    
-    def get_uptime(self) -> float:
-        """
-        Get uptime in seconds
-        
-        Returns:
-            Uptime in seconds since monitor creation
-        """
-        return (datetime.now() - self.start_time).total_seconds()
-    
-    def get_stats(self) -> Dict:
-        """
-        Get performance statistics
-        
-        Returns:
-            Dictionary with FPS, uptime, and frame count
-        """
-        result = {
-            'fps': round(self.get_fps(), 2),
-            'uptime_seconds': round(self.get_uptime(), 2),
-            'total_frames': len(self.frame_times),
-            'window_size': self.window_size
-        }
-        return result
-    
-    def reset(self):
-        """Reset the performance monitor"""
-        self.frame_times = []
-        self.start_time = datetime.now()
 
 
 def log_system_info():

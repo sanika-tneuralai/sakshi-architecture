@@ -41,32 +41,4 @@ def select_device(prefer_gpu: bool = True) -> DeviceType:
         return "cpu"
 
 
-def get_device_info() -> dict:
-    """
-    Get detailed information about the selected device.
-    
-    Returns:
-        Dictionary with device information
-    """
-    info = {
-        "device": "cpu",
-        "gpu_available": False,
-        "gpu_name": None,
-        "gpu_memory_gb": None
-    }
-    
-    try:
-        import torch
-        if torch.cuda.is_available():
-            info["device"] = "cuda"
-            info["gpu_available"] = True
-            info["gpu_name"] = torch.cuda.get_device_name(0)
-            info["gpu_memory_gb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
-    except ImportError:
-        pass
-    
-    print(f"✓ get_device_info completed: {info['device']}")
-    return info
-
-
 print("✓ detection.device module loaded")
