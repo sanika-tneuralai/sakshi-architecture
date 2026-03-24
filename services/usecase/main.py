@@ -41,12 +41,15 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Usecase Evaluation Service")
     logger.info("=" * 60)
     
-    # Initialize database
-    try:
-        init_db()
-        logger.info("✓ Database initialized")
-    except Exception as e:
-        logger.error(f"✗ Database initialization failed: {str(e)}")
+    # Initialize database (optional — only if DATABASE_URL is configured)
+    if os.getenv("DATABASE_URL"):
+        try:
+            init_db()
+            logger.info("✓ Database initialized")
+        except Exception as e:
+            logger.error(f"✗ Database initialization failed: {str(e)}")
+    else:
+        logger.info("⚠ DATABASE_URL not set — skipping database initialization")
     
     logger.info("✓ Usecase service started successfully")
     
