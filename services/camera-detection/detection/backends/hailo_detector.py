@@ -114,15 +114,16 @@ class HailoDetector(BaseDetector):
 
             preprocessed = self._preprocess(frame)
 
-            with InferVStreams(
-                self._network_group,
-                self._input_vstreams_params,
-                self._output_vstreams_params,
-            ) as pipeline:
-                input_data = {
-                    self._input_name: np.expand_dims(preprocessed, axis=0)
-                }
-                raw_output = pipeline.infer(input_data)
+            with self._network_group.activate():
+                with InferVStreams(
+                    self._network_group,
+                    self._input_vstreams_params,
+                    self._output_vstreams_params,
+                ) as pipeline:
+                    input_data = {
+                        self._input_name: np.expand_dims(preprocessed, axis=0)
+                    }
+                    raw_output = pipeline.infer(input_data)
 
             detections = self._postprocess(
                 raw_output,
