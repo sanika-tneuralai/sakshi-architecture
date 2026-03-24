@@ -39,7 +39,7 @@ class DetectionResponse(BaseModel):
     total_detections_count: int = Field(..., description="Total number of detections")
     processing_time_ms: float = Field(..., description="Detection processing time in milliseconds")
     first_detection_id: Optional[int] = Field(None, description="ID of first persisted detection")
-    screenshot_path: Optional[str] = Field(None, description="Path to detection screenshot")
+    snapshot_b64: Optional[str] = Field(None, description="Base64 JPEG snapshot of frame with detections (only when detections > 0)")
 
 
 class DetectionStats(BaseModel):
@@ -67,6 +67,7 @@ class CameraDetectionResult(BaseModel):
     processing_time_ms: float
     detections: List[Detection]
     error: Optional[str] = None
+    snapshot_b64: Optional[str] = Field(None, description="Base64 JPEG snapshot of frame with detections (only when detections > 0)")
 
 
 class DetectBatchResponse(BaseModel):

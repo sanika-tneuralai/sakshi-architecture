@@ -5,6 +5,8 @@ from fastapi import APIRouter, HTTPException
 import logging
 import requests
 import time
+import cv2
+import base64
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -148,10 +150,15 @@ async def detect_objects(request: DetectionRequest):
     print(f"[DETECTION API]   - Processing time: {result.processing_time_ms}ms")
 
     logger.info(f"Detection completed: {result.total_detections_count} detections")
-    
+
+    if result.total_detections_count > 0:
+        resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
+        _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        result.snapshot_b64 = base64.b64encode(buffer).decode('utf-8')
+
     print(f"[DETECTION API] ✓ Detection completed\n")
     print(f"✓ detect_objects completed for {request.camera_id}")
-    
+
     return result
 
 
@@ -203,14 +210,21 @@ def _detect_single_camera(
         )
         
         processing_time_ms = (time.time() - start_time) * 1000
-        
+
+        snapshot_b64 = None
+        if result.total_detections_count > 0:
+            resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
+            _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            snapshot_b64 = base64.b64encode(buffer).decode('utf-8')
+
         return CameraDetectionResult(
             camera_id=camera_id,
             status="success",
             total_detections_count=result.total_detections_count,
             processing_time_ms=processing_time_ms,
             detections=result.detections,
-            error=None
+            error=None,
+            snapshot_b64=snapshot_b64
         )
         
     except Exception as e:
