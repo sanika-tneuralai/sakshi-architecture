@@ -53,10 +53,10 @@ screenshots/*.png
 !screenshots/.gitkeep
 screenshots/ 
 
-# Models (can be large)
-# Uncomment if you don't want to commit models
-# models/*.pt
-# models/*.onnx
+# Models (can be large) — do not commit binaries
+models/*.pt
+models/*.onnx
+models/*.hef
 
 # Docker
 .dockerignore

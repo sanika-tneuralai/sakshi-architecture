@@ -110,18 +110,12 @@ class HailoDetector(BaseDetector):
         classes: Optional[List[int]],
     ) -> List[Detection]:
         try:
-            from hailo_platform import InferVStreams, ConfigureParams
+            from hailo_platform import InferVStreams
 
             preprocessed = self._preprocess(frame)
 
-            configured_network = self._network_group.configure(
-                ConfigureParams.create_from_network_group(
-                    self._network_group, interface=None
-                )
-            )
-
             with InferVStreams(
-                configured_network,
+                self._network_group,
                 self._input_vstreams_params,
                 self._output_vstreams_params,
             ) as pipeline:
