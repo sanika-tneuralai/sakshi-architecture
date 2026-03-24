@@ -26,7 +26,7 @@ import sys
 import os
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Any
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -453,23 +453,29 @@ class PipelineManager:
                 
                 logger.debug(f"[{camera_id}] Iteration {iteration} starting")
                 
-                # STEP 1: Fetch frame
-                camera_data = await fetch_frame(camera_id)
-                logger.debug(f"[{camera_id}] Frame fetched | status={camera_data.get('status')}")
-                
-                # STEP 2: Run detection
+                # STEP 1: Run detection (detection service fetches its own frame internally)
                 detection_data = await run_detection(camera_id, config.confidence_threshold)
                 total_det = detection_data.get('total_detections_count', 0)
-                roi_det = detection_data.get('roi_detections_count', 0)
-                logger.debug(f"[{camera_id}] Detection complete | total={total_det} | roi={roi_det}")
-                
-                # STEP 3: Evaluate usecases
+                logger.debug(f"[{camera_id}] Detection complete | total={total_det}")
+
+                # Cache snapshot if detections found
+                if total_det > 0 and detection_data.get('snapshot_b64'):
+                    detection_snapshots[camera_id] = {
+                        "camera_id": camera_id,
+                        "frame_b64": detection_data['snapshot_b64'],
+                        "timestamp": detection_data.get('timestamp'),
+                        "detections": detection_data.get('detections', []),
+                        "detection_count": total_det
+                    }
+                    logger.debug(f"[{camera_id}] Snapshot cached ({total_det} detections)")
+
+                # STEP 2: Evaluate usecases
                 usecase_data = await evaluate_usecases(camera_id, detection_data, config.usecases)
                 results = usecase_data.get('results', [])
                 triggered = [r for r in results if r.get('triggered')]
                 logger.debug(f"[{camera_id}] Usecases evaluated | triggered={len(triggered)}/{len(results)}")
                 
-                # STEP 4: Send alerts (non-critical, don't fail on error)
+                # STEP 3: Send alerts (non-critical, don't fail on error)
                 try:
                     alert_data = await send_alerts(camera_id, results)
                     alerts_sent = len(alert_data.get('alerts_sent', []))
@@ -530,6 +536,9 @@ class PipelineManager:
 
 # Global pipeline manager
 pipeline_manager: Optional[PipelineManager] = None
+
+# In-memory detection snapshot store: {camera_id: {frame_b64, timestamp, detections, detection_count}}
+detection_snapshots: Dict[str, Dict[str, Any]] = {}
 
 
 # =============================================================================
@@ -867,7 +876,18 @@ async def execute_pipeline_once(request: PipelineRequest):
                 # Detection
                 logger.info(f"DEBUG: [{camera_id}] Calling run_detection...")
                 detection_data = await run_detection(camera_id, confidence_threshold)
-                logger.info(f"DEBUG: [{camera_id}] Detection completed: {detection_data.get('total_detections_count', 0)} detections")
+                total_det = detection_data.get('total_detections_count', 0)
+                logger.info(f"DEBUG: [{camera_id}] Detection completed: {total_det} detections")
+
+                # Cache snapshot if detections found
+                if total_det > 0 and detection_data.get('snapshot_b64'):
+                    detection_snapshots[camera_id] = {
+                        "camera_id": camera_id,
+                        "frame_b64": detection_data['snapshot_b64'],
+                        "timestamp": detection_data.get('timestamp'),
+                        "detections": detection_data.get('detections', []),
+                        "detection_count": total_det
+                    }
                 
                 # Evaluate usecases
                 logger.info(f"DEBUG: [{camera_id}] Calling evaluate_usecases...")
@@ -891,7 +911,6 @@ async def execute_pipeline_once(request: PipelineRequest):
                     "pipeline_results": {
                         "detection": {
                             "total_detections": detection_data.get('total_detections_count'),
-                            "roi_detections": detection_data.get('roi_detections_count'),
                             "processing_time_ms": detection_data.get('processing_time_ms')
                         },
                         "usecases": {
@@ -947,6 +966,43 @@ async def execute_pipeline_once(request: PipelineRequest):
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
+
+
+@app.get("/snapshots/{camera_id}", tags=["snapshots"])
+async def get_detection_snapshot(camera_id: str):
+    """
+    Get the latest detection snapshot for a camera.
+
+    Returns the most recent frame (base64 JPEG) where detections were found.
+    Returns 404 if no detection has occurred yet for this camera.
+
+    **Used by dashboard to display detection screenshots.**
+    """
+    snap = detection_snapshots.get(camera_id)
+    if not snap:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No detection snapshot available for camera {camera_id}"
+        )
+    return snap
+
+
+@app.get("/snapshots", tags=["snapshots"])
+async def list_detection_snapshots():
+    """
+    List all cameras that have detection snapshots cached.
+    """
+    return {
+        "total": len(detection_snapshots),
+        "cameras": [
+            {
+                "camera_id": cam_id,
+                "timestamp": snap.get("timestamp"),
+                "detection_count": snap.get("detection_count")
+            }
+            for cam_id, snap in detection_snapshots.items()
+        ]
+    }
 
 
 @app.get("/health", tags=["health"])
@@ -1027,6 +1083,8 @@ async def root():
             "status_all": "GET /pipeline/status",
             "status_single": "GET /pipeline/status/{camera_id}",
             "execute_once": "POST /pipeline/execute (legacy)",
+            "snapshot_single": "GET /snapshots/{camera_id}",
+            "snapshot_list": "GET /snapshots",
             "health": "GET /health"
         },
         "configured_services": {
