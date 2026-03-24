@@ -212,9 +212,13 @@ class HailoDetector(BaseDetector):
         class_ids: List[int] = []
 
         for tensor in raw_output.values():
+            tensor = np.array(tensor)
             # tensor shape: (1, num_anchors, 5 + num_classes) or (num_anchors, 5 + num_classes)
             if tensor.ndim == 3:
                 tensor = tensor[0]  # remove batch dim
+
+            if tensor.ndim < 2 or tensor.shape[-1] < 6:
+                continue
 
             num_classes = tensor.shape[1] - 5
 
