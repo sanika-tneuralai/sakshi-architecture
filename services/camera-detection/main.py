@@ -1,5 +1,9 @@
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load .env file before anything else reads environment variables
+load_dotenv()
 
 # Add DeepStream path FIRST, before any other imports
 deepstream_path = os.getenv('DEEPSTREAM_PATH', '/opt/nvidia/deepstream/deepstream-6.4/lib')
