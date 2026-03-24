@@ -104,7 +104,7 @@ class Config:
         Defaults to ./models/yolo11n.hef relative to the project root.
         Override via HAILO_HEF_PATH env var.
         """
-        default_path = str(Config.get_models_dir() / "yolo11n.hef")
+        default_path = str(Config.get_models_dir() / "yolov8n.hef")
         return os.getenv("HAILO_HEF_PATH", default_path)
 
     @staticmethod
