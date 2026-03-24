@@ -33,13 +33,16 @@ class CameraManager:
         camera = OpenCVCamera(
             camera_id=config.camera_id,
             rtsp_url=config.rtsp_url,
-            fps=config.fps,
-            roi_points=config.roi_points
+            fps=config.fps
         )
         
-        await camera.start()
+        try:
+            await camera.start()
+        except Exception as e:
+            raise ValueError(f"Failed to start camera {config.camera_id}: {e}") from e
+
         self.single_cameras[config.camera_id] = camera
-        
+
         logger.info(f"Started single camera: {config.camera_id}")
         logger.info(f"✓ CameraManager.start_single_camera completed for {config.camera_id}")
         return True
@@ -133,7 +136,6 @@ class CameraManager:
                 'status': 'running' if status_dict.get('is_running') else 'stopped',
                 'fps': status_dict.get('fps', 5),
                 'frame_count': status_dict.get('frame_count', 0),
-                'has_roi_mask': hasattr(camera, 'roi_mask') and camera.roi_mask is not None,
                 'rtsp_url': status_dict.get('rtsp_url', ''),
                 'backend': status_dict.get('backend', 'opencv-ffmpeg')
             })
@@ -148,7 +150,6 @@ class CameraManager:
                         'status': 'running' if status_dict.get('is_running') else 'stopped',
                         'fps': status_dict.get('fps', 5),
                         'frame_count': status_dict.get('frame_count', 0),
-                        'has_roi_mask': False,  # Multi-stream ROI info may vary
                         'rtsp_url': status_dict.get('rtsp_url', ''),
                         'backend': 'deepstream-multi'
                     })

@@ -31,6 +31,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.genv/
+
 
 # IDEs
 .vscode/
@@ -49,6 +51,7 @@ camera_detection_api.log
 screenshots/*.jpg
 screenshots/*.png
 !screenshots/.gitkeep
+screenshots/ 
 
 # Models (can be large)
 # Uncomment if you don't want to commit models

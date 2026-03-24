@@ -11,54 +11,6 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def create_roi_mask(roi_points: List[List[float]], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
-    """
-    Create binary mask from polygon ROI points
-    
-    Args:
-        roi_points: List of [x, y] coordinates defining the polygon
-        frame_shape: Tuple of (height, width)
-    
-    Returns:
-        Binary mask as numpy array or None if invalid
-    """
-    if not roi_points or len(roi_points) < 3:
-        logger.warning("ROI points must have at least 3 points to form a polygon")
-        return None
-    
-    try:
-        mask = np.zeros(frame_shape, dtype=np.uint8)
-        points = np.array(roi_points, dtype=np.int32)
-        cv2.fillPoly(mask, [points], 255)
-        logger.debug(f"ROI mask created with {len(roi_points)} points")
-        return mask
-    except Exception as e:
-        logger.error(f"Failed to create ROI mask: {str(e)}")
-        return None
-
-
-def apply_roi_to_frame(frame: np.ndarray, roi_mask: np.ndarray) -> np.ndarray:
-    """
-    Apply ROI mask to frame
-    
-    Args:
-        frame: Input frame
-        roi_mask: Binary mask
-    
-    Returns:
-        Masked frame
-    """
-    if roi_mask is None:
-        return frame
-    
-    try:
-        result = cv2.bitwise_and(frame, frame, mask=roi_mask)
-        return result
-    except Exception as e:
-        logger.error(f"Failed to apply ROI mask: {str(e)}")
-        return frame
-
-
 def validate_rtsp_url(rtsp_url: str) -> bool:
     """
     Validate RTSP URL format
@@ -92,39 +44,6 @@ def calculate_fps(frame_count: int, elapsed_time: float) -> float:
         return 0.0
     result = frame_count / elapsed_time
     return result
-
-
-def draw_roi_on_frame(frame: np.ndarray, roi_points: List[List[float]], 
-                      color: Tuple[int, int, int] = (0, 255, 0), 
-                      thickness: int = 2) -> np.ndarray:
-    """
-    Draw ROI polygon on frame for visualization
-    
-    Args:
-        frame: Input frame
-        roi_points: List of [x, y] coordinates
-        color: BGR color tuple
-        thickness: Line thickness
-    
-    Returns:
-        Frame with ROI drawn
-    """
-    if not roi_points or len(roi_points) < 3:
-        return frame
-    
-    try:
-        frame_copy = frame.copy()
-        points = np.array(roi_points, dtype=np.int32)
-        cv2.polylines(frame_copy, [points], isClosed=True, color=color, thickness=thickness)
-        
-        # Draw points
-        for point in roi_points:
-            cv2.circle(frame_copy, (int(point[0]), int(point[1])), 5, color, -1)
-        
-        return frame_copy
-    except Exception as e:
-        logger.error(f"Failed to draw ROI: {str(e)}")
-        return frame
 
 
 def resize_frame(frame: np.ndarray, width: int, height: int, 
@@ -266,34 +185,6 @@ def get_frame_metadata(frame: np.ndarray, camera_id: str,
         'size_bytes': frame.nbytes
     }
     return result
-
-
-def validate_roi_points(roi_points: List[List[float]], 
-                       frame_width: int, frame_height: int) -> bool:
-    """
-    Validate ROI points are within frame boundaries
-    
-    Args:
-        roi_points: List of [x, y] coordinates
-        frame_width: Frame width
-        frame_height: Frame height
-    
-    Returns:
-        True if valid, False otherwise
-    """
-    if not roi_points or len(roi_points) < 3:
-        return False
-    
-    try:
-        for point in roi_points:
-            x, y = point[0], point[1]
-            if x < 0 or x > frame_width or y < 0 or y > frame_height:
-                logger.warning(f"ROI point ({x}, {y}) out of bounds ({frame_width}x{frame_height})")
-                return False
-        return True
-    except Exception as e:
-        logger.error(f"Error validating ROI points: {str(e)}")
-        return False
 
 
 class PerformanceMonitor:

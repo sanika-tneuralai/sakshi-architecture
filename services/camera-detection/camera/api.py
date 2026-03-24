@@ -28,15 +28,13 @@ async def start_camera(config: RTSPConfig):
     - **camera_id**: Unique identifier (required)
     - **rtsp_url**: RTSP stream URL (required)
     - **fps**: Frame rate 1-30 (default: 5)
-    - **roi_points**: Optional polygon ROI [[x1,y1], [x2,y2], ...]
-    
+
     **Example:**
     ```json
     {
       "rtsp_url": "rtsp://admin:admin@192.168.1.100:554/cam/realmonitor?channel=1&subtype=1",
       "camera_id": "queue_cam_1",
-      "fps": 5,
-      "roi_points": [[1055.55, 536.47], [951.55, 452.47], [1101.55, 347.47], [1228.55, 413.47]]
+      "fps": 5
     }
     ```
     """
@@ -53,7 +51,6 @@ async def start_camera(config: RTSPConfig):
             "message": f"Camera {config.camera_id} started successfully",
             "camera_id": config.camera_id,
             "fps": config.fps,
-            "has_roi": config.roi_points is not None,
             "backend": "opencv-ffmpeg"
         }
         
@@ -92,8 +89,7 @@ async def start_multi_stream(config: MultiStreamConfig):
         {
           "rtsp_url": "rtsp://admin:admin@192.168.1.100:554/cam/realmonitor?channel=1&subtype=1",
           "camera_id": "queue_cam_1",
-          "fps": 5,
-          "roi_points": [[1055.55, 536.47], [951.55, 452.47], [1101.55, 347.47], [1228.55, 413.47]]
+          "fps": 5
         },
         {
           "rtsp_url": "rtsp://admin:admin@192.168.1.101:554/cam/realmonitor?channel=1&subtype=1",
@@ -243,22 +239,18 @@ async def get_frame(
             print(f"[CAMERA API] Frame encoded successfully")
             print(f"[CAMERA API]   - Frame shape: {frame_data['shape']}")
             print(f"[CAMERA API]   - Frame count: {frame_data['frame_count']}")
-            print(f"[CAMERA API]   - Has ROI: {frame_data['roi_points'] is not None}")
-            
             response = {
                 "camera_id": camera_id,
                 "frame": frame_base64,
                 "status": "frame_ready",
                 "backend": "opencv-ffmpeg"
             }
-            
+
             if include_metadata:
                 response.update({
                     "timestamp": frame_data['timestamp'],
                     "shape": list(frame_data['shape']),
-                    "roi_points": frame_data['roi_points'],
-                    "frame_count": frame_data['frame_count'],
-                    "has_roi_mask": frame_data['roi_mask'] is not None
+                    "frame_count": frame_data['frame_count']
                 })
             
             logger.info(f"✓ get_frame completed for {camera_id} (single-stream)")

@@ -7,18 +7,13 @@ class RTSPConfig(BaseModel):
     rtsp_url: str = Field(..., description="RTSP stream URL")
     camera_id: str = Field(..., description="Unique identifier for the camera")
     fps: Optional[int] = Field(default=5, description="Frame extraction rate", ge=1, le=30)
-    roi_points: Optional[List[List[float]]] = Field(
-        default=None, 
-        description="Region of Interest as polygon points [[x1,y1], [x2,y2], ...]"
-    )
-    
+
     class Config:
         json_schema_extra = {
             "example": {
                 "rtsp_url": "rtsp://admin:admin@192.168.1.100:554/cam/realmonitor?channel=1&subtype=1",
                 "camera_id": "queue_cam_1",
-                "fps": 5,
-                "roi_points": [[1055.55, 536.47], [951.55, 452.47], [1101.55, 347.47], [1228.55, 413.47]]
+                "fps": 5
             }
         }
 
@@ -40,8 +35,7 @@ class MultiStreamConfig(BaseModel):
                     {
                         "rtsp_url": "rtsp://admin:admin@192.168.1.100:554/cam/realmonitor?channel=1&subtype=1",
                         "camera_id": "queue_cam_1",
-                        "fps": 5,
-                        "roi_points": [[1055.55, 536.47], [951.55, 452.47], [1101.55, 347.47], [1228.55, 413.47]]
+                        "fps": 5
                     }
                 ]
             }
@@ -64,7 +58,6 @@ class FrameResponse(BaseModel):
     camera_id: str
     timestamp: str
     shape: Optional[List[int]] = None
-    roi_points: Optional[List[List[float]]] = None
     frame_count: int
     status: str
     backend: str
@@ -76,7 +69,6 @@ class CameraInfo(BaseModel):
     status: str
     fps: int
     frame_count: int
-    has_roi_mask: bool
     rtsp_url: str
     backend: str = "opencv-ffmpeg"
 

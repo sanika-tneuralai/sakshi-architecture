@@ -2,7 +2,7 @@
 Pydantic schemas for detection module.
 """
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -20,7 +20,6 @@ class Detection(BaseModel):
     class_name: str = Field(..., description="Human-readable class name")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence score")
     bbox: BoundingBox = Field(..., description="Bounding box coordinates")
-    in_roi: bool = Field(..., description="Whether detection is inside ROI")
 
 
 class DetectionRequest(BaseModel):
@@ -37,7 +36,6 @@ class DetectionResponse(BaseModel):
     timestamp: datetime
     frame_count: int
     detections: List[Detection]
-    roi_detections_count: int = Field(..., description="Number of detections inside ROI")
     total_detections_count: int = Field(..., description="Total number of detections")
     processing_time_ms: float = Field(..., description="Detection processing time in milliseconds")
     first_detection_id: Optional[int] = Field(None, description="ID of first persisted detection")
@@ -49,7 +47,6 @@ class DetectionStats(BaseModel):
     camera_id: str
     total_frames_processed: int
     total_detections: int
-    roi_detections: int
     average_processing_time_ms: float
     is_active: bool
 
@@ -67,7 +64,6 @@ class CameraDetectionResult(BaseModel):
     camera_id: str
     status: str = Field(..., description="success or failed")
     total_detections_count: int
-    roi_detections_count: int
     processing_time_ms: float
     detections: List[Detection]
     error: Optional[str] = None

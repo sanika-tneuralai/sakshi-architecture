@@ -33,17 +33,16 @@ def persist_camera(camera_id: str, name: str = None, location: str = None):
         db.close()
 
 
-def persist_detection(camera_id: str, object_type: str, confidence: float, inside_roi: bool, screenshot_path: str = None):
+def persist_detection(camera_id: str, object_type: str, confidence: float, screenshot_path: str = None):
     """
     Persist detection to database.
-    
+
     Args:
         camera_id: Camera identifier
         object_type: Detected object class name
         confidence: Detection confidence score
-        inside_roi: Whether detection is inside ROI
         screenshot_path: Path to detection screenshot (optional)
-        
+
     Returns:
         detection_id if successful, None otherwise
     """
@@ -53,7 +52,6 @@ def persist_detection(camera_id: str, object_type: str, confidence: float, insid
             camera_id=camera_id,
             object_type=object_type,
             confidence=confidence,
-            inside_roi=inside_roi,
             screenshot_path=screenshot_path
         )
         db.add(detection)

@@ -74,17 +74,16 @@ async def detect_objects(request: DetectionRequest):
     **Process:**
     1. Gets current frame from camera manager
     2. Runs YOLO detection
-    3. Filters detections by ROI
-    4. Returns detection results
-    
+    3. Returns raw detection results
+
     **Request Body:**
     - **camera_id**: Camera to detect from (required)
     - **confidence_threshold**: Min confidence (default: 0.5)
     - **iou_threshold**: IOU for NMS (default: 0.45)
     - **classes**: Filter specific class IDs (optional)
-    
+
     **Response:**
-    - Detection results with ROI filtering
+    - Raw detection results
     - Processing time
     - Frame metadata
     """
@@ -133,19 +132,12 @@ async def detect_objects(request: DetectionRequest):
     
     print(f"[DETECTION API] Frame retrieved successfully")
     
-    # Get ROI data from camera
-    roi_points = camera.roi_points
-    roi_mask = camera.roi_mask
-    print(f"[DETECTION] Using ROI from camera object: roi_points={roi_points is not None}, roi_mask={roi_mask is not None}")
-    
     # Run detection with configuration values
     print(f"[DETECTION] Running detection with confidence_threshold: {confidence_threshold}")
     detection_service = get_detection_service()
     result = detection_service.detect(
         frame=frame,
         camera_id=request.camera_id,
-        roi_points=roi_points,
-        roi_mask=roi_mask,
         confidence_threshold=confidence_threshold,
         iou_threshold=request.iou_threshold,
         classes=request.classes
@@ -153,10 +145,9 @@ async def detect_objects(request: DetectionRequest):
     
     print(f"[DETECTION API] Detection completed")
     print(f"[DETECTION API]   - Total detections: {result.total_detections_count}")
-    print(f"[DETECTION API]   - ROI detections: {result.roi_detections_count}")
     print(f"[DETECTION API]   - Processing time: {result.processing_time_ms}ms")
-    
-    logger.info(f"Detection completed: {result.total_detections_count} total, {result.roi_detections_count} in ROI")
+
+    logger.info(f"Detection completed: {result.total_detections_count} detections")
     
     print(f"[DETECTION API] ✓ Detection completed\n")
     print(f"✓ detect_objects completed for {request.camera_id}")
@@ -184,12 +175,11 @@ def _detect_single_camera(
                 camera_id=camera_id,
                 status="failed",
                 total_detections_count=0,
-                roi_detections_count=0,
                 processing_time_ms=0,
                 detections=[],
                 error=f"Camera {camera_id} not found or not running"
             )
-        
+
         # Get frame from camera
         frame = camera.get_frame()
         if frame is None:
@@ -197,23 +187,16 @@ def _detect_single_camera(
                 camera_id=camera_id,
                 status="failed",
                 total_detections_count=0,
-                roi_detections_count=0,
                 processing_time_ms=0,
                 detections=[],
                 error="No frame available"
             )
-        
-        # Get ROI data from camera
-        roi_points = camera.roi_points if hasattr(camera, 'roi_points') else None
-        roi_mask = camera.roi_mask if hasattr(camera, 'roi_mask') else None
         
         # Run detection
         detection_service = get_detection_service()
         result = detection_service.detect(
             frame=frame,
             camera_id=camera_id,
-            roi_points=roi_points,
-            roi_mask=roi_mask,
             confidence_threshold=confidence_threshold,
             iou_threshold=iou_threshold,
             classes=classes
@@ -225,7 +208,6 @@ def _detect_single_camera(
             camera_id=camera_id,
             status="success",
             total_detections_count=result.total_detections_count,
-            roi_detections_count=result.roi_detections_count,
             processing_time_ms=processing_time_ms,
             detections=result.detections,
             error=None
@@ -238,7 +220,6 @@ def _detect_single_camera(
             camera_id=camera_id,
             status="failed",
             total_detections_count=0,
-            roi_detections_count=0,
             processing_time_ms=processing_time_ms,
             detections=[],
             error=str(e)
@@ -327,7 +308,6 @@ async def detect_objects_batch(request: DetectBatchRequest):
                     camera_id=camera_id,
                     status="failed",
                     total_detections_count=0,
-                    roi_detections_count=0,
                     processing_time_ms=0,
                     detections=[],
                     error=f"Unexpected error: {str(e)}"

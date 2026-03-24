@@ -4,7 +4,7 @@ import numpy as np
 import asyncio
 import os
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 from threading import Thread, Lock
 
 logger = logging.getLogger(__name__)
@@ -13,13 +13,11 @@ logger = logging.getLogger(__name__)
 class OpenCVCamera:
     """OpenCV-based RTSP camera handler (better compatibility than GStreamer for some cameras)"""
     
-    def __init__(self, camera_id: str, rtsp_url: str, fps: int = 5, roi_points: Optional[List] = None):
+    def __init__(self, camera_id: str, rtsp_url: str, fps: int = 5):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.fps = fps
-        self.roi_points = roi_points
-        self.roi_mask = None
-        
+
         # OpenCV capture object
         self.cap = None
         self.is_running = False
@@ -33,22 +31,6 @@ class OpenCVCamera:
         self.max_errors = 10
         self.frame_lock = Lock()
         
-    def _create_roi_mask(self, frame_shape: tuple) -> Optional[np.ndarray]:
-        """Create binary mask from polygon ROI points"""
-        if not self.roi_points or len(self.roi_points) < 3:
-            return None
-        
-        try:
-            mask = np.zeros(frame_shape[:2], dtype=np.uint8)
-            points = np.array(self.roi_points, dtype=np.int32)
-            cv2.fillPoly(mask, [points], 255)
-            logger.info(f"[{self.camera_id}] ROI mask created")
-            logger.info(f"[{self.camera_id}] ✓ OpenCVCamera._create_roi_mask completed")
-            return mask
-        except Exception as e:
-            logger.error(f"[{self.camera_id}] Failed to create ROI mask: {str(e)}")
-            return None
-    
     def _capture_loop(self):
         """Background thread for frame capture"""
         frame_interval = 1.0 / self.fps
@@ -62,10 +44,6 @@ class OpenCVCamera:
                     logger.warning(f"[{self.camera_id}] Failed to read frame (errors: {self.error_count}/{self.max_errors})")
                     asyncio.run(asyncio.sleep(0.5))
                     continue
-                
-                # Create ROI mask on first successful frame
-                if self.roi_points and self.roi_mask is None:
-                    self.roi_mask = self._create_roi_mask(frame.shape)
                 
                 # Update frame data
                 with self.frame_lock:
@@ -135,10 +113,11 @@ class OpenCVCamera:
             return True
             
         except Exception as e:
-            logger.error(f"[{self.camera_id}] Failed to start: {str(e)}")
+            logger.error(f"[{self.camera_id}] Failed to start: {str(e)}", exc_info=True)
             if self.cap:
                 self.cap.release()
-            return False
+                self.cap = None
+            raise
     
     async def stop(self) -> bool:
         """Stop camera stream"""
@@ -182,8 +161,6 @@ class OpenCVCamera:
             "frame": frame,
             "timestamp": self.last_frame_time,
             "shape": frame.shape,
-            "roi_points": self.roi_points,
-            "roi_mask": self.roi_mask,
             "frame_count": self.frame_count
         }
         logger.info(f"[{self.camera_id}] ✓ OpenCVCamera.get_preprocessed_frame completed")
