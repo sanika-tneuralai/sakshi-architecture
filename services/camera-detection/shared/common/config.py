@@ -20,7 +20,7 @@ class Config:
         base_dir = os.getenv("BASE_DIR")
         if base_dir:
             return Path(base_dir).resolve()
-        return Path(__file__).resolve().parent.parent
+        return Path(__file__).resolve().parent.parent.parent
     
     @staticmethod
     def get_models_dir() -> Path:
