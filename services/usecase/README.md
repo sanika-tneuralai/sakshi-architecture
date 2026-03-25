@@ -1,720 +1,249 @@
 # Usecase Evaluation Service
 
-A standalone microservice for evaluating business rules (usecases) against object detection data.
+A standalone microservice that receives object detection results and evaluates them against configurable business rules (usecases). Built with FastAPI, it supports both synchronous evaluation and asynchronous distributed processing via Celery workers.
 
-## 📋 Overview
+---
 
-The Usecase Evaluation Service is part of the GOEC (General Operations Edge Computing) modularized architecture. It receives detection data and evaluates custom business rules to determine if specific conditions are met.
+## Table of Contents
 
-### Key Features
+- [Overview](#overview)
+- [Folder Structure](#folder-structure)
+- [Key Directories Explained](#key-directories-explained)
+- [How the System Works](#how-the-system-works)
+- [Setup & Installation](#setup--installation)
+- [Running the Application](#running-the-application)
+- [Running Workers](#running-workers)
+- [Adding a New Rule](#adding-a-new-rule)
+- [Environment Variables](#environment-variables)
+- [Important Notes & Assumptions](#important-notes--assumptions)
 
-- **Multi-Usecase Evaluation**: Evaluate multiple business rules in a single request
-- **Rule-Based Architecture**: Flexible, extensible rule engine
-- **Database Integration**: Store evaluation results for analytics and audit
-- **Standalone Deployment**: No dependencies on camera or detection services
-- **RESTful API**: Simple HTTP interface for integration
-- **Lightweight**: Minimal resource footprint (CPU/RAM only, no GPU required)
+---
 
-## 🏗️ Architecture
+## Overview
+
+The Usecase Evaluation Service sits downstream of a camera detection pipeline. It receives detection payloads — lists of identified objects with their positions and confidence scores — and determines whether any configured business rule has been triggered.
+
+Examples of rules it evaluates:
+
+- A person has entered a restricted zone
+- A crowd of three or more people has formed in a region of interest
+- A phone, bag, or cash item has been detected
+- Dress code compliance has been violated
+- Staff presence or mopping activity has been identified
+
+Results are persisted to a shared PostgreSQL database and returned to the caller for further routing to alert or analytics services.
+
+The service supports two execution modes:
+
+- **Direct mode** — evaluations run synchronously within the API process. Suitable for development and low-volume deployments.
+- **Queue mode** — evaluations are offloaded to a pool of Celery workers via RabbitMQ, with results collected from Redis. Suitable for production and high-throughput scenarios.
+
+---
+
+## Folder Structure
 
 ```
-┌──────────────────┐
-│ Detection Service│
-└────────┬─────────┘
-         │ Detection Data
-         ▼
-┌─────────────────────┐
-│ Usecase Service     │
-│ ┌─────────────────┐ │
-│ │ Rule Engine     │ │
-│ │ - person_in_roi │ │
-│ │ - crowd_in_roi  │ │
-│ │ - restricted_   │ │
-│ │   zone_breach   │ │
-│ └─────────────────┘ │
-└──────────┬──────────┘
-           │ Results
-           ▼
-    ┌──────────────┐
-    │   Database   │
-    └──────────────┘
+services/usecase/
+├── main.py                      # FastAPI application entry point
+├── Dockerfile                   # Container definition
+├── docker-compose.yml           # Full stack: API, workers, broker, cache
+├── requirements.txt             # Python dependencies
+├── test_usecase_pipeline.py     # Integration and unit tests
+│
+├── usecase/
+│   ├── api.py                   # HTTP routes (request validation, response formatting)
+│   ├── engine.py                # Core evaluation logic
+│   ├── service.py               # Routes between direct and queue execution paths
+│   ├── schemas.py               # Pydantic request/response models
+│   └── rules/
+│       ├── __init__.py          # Auto-discovery registry for all rules
+│       ├── base.py              # Abstract base class all rules must implement
+│       ├── person_in_roi.py
+│       ├── crowd_in_roi.py
+│       ├── restricted_zone.py
+│       ├── restricted_area.py
+│       ├── bag_detection.py
+│       ├── cash_detection.py
+│       ├── dress_code.py
+│       ├── heatmap.py
+│       ├── mopping_detection.py
+│       ├── people_counter.py
+│       ├── phone_detection.py
+│       ├── smoking_detection.py
+│       └── staff_detector.py
+│
+├── workers/
+│   ├── celery_app.py            # Celery configuration (broker, backend, task routing)
+│   ├── tasks.py                 # Celery task definitions (wraps evaluation logic)
+│   └── queue.py                 # Task submission and result collection bridge
+│
+└── shared/
+    ├── common/
+    │   ├── config.py            # Centralised environment-aware configuration
+    │   ├── logger.py            # Shared logging setup
+    │   └── utils.py             # ROI operations, frame utilities, performance monitoring
+    └── database/
+        ├── models.py            # SQLAlchemy ORM models (Camera, Detection, UsecaseResult, Alert, AnalyticsDaily)
+        ├── connection.py        # Database engine, session factory, table initialisation
+        └── persistence.py      # High-level write helpers for each model
 ```
 
-### What This Service Does
+---
 
-✅ Receives detection output (objects detected, coordinates, confidence)
-✅ Evaluates multiple usecase rules against the detection data
-✅ Stores evaluation results in database
-✅ Returns structured evaluation results
+## Key Directories Explained
 
-### What This Service Does NOT Do
+### `usecase/rules/`
 
-❌ Perform object detection (receives detection data)
-❌ Manage cameras or video streams
-❌ Trigger alerts (that's the alert service's job)
-❌ Generate analytics reports (that's the analytics service's job)
+Contains all individual business rule implementations. Each rule is a self-contained Python module that subclasses `BaseUsecaseRule` and declares a unique `USECASE_ID`. The `__init__.py` auto-discovers all rules at startup — no manual registration required. Adding a new rule is as simple as creating a new file in this directory.
 
-## 🚀 Quick Start
+### `usecase/`
+
+The core of the service. The engine builds a lightweight detection payload and runs each requested rule against it. The service layer decides whether to run evaluations directly or submit them to the worker queue. The API layer handles HTTP concerns only — validation and response formatting.
+
+### `workers/`
+
+Implements the asynchronous execution path. When queue mode is enabled, the API submits one Celery task per usecase to RabbitMQ. Workers pick up tasks, run the same evaluation logic, persist results to the database, and store results in Redis. The queue bridge then collects all results asynchronously and returns them to the caller.
+
+### `shared/common/`
+
+Shared utilities used across the service: centralised configuration loaded from environment variables, a consistent logging setup, and helper functions for ROI operations, frame resizing, and performance tracking.
+
+### `shared/database/`
+
+Database access layer shared across services. Contains the SQLAlchemy models for all entities (cameras, detections, usecase results, alerts, and daily analytics), the connection and session management, and convenience functions for writing records.
+
+---
+
+## How the System Works
+
+1. An upstream detection service identifies objects in a camera frame and sends a payload to this service via `POST /usecase/evaluate`. The payload includes the camera ID, the detection output, and the list of usecase rules to evaluate.
+
+2. The API layer validates the request and passes it to the service layer.
+
+3. The service layer checks whether queue mode is enabled:
+   - **Direct mode:** The engine evaluates each requested rule sequentially within the API process and returns results immediately.
+   - **Queue mode:** The engine builds a slim version of the detection payload (stripping unnecessary fields to reduce size) and submits one Celery task per usecase to RabbitMQ. The API then awaits all results asynchronously from Redis.
+
+4. In queue mode, each worker picks up a task, calls the same evaluation function used in direct mode, persists the result to PostgreSQL, and stores the serialised result in Redis.
+
+5. Each rule's `evaluate()` method inspects the detection list, applies its logic, and returns whether it was triggered and which objects matched.
+
+6. The service collects all results and returns a `UsecaseResponse` containing one result per requested usecase, with the camera ID, trigger status, matched object count, and a base64 snapshot if detections were present.
+
+7. If any individual task fails, it returns a safe default (not triggered) so the pipeline continues uninterrupted.
+
+---
+
+## Setup & Installation
 
 ### Prerequisites
 
-- Docker and Docker Compose (recommended)
-- PostgreSQL database (shared with other services)
-- Python 3.11+ (for local development)
+- Python 3.11 or higher
+- PostgreSQL (running and accessible) # need to setup 
+- Docker and Docker Compose (for containerised setup)
+- RabbitMQ and Redis (required only when running in queue mode)
 
-### Using Docker (Recommended)
+### Local Setup
 
-1. **Clone and navigate to the service directory:**
+1. Navigate to `services/usecase/`.
+2. Create and activate a Python virtual environment.
+3. Install dependencies from `requirements.txt`.
+4. Create a `.env` file and set the required environment variables (see [Environment Variables](#environment-variables)).
+5. Ensure PostgreSQL is running. The application will create the required tables on first startup if `DATABASE_URL` is set.
 
-```bash
-cd services/usecase
-```
+### Docker Setup
 
-2. **Configure environment variables:**
+The included `docker-compose.yml` starts all components of the full stack:
 
-```bash
-cp .env.example .env
-# Edit .env with your database configuration
-```
+| Service | Port | Purpose |
+|---|---|---|
+| usecase | 8001 | Main FastAPI application |
+| worker | — | Celery evaluation workers |
+| rabbitmq | 5672 / 15672 | Message broker (AMQP / management UI) |
+| redis | 6379 | Celery result backend |
+| flower | 5555 | Celery monitoring dashboard |
 
-3. **Start the service:**
-
-```bash
-docker-compose up -d
-```
-
-4. **Verify the service is running:**
-
-```bash
-curl http://localhost:8001/health
-```
-
-### Local Development
-
-1. **Install dependencies:**
-
-```bash
-pip install -r requirements.txt
-```
-
-2. **Set environment variables:**
-
-```bash
-export DATABASE_URL="postgresql://goec:goec@localhost:5432/goec"
-export PORT=8001
-```
-
-3. **Run the service:**
-
-```bash
-python main.py
-```
-
-4. **Access API documentation:**
-
-Open your browser to `http://localhost:8001/docs` for interactive API documentation.
-
-## 📚 Available Usecases
-
-### 1. Person in ROI (`person_in_roi`)
-
-**Description:** Triggers when any person is detected inside the Region of Interest (ROI).
-
-**Use Cases:**
-- Queue monitoring (is anyone in line?)
-- Restricted area monitoring
-- Presence detection
-
-**Trigger Condition:**
-```python
-class_name == "person" AND in_roi == true
-```
-
-**Example Scenario:** Detect when any person enters a restricted area.
+Run the stack from `services/usecase/` using Docker Compose. Workers can be scaled independently.
 
 ---
 
-### 2. Crowd in ROI (`crowd_in_roi`)
+## Running the Application
 
-**Description:** Triggers when 3 or more persons are detected inside the ROI simultaneously.
+### Local
 
-**Use Cases:**
-- Crowd management
-- Social distancing monitoring
-- Capacity monitoring
-- Queue congestion detection
+Start the FastAPI server using Uvicorn from the `services/usecase/` directory. The application binds to port 8001 by default.
 
-**Trigger Condition:**
-```python
-count(class_name == "person" AND in_roi == true) >= 3
-```
+- Health check: `GET /health`
+- Evaluate usecases: `POST /usecase/evaluate`
+- Queue status: `GET /usecase/queue-status`
+- Task status: `GET /usecase/task/{task_id}`
 
-**Configuration:**
-- `CROWD_THRESHOLD`: Minimum number of persons (default: 3)
+### Docker
 
-**Example Scenario:** Alert when too many people gather in a lobby area.
+Use Docker Compose to build and start all containers from `services/usecase/`. The application will automatically initialise the database tables on startup.
 
 ---
 
-### 3. Restricted Zone Breach (`restricted_zone_breach`)
+## Running Workers
 
-**Description:** Triggers when any vehicle is detected inside the ROI (restricted zone).
+Workers are started as separate processes from the main API. They consume tasks from the `usecase_queue` and process them with configurable concurrency.
 
-**Use Cases:**
-- Parking violation detection
-- No-vehicle zone monitoring
-- Pedestrian area protection
+Set `USE_WORKER_QUEUE=true` in the environment to activate queue mode. When disabled, the service falls back to direct (synchronous) evaluation within the API process — no RabbitMQ or Redis required.
 
-**Trigger Condition:**
-```python
-class_name in ["car", "truck", "bus", "motorcycle", "bicycle"] AND in_roi == true
-```
-
-**Monitored Vehicle Types:**
-- `car`
-- `truck`
-- `bus`
-- `motorcycle`
-- `bicycle`
-
-**Example Scenario:** Detect vehicles in pedestrian-only zones.
+The Flower dashboard (port 5555 in Docker) provides a real-time view of worker activity, task history, queue depth, and retry counts.
 
 ---
 
-## 🔧 API Usage
-
-### Evaluate Usecases
-
-**Endpoint:** `POST /usecase/evaluate`
-
-**Purpose:** Evaluate one or more usecase rules against detection data.
-
-#### Request Body
-
-```json
-{
-  "camera_id": "s1_cam_1",
-  "detection_output": {
-    "camera_id": "s1_cam_1",
-    "detections": [
-      {
-        "class_name": "person",
-        "confidence": 0.92,
-        "in_roi": true,
-        "bbox": [100, 150, 200, 350]
-      },
-      {
-        "class_name": "person",
-        "confidence": 0.88,
-        "in_roi": true,
-        "bbox": [300, 160, 400, 360]
-      },
-      {
-        "class_name": "car",
-        "confidence": 0.85,
-        "in_roi": false,
-        "bbox": [500, 200, 700, 400]
-      }
-    ],
-    "screenshot_path": "/screenshots/s1_cam_1_1234567890.jpg",
-    "first_detection_id": 1001
-  },
-  "usecases": ["person_in_roi", "crowd_in_roi"]
-}
-```
-
-#### Response
-
-```json
-{
-  "camera_id": "s1_cam_1",
-  "results": [
-    {
-      "usecase_id": "person_in_roi",
-      "triggered": true,
-      "matched_count": 2,
-      "matched_objects": [
-        {
-          "class_name": "person",
-          "confidence": 0.92,
-          "in_roi": true,
-          "bbox": [100, 150, 200, 350]
-        },
-        {
-          "class_name": "person",
-          "confidence": 0.88,
-          "in_roi": true,
-          "bbox": [300, 160, 400, 360]
-        }
-      ],
-      "detection_id": 1001,
-      "screenshot_path": "/screenshots/s1_cam_1_1234567890.jpg"
-    },
-    {
-      "usecase_id": "crowd_in_roi",
-      "triggered": false,
-      "matched_count": 2,
-      "matched_objects": [
-        {
-          "class_name": "person",
-          "confidence": 0.92,
-          "in_roi": true,
-          "bbox": [100, 150, 200, 350]
-        },
-        {
-          "class_name": "person",
-          "confidence": 0.88,
-          "in_roi": true,
-          "bbox": [300, 160, 400, 360]
-        }
-      ],
-      "detection_id": 1001,
-      "screenshot_path": "/screenshots/s1_cam_1_1234567890.jpg"
-    }
-  ]
-}
-```
-
-#### Response Fields
-
-- **camera_id**: Camera identifier
-- **results**: List of evaluation results (one per requested usecase)
-  - **usecase_id**: Usecase identifier
-  - **triggered**: Boolean indicating if the usecase condition was met
-  - **matched_count**: Number of objects that matched the rule
-  - **matched_objects**: List of detection objects that matched
-  - **detection_id**: Associated detection record ID
-  - **screenshot_path**: Path to detection screenshot
-
-### Health Check
-
-**Endpoint:** `GET /health`
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "service": "usecase-evaluation",
-  "version": "1.0.0"
-}
-```
-
-## 🗄️ Database Schema
-
-The service stores evaluation results in the `usecase_results` table:
-
-```sql
-CREATE TABLE usecase_results (
-    id SERIAL PRIMARY KEY,
-    camera_id VARCHAR(100) NOT NULL,
-    usecase_name VARCHAR(100) NOT NULL,
-    triggered BOOLEAN NOT NULL,
-    detection_id INTEGER REFERENCES detections(id),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (camera_id) REFERENCES cameras(camera_id)
-);
-```
-
-### Indexes
-- `camera_id` (for queries by camera)
-- `usecase_name` (for queries by usecase type)
-- `timestamp` (for time-based analytics)
-
-## 🔌 Integration with Other Services
-
-### With Detection Service (Upstream)
-
-The detection service sends detection output to the usecase service:
-
-```python
-import requests
-
-detection_output = {
-    "camera_id": "s1_cam_1",
-    "detections": [...],
-    "screenshot_path": "...",
-    "first_detection_id": 1001
-}
-
-response = requests.post(
-    "http://usecase-service:8001/usecase/evaluate",
-    json={
-        "camera_id": "s1_cam_1",
-        "detection_output": detection_output,
-        "usecases": ["person_in_roi", "crowd_in_roi"]
-    }
-)
-
-results = response.json()
-```
-
-### With Alert Service (Downstream)
-
-The orchestrator or caller can check which usecases triggered and send to alert service:
-
-```python
-for result in results["results"]:
-    if result["triggered"]:
-        # Send to alert service
-        requests.post(
-            "http://alert-service:8002/alert/trigger",
-            json={
-                "camera_id": camera_id,
-                "usecase_id": result["usecase_id"],
-                "matched_count": result["matched_count"],
-                "screenshot_path": result["screenshot_path"]
-            }
-        )
-```
-
-### With Orchestration Service
-
-The orchestration service coordinates the flow:
-
-```
-Orchestrator → Detection Service → Get detections
-             ↓
-             → Usecase Service → Evaluate rules
-             ↓
-             → Alert Service (if triggered) → Send alerts
-```
-
-## 🛠️ Adding Custom Usecases
-
-The rule engine is extensible. To add a new usecase:
-
-### 1. Create a New Rule File
-
-Create `usecase/rules/your_new_rule.py`:
-
-```python
-from typing import Dict, Any
-from usecase.rules.base import BaseUsecaseRule
-
-class YourNewRule(BaseUsecaseRule):
-    """
-    Description of your usecase.
-    """
-    
-    def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Evaluate your custom logic.
-        
-        Args:
-            detection_output: Detection API response
-            
-        Returns:
-            Evaluation result with triggered status and matched objects
-        """
-        detections = self.get_detections(detection_output)
-        matched_objects = []
-        
-        for detection in detections:
-            # Your custom logic here
-            if self._matches_condition(detection):
-                matched_objects.append(detection)
-        
-        triggered = len(matched_objects) > 0
-        
-        return {
-            "triggered": triggered,
-            "matched_objects": matched_objects
-        }
-    
-    def _matches_condition(self, detection: Dict[str, Any]) -> bool:
-        """Your custom matching logic"""
-        # Example: Check if object is a specific class and has high confidence
-        return (
-            detection.get("class_name") == "person" and
-            detection.get("confidence", 0) > 0.8
-        )
-```
-
-### 2. Register the Rule
-
-Update `usecase/rules/__init__.py`:
-
-```python
-from usecase.rules.your_new_rule import YourNewRule
-
-USECASE_RULES = {
-    "person_in_roi": PersonInROIRule,
-    "crowd_in_roi": CrowdInROIRule,
-    "restricted_zone_breach": RestrictedZoneRule,
-    "your_new_rule": YourNewRule,  # Add your rule
-}
-```
-
-### 3. Use the New Rule
-
-```bash
-curl -X POST http://localhost:8001/usecase/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "camera_id": "s1_cam_1",
-    "detection_output": {...},
-    "usecases": ["your_new_rule"]
-  }'
-```
-
-## 📊 Logging and Debugging
-
-The service provides detailed logging for each evaluation:
-
-```
-[ORCHESTRATOR] ============================================================
-[ORCHESTRATOR] USECASE EVALUATION ORCHESTRATOR
-[ORCHESTRATOR] Camera ID: s1_cam_1
-[ORCHESTRATOR] Number of usecases to evaluate: 2
-[ORCHESTRATOR] Usecases: person_in_roi, crowd_in_roi
-[ORCHESTRATOR] ============================================================
-
-[RULE:person_in_roi] ========== EVALUATION START ==========
-[RULE:person_in_roi] Processing 3 detections
-[RULE:person_in_roi] Detection 1: class='person', in_roi=True, conf=0.92
-[RULE:person_in_roi] ✓✓✓ MATCH: Person in ROI (confidence: 0.92)
-[RULE:person_in_roi] Triggered: True
-[RULE:person_in_roi] Matched: 2 objects
-```
-
-Logs are written to:
-- `stdout` (Docker logs)
-- `usecase_service.log` (persistent file in logs/ directory)
-
-## 🔒 Security Considerations
-
-### Production Recommendations
-
-1. **Database Security:**
-   - Use strong passwords
-   - Enable SSL for database connections
-   - Limit database user permissions to necessary tables
-
-2. **API Security:**
-   - Add authentication (JWT, API keys)
-   - Enable HTTPS/TLS
-   - Configure CORS properly (restrict origins)
-   - Add rate limiting
-
-3. **Network Security:**
-   - Deploy on private network
-   - Use firewall rules
-   - Enable network encryption between services
-
-4. **Environment Variables:**
-   - Never commit .env files
-   - Use secret management tools (e.g., HashiCorp Vault)
-   - Rotate credentials regularly
-
-## 📈 Performance Considerations
-
-### Resource Requirements
-
-- **CPU**: 1-2 cores recommended
-- **Memory**: 512MB - 1GB
-- **Storage**: Minimal (logs only, database is separate)
-- **Network**: Standard HTTP traffic
-
-### Scaling
-
-The service is stateless and can be horizontally scaled:
-
-```yaml
-# docker-compose.yml
-services:
-  usecase-service:
-    deploy:
-      replicas: 3
-```
-
-Load balancer can distribute requests across instances.
-
-### Performance Tips
-
-1. **Database Indexing**: Ensure indexes on `camera_id`, `usecase_name`, `timestamp`
-2. **Connection Pooling**: SQLAlchemy handles this automatically
-3. **Async Processing**: For high-throughput, consider async/await patterns
-4. **Caching**: Cache rule instances (already implemented)
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-#### 1. Database Connection Fails
-
-**Error:** `sqlalchemy.exc.OperationalError: could not connect to server`
-
-**Solution:**
-- Check `DATABASE_URL` in .env
-- Ensure PostgreSQL is running
-- Verify network connectivity
-- Check database credentials
-
-```bash
-# Test database connection
-psql -h localhost -U goec -d goec
-```
-
-#### 2. Service Won't Start
-
-**Error:** `Port 8001 is already allocated`
-
-**Solution:**
-- Change PORT in .env file
-- Stop conflicting service: `docker-compose down`
-
-#### 3. Usecase Not Found
-
-**Error:** `ValueError: Unknown usecase: my_usecase`
-
-**Solution:**
-- Check usecase ID spelling
-- Verify usecase is registered in `usecase/rules/__init__.py`
-- Use one of: `person_in_roi`, `crowd_in_roi`, `restricted_zone_breach`
-
-#### 4. No Results Returned
-
-**Possible causes:**
-- Detection output format incorrect
-- No objects match rule conditions
-- Check logs for detailed evaluation trace
-
-```bash
-# View logs
-docker-compose logs -f usecase-service
-```
-
-## 📝 Environment Variables Reference
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `HOST` | Service host | `0.0.0.0` | No |
-| `PORT` | Service port | `8001` | No |
-| `DATABASE_URL` | PostgreSQL connection string | - | Yes |
-| `LOG_LEVEL` | Logging level | `INFO` | No |
-| `PERSON_IN_ROI_MIN_CONFIDENCE` | Min confidence threshold | `0.5` | No |
-| `CROWD_IN_ROI_MIN_COUNT` | Min persons for crowd | `3` | No |
-| `RESTRICTED_ZONE_MIN_CONFIDENCE` | Min confidence threshold | `0.5` | No |
-
-## 🧪 Testing
-
-### Manual Testing
-
-```bash
-# Test health endpoint
-curl http://localhost:8001/health
-
-# Test usecase evaluation
-curl -X POST http://localhost:8001/usecase/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "camera_id": "test_cam",
-    "detection_output": {
-      "camera_id": "test_cam",
-      "detections": [
-        {
-          "class_name": "person",
-          "confidence": 0.9,
-          "in_roi": true,
-          "bbox": [100, 100, 200, 200]
-        }
-      ],
-      "screenshot_path": "/test.jpg",
-      "first_detection_id": 1
-    },
-    "usecases": ["person_in_roi"]
-  }'
-```
-
-### Expected Response
-
-```json
-{
-  "camera_id": "test_cam",
-  "results": [
-    {
-      "usecase_id": "person_in_roi",
-      "triggered": true,
-      "matched_count": 1,
-      "matched_objects": [...]
-    }
-  ]
-}
-```
-
-## 📦 Deployment
-
-### Standalone Deployment
-
-Deploy this service independently:
-
-```bash
-cd services/usecase
-docker-compose up -d
-```
-
-### Multi-Service Deployment (Server 3)
-
-On Server 3, deploy with alert and analytics services:
-
-```yaml
-# Combined docker-compose.yml
-version: '3.8'
-
-services:
-  usecase-service:
-    build: ./usecase
-    ports:
-      - "8001:8001"
-    environment:
-      DATABASE_URL: postgresql://goec:goec@postgres:5432/goec
-  
-  alert-service:
-    build: ./alert
-    ports:
-      - "8002:8002"
-  
-  analytics-service:
-    build: ./analytics
-    ports:
-      - "8003:8003"
-
-  postgres:
-    image: postgres:15-alpine
-    ...
-```
-
-## 📖 Additional Resources
-
-- [API Documentation](http://localhost:8001/docs) - Interactive Swagger UI
-- [ReDoc Documentation](http://localhost:8001/redoc) - Alternative API docs
-- [GOEC Architecture Overview](../../README.md) - Main architecture documentation
-- [Deployment Guide](../../DEPLOYMENT_GUIDE.md) - Full deployment instructions
-
-## 🤝 Contributing
-
-To add new usecases or improve existing rules:
-
-1. Follow the rule structure in `usecase/rules/base.py`
-2. Add comprehensive logging
-3. Update this README with new usecase documentation
-4. Test thoroughly with various detection scenarios
-5. Update API documentation
-
-## 📄 License
-
-Part of the GOEC (General Operations Edge Computing) project.
-
-## 📞 Support
-
-For issues or questions:
-- Check the [Troubleshooting](#-troubleshooting) section
-- Review logs: `docker-compose logs -f usecase-service`
-- Consult the main project documentation
+## Adding a New Rule
+
+1. Create a new Python file inside `services/usecase/usecase/rules/`.
+2. Define a class that subclasses `BaseUsecaseRule` from `rules/base.py`.
+3. Set a unique `USECASE_ID` class attribute — this is the string callers will use to reference the rule.
+4. Implement the `evaluate(detection_output)` method. It receives the detection payload and must return a dictionary with at least a `triggered` boolean and a `matched_objects` list.
+5. No further registration is needed. The auto-discovery system in `rules/__init__.py` scans the directory on startup and registers all valid rule classes automatically.
+
+The new rule will be available immediately to any caller that includes its `USECASE_ID` in the `usecases` list of a request.
 
 ---
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-03-03  
-**Maintained By:** GOEC Team
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@localhost:5432/goec` |
+| `API_HOST` | Host to bind the API server | `0.0.0.0` |
+| `API_PORT` | Port for the API server | `8001` |
+| `API_RELOAD` | Enable auto-reload in development | `false` |
+| `LOG_LEVEL` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
+| `LOG_FILE` | Path to the log output file | _(console only)_ |
+| `USE_WORKER_QUEUE` | Enable async Celery processing | `false` |
+| `RABBITMQ_URL` | RabbitMQ AMQP connection URL | `amqp://guest:guest@localhost:5672//` |
+| `REDIS_URL` | Redis connection URL for Celery results | `redis://localhost:6379/0` |
+| `DEFAULT_CONFIDENCE_THRESHOLD` | Minimum detection confidence to consider | `0.5` |
+| `DEFAULT_IOU_THRESHOLD` | Intersection-over-union threshold | `0.4` |
+| `YOLO_MODEL_PATH` | Path to the YOLO model weights file | _(service default)_ |
+| `USE_GPU` | Enable GPU acceleration for inference | `false` |
+| `CAMERA_DETECTION_URL` | Internal URL of the Camera Detection Service | — |
+| `USECASE_SERVICE_URL` | Internal URL of this service | — |
+| `ALERT_SERVICE_URL` | Internal URL of the Alert Service | — |
+| `ANALYTICS_SERVICE_URL` | Internal URL of the Analytics Service | — |
+
+---
+
+## Important Notes & Assumptions
+
+- **Database is optional at startup.** If `DATABASE_URL` is not set, the service starts without a database connection. Result persistence will be skipped. This allows lightweight deployments without PostgreSQL.
+
+- **Queue mode requires both RabbitMQ and Redis.** If `USE_WORKER_QUEUE=true` and either service is unavailable, task submission will fail. Use direct mode for environments without these dependencies.
+
+- **Persistence happens in workers, not the API.** In queue mode, database writes are performed inside the Celery worker after evaluation completes. This keeps the API non-blocking and allows it to return results without waiting for DB I/O.
+
+- **Failed tasks do not break the pipeline.** If a worker task raises an exception (after retries), the queue layer returns a safe default result — `triggered=false`, `matched_count=0` — for that usecase, so the overall response is always complete.
+
+- **Slim payloads are used in queue mode.** Before submitting tasks to RabbitMQ, the engine strips the detection payload of unnecessary fields (raw tensors, metadata). This reduces message size significantly when evaluating many rules per cycle.
+
+- **ROI filtering has been removed from the detection layer.** All detections are passed to the rules regardless of their position. Rules that historically relied on ROI filtering continue to work via helper methods in `BaseUsecaseRule`, but the filtering is no longer applied at ingestion time.
+
+- **Rules are discovered automatically.** The registry scans the `rules/` directory at import time. Any file containing a valid `BaseUsecaseRule` subclass with a `USECASE_ID` will be registered without any manual changes to the codebase.
+
+- **Workers can be scaled horizontally.** The Celery worker pool is stateless. Run as many worker instances as needed to increase throughput. The Docker Compose setup supports `--scale worker=N`.
