@@ -39,7 +39,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     
     ports:
-      - "8000:8000"
+      - "8004:8004"
     
     volumes:
       # Mount models directory
