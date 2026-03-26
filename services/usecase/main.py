@@ -76,10 +76,9 @@ app = FastAPI(
     - **Standalone Service**: Independent deployment, no camera/detection dependencies
     
     ### Available Usecases:
-    - **person_in_roi**: Triggers when any person is detected in ROI
-    - **crowd_in_roi**: Triggers when 3+ persons are detected in ROI 
-    - **restricted_zone_breach**: Triggers when any vehicle is detected in ROI
-    
+    Usecases are auto-discovered at startup from the `usecase/rules/` directory.
+    Call `GET /usecase/list` to see all currently registered usecase IDs.
+
     ### How It Works:
     1. Receives detection output from detection service
     2. Evaluates requested usecase rules against detection data
