@@ -12,18 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 class OpenCVCamera:
-    """OpenCV-based RTSP camera handler (better compatibility than GStreamer for some cameras)"""
-    
+    """OpenCV-based camera handler — supports RTSP streams and local video files."""
+
     def __init__(self, camera_id: str, rtsp_url: str, fps: int = 5):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.fps = fps
+        self.is_file_source = not rtsp_url.startswith("rtsp://") and not rtsp_url.startswith("rtsps://")
 
         # OpenCV capture object
         self.cap = None
         self.is_running = False
         self.thread = None
-        
+
         # Frame management
         self.current_frame = None
         self.frame_count = 0
@@ -41,6 +42,11 @@ class OpenCVCamera:
                 ret, frame = self.cap.read()
                 
                 if not ret:
+                    if self.is_file_source:
+                        # End of file — rewind and keep looping
+                        logger.info(f"[{self.camera_id}] End of video file, rewinding...")
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
                     self.error_count += 1
                     logger.warning(f"[{self.camera_id}] Failed to read frame (errors: {self.error_count}/{self.max_errors})")
                     time.sleep(0.5)
@@ -69,27 +75,33 @@ class OpenCVCamera:
                 logger.warning(f"[{self.camera_id}] Already running")
                 return False
             
-            logger.info(f"[{self.camera_id}] Opening RTSP stream: {self.rtsp_url}")
+            if self.is_file_source:
+                logger.info(f"[{self.camera_id}] Opening video file: {self.rtsp_url}")
+                self.cap = cv2.VideoCapture(self.rtsp_url)
+                if not self.cap.isOpened():
+                    raise Exception(f"Failed to open video file: {self.rtsp_url}")
+            else:
+                logger.info(f"[{self.camera_id}] Opening RTSP stream: {self.rtsp_url}")
 
-            # Force TCP transport via URL parameter — more reliable than env var approach
-            # Prevents RTP packet reordering (bad cseq errors) on lossy/remote networks
-            rtsp_url_tcp = self.rtsp_url
-            if self.rtsp_url.startswith("rtsp://") and "rtsp_transport" not in self.rtsp_url:
-                rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
+                # Force TCP transport via URL parameter — more reliable than env var approach
+                # Prevents RTP packet reordering (bad cseq errors) on lossy/remote networks
+                rtsp_url_tcp = self.rtsp_url
+                if "rtsp_transport" not in self.rtsp_url:
+                    rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
 
-            os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
+                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
 
-            self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
-                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,  # 30 second connection timeout
-                cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000,   # 30 second read timeout
-            ])
-            
-            # Configure for RTSP
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
-            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-            
-            if not self.cap.isOpened():
-                raise Exception("Failed to open RTSP stream")
+                self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,  # 30 second connection timeout
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000,   # 30 second read timeout
+                ])
+
+                # Minimize latency for live streams
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+                if not self.cap.isOpened():
+                    raise Exception("Failed to open RTSP stream")
             
             logger.info(f"[{self.camera_id}] Stream opened, attempting first frame read...")
             
@@ -173,7 +185,7 @@ class OpenCVCamera:
         result = {
             "camera_id": self.camera_id,
             "is_running": self.is_running,
-            "backend": "opencv-ffmpeg",
+            "backend": "opencv-file" if self.is_file_source else "opencv-ffmpeg",
             "fps": self.fps,
             "frame_count": self.frame_count,
             "last_frame_time": self.last_frame_time,

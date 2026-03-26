@@ -39,9 +39,9 @@ async def start_camera(config: RTSPConfig):
     ```
     """
     try:
-        # Validate RTSP URL
+        # Validate RTSP URL or video file path
         if not validate_rtsp_url(config.rtsp_url):
-            raise HTTPException(status_code=400, detail="Invalid RTSP URL format")
+            raise HTTPException(status_code=400, detail="Invalid source: must be an RTSP URL or an existing local video file path")
         
         await camera_manager.start_single_camera(config)
         
@@ -105,8 +105,8 @@ async def start_multi_stream(config: MultiStreamConfig):
         for stream in config.streams:
             if not validate_rtsp_url(stream.rtsp_url):
                 raise HTTPException(
-                    status_code=400, 
-                    detail=f"Invalid RTSP URL for camera {stream.camera_id}"
+                    status_code=400,
+                    detail=f"Invalid source for camera {stream.camera_id}: must be an RTSP URL or an existing local video file path"
                 )
         
         await camera_manager.start_multi_stream(

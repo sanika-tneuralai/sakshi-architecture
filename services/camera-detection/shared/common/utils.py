@@ -13,20 +13,32 @@ logger = logging.getLogger(__name__)
 
 def validate_rtsp_url(rtsp_url: str) -> bool:
     """
-    Validate RTSP URL format
-    
+    Validate RTSP URL or video file path.
+
+    Accepts:
+    - RTSP/RTSPS stream URLs
+    - Local video file paths (must exist on disk)
+
     Args:
-        rtsp_url: RTSP URL string
-    
+        rtsp_url: RTSP URL string or local file path
+
     Returns:
         True if valid, False otherwise
     """
+    import os
     if not rtsp_url:
         return False
-    
+
     valid_protocols = ['rtsp://', 'rtsps://']
-    result = any(rtsp_url.startswith(protocol) for protocol in valid_protocols)
-    return result
+    if any(rtsp_url.startswith(protocol) for protocol in valid_protocols):
+        return True
+
+    # Accept local video files that exist on disk
+    video_extensions = ('.mp4', '.avi', '.mkv', '.mov', '.m4v', '.wmv', '.flv', '.webm')
+    if rtsp_url.lower().endswith(video_extensions) and os.path.isfile(rtsp_url):
+        return True
+
+    return False
 
 
 def calculate_fps(frame_count: int, elapsed_time: float) -> float:
