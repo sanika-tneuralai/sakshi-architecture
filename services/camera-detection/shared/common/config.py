@@ -233,7 +233,7 @@ class Config:
     @staticmethod
     def get_camera_detection_url() -> str:
         """URL of camera-detection service"""
-        return os.getenv("CAMERA_DETECTION_URL", "http://localhost:8000")
+        return os.getenv("CAMERA_DETECTION_URL", "http://localhost:8004")
     
     @staticmethod
     def get_usecase_service_url() -> str:

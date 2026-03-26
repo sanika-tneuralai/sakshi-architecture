@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/detection", tags=["detection"])
 
 
-def fetch_camera_config(camera_id: str, config_api_url: str = "http://localhost:8000") -> Optional[Dict[str, Any]]:
+def fetch_camera_config(camera_id: str, config_api_url: str = "http://localhost:8004") -> Optional[Dict[str, Any]]:
     """
     Fetch camera configuration from Configuration API.
     
