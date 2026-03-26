@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import asyncio
 import os
+import time
 from datetime import datetime
 from typing import Optional
 from threading import Thread, Lock
@@ -42,18 +43,18 @@ class OpenCVCamera:
                 if not ret:
                     self.error_count += 1
                     logger.warning(f"[{self.camera_id}] Failed to read frame (errors: {self.error_count}/{self.max_errors})")
-                    asyncio.run(asyncio.sleep(0.5))
+                    time.sleep(0.5)
                     continue
-                
+
                 # Update frame data
                 with self.frame_lock:
                     self.current_frame = frame.copy()
                     self.frame_count += 1
                     self.last_frame_time = datetime.now().timestamp()
                     self.error_count = 0  # Reset error count on success
-                
+
                 # Rate limiting
-                asyncio.run(asyncio.sleep(frame_interval))
+                time.sleep(frame_interval)
                 
         except Exception as e:
             logger.error(f"[{self.camera_id}] Error in capture loop: {str(e)}")
@@ -69,15 +70,16 @@ class OpenCVCamera:
                 return False
             
             logger.info(f"[{self.camera_id}] Opening RTSP stream: {self.rtsp_url}")
-            
-            # Set FFmpeg options for RTSP
-            # Use TCP transport (more reliable than UDP for problematic networks)
+
+            # Force TCP transport via URL parameter — more reliable than env var approach
+            # Prevents RTP packet reordering (bad cseq errors) on lossy/remote networks
+            rtsp_url_tcp = self.rtsp_url
+            if self.rtsp_url.startswith("rtsp://") and "rtsp_transport" not in self.rtsp_url:
+                rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
+
             os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
-            
-            # Open with OpenCV + FFmpeg backend with RTSP options
-            # Use TCP transport for better reliability (UDP can drop packets)
-            # Set timeout to prevent hanging
-            self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG, [
+
+            self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
                 cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,  # 30 second connection timeout
                 cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000,   # 30 second read timeout
             ])
