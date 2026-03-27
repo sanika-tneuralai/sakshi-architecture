@@ -1,22 +1,59 @@
 """
 Vehicle Detail Extraction Rule
 ================================
-Decodes snapshot_b64, crops the car bbox, and attempts OCR for license plate.
-car_model extraction is a stub — wire in your LLM or classifier.
+Decodes snapshot_b64, crops the car bbox, and sends the crop to the
+Gemini Vision API to extract license plate number and car model.
 
-Triggered standalone or after a parking_intime event.
+Gemini is called ONCE per unique car. A car is identified by a stable
+spatial key (camera + bbox snapped to a 50px grid). Once extracted,
+the result is cached in Redis. When the car leaves (bbox disappears
+for EVICT_FRAMES consecutive frames) the cache entry is cleared so a
+new car parking in the same spot gets extracted fresh.
+
+Per-camera state is persisted in Redis so that Celery workers (separate
+processes) share state across frames. The Redis key per camera is:
+    ``vehicle_cache:<camera_id>``
+
+Requires:
+    GEMINI_API_KEY env variable set to your Google AI Studio key.
+
+If Gemini is unavailable or the key is missing, both fields fall back
+to "unreadable" / "unknown".
 """
 import base64
+import hashlib
+import json
 import logging
-import threading
+import os
 from typing import Any, ClassVar, Dict, List
 
 import cv2
 import numpy as np
 
 from usecase.rules.base import BaseUsecaseRule
+from workers.redis_state import get_state, set_state
 
 logger = logging.getLogger(__name__)
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # free-tier model
+
+# Number of consecutive frames a car must be absent before its cache is cleared
+EVICT_FRAMES = 5
+
+
+def _car_key(camera_id: str, bbox: dict) -> str:
+    """
+    Stable identity key for a car detection.
+    Snaps bbox to a 50px grid so minor jitter across frames doesn't
+    create duplicate keys for the same parked car.
+    """
+    raw = (
+        f"{camera_id}_"
+        f"{int(bbox.get('x1', 0) // 50)}_"
+        f"{int(bbox.get('y1', 0) // 50)}"
+    )
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
 def _decode_image(snapshot_b64: str):
@@ -40,66 +77,139 @@ def _crop_bbox(image: np.ndarray, bbox: dict):
     return image[y1:y2, x1:x2]
 
 
-def _ocr_plate(crop: np.ndarray) -> str:
-    """Run pytesseract OCR on the cropped image. Returns empty string if unavailable."""
+def _crop_to_b64(crop: np.ndarray) -> str:
+    _, buf = cv2.imencode(".jpg", crop)
+    return base64.b64encode(buf.tobytes()).decode("utf-8")
+
+
+def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
+    """
+    Send the cropped car image to Gemini and extract car_number and car_model.
+    Falls back to defaults on any error.
+    """
+    if not GEMINI_API_KEY:
+        logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
+        return {"car_number": "unreadable", "car_model": "unknown"}
+
     try:
-        import pytesseract
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        text = pytesseract.image_to_string(
-            thresh,
-            config="--psm 8 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        image_b64 = _crop_to_b64(crop)
+
+        prompt = (
+            "You are a vehicle recognition assistant. "
+            "Look at this image of a vehicle and return ONLY a JSON object with two keys:\n"
+            '  "car_number": the license plate number as a string (e.g. "MH12AB1234"), '
+            'or "unreadable" if not visible.\n'
+            '  "car_model": the make and model of the vehicle (e.g. "Toyota Innova"), '
+            'or "unknown" if not identifiable.\n'
+            "Return only valid JSON, no explanation."
         )
-        return text.strip()
-    except ImportError:
-        logger.debug("[VEHICLE] pytesseract not installed — plate OCR skipped")
-        return ""
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Part.from_text(text=prompt),
+                types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"),
+            ],
+        )
+        text = response.text.strip()
+
+        # Strip markdown code fences if Gemini wraps the JSON
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        result = json.loads(text)
+        return {
+            "car_number": str(result.get("car_number", "unreadable")),
+            "car_model": str(result.get("car_model", "unknown")),
+        }
+
     except Exception as exc:
-        logger.warning("[VEHICLE] OCR error: %s", exc)
-        return ""
-
-
-def _classify_model(crop: np.ndarray) -> str:
-    # TODO: replace with LLM call or ResNet classifier
-    return "unknown"
+        logger.warning("[VEHICLE] Gemini extraction failed: %s", exc)
+        return {"car_number": "unreadable", "car_model": "unknown"}
 
 
 class VehicleExtractionRule(BaseUsecaseRule):
     USECASE_ID: ClassVar[str] = "vehicle_extraction"
-    _lock = threading.Lock()
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
+        camera_id = detection_output.get("camera_id", "unknown")
         cars = [
             d for d in detection_output.get("detections", [])
             if d.get("class_name") == "car"
         ]
-        if not cars:
-            return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
         snapshot_b64 = detection_output.get("snapshot_b64")
         image = _decode_image(snapshot_b64) if snapshot_b64 else None
         vehicle_details: List[dict] = []
 
-        for car in cars:
-            track_id = car.get("track_id", "unknown")
-            plate, model = "", "unknown"
+        # --- Load state from Redis ---
+        # cache: { spatial_key: {car_number, car_model, absent_frames} }
+        redis_key = f"vehicle_cache:{camera_id}"
+        cache: Dict[str, dict] = get_state(redis_key)
 
-            if image is not None:
-                crop = _crop_bbox(image, car["bbox"])
-                if crop is not None and crop.size > 0:
-                    plate = _ocr_plate(crop)
-                    model = _classify_model(crop)
+        # --- Run existing logic (unchanged) ---
+        # Track which keys are seen this frame to evict gone cars
+        seen_keys = set()
+
+        for car in cars:
+            bbox = car.get("bbox", {})
+            key = _car_key(camera_id, bbox)
+            seen_keys.add(key)
+
+            if key in cache:
+                # Already extracted — return cached result, skip Gemini
+                cached = cache[key]
+                cached["absent_frames"] = 0
+                logger.debug("[VEHICLE] Cache hit for key=%s", key)
+                car_number = cached["car_number"]
+                car_model = cached["car_model"]
+            else:
+                # New car — call Gemini once
+                car_number, car_model = "unreadable", "unknown"
+                if image is not None:
+                    crop = _crop_bbox(image, bbox)
+                    if crop is not None and crop.size > 0:
+                        extracted = _query_gemini(crop)
+                        car_number = extracted["car_number"]
+                        car_model = extracted["car_model"]
+
+                cache[key] = {
+                    "car_number": car_number,
+                    "car_model": car_model,
+                    "absent_frames": 0,
+                }
+                logger.info(
+                    "[VEHICLE] New car extracted: key=%s plate=%s model=%s",
+                    key, car_number, car_model,
+                )
 
             vehicle_details.append({
-                "track_id": track_id,
-                "car_number": plate or "unreadable",
-                "car_model": model,
+                "track_id": car.get("track_id") or key,
+                "car_number": car_number,
+                "car_model": car_model,
                 "confidence": car.get("confidence", 0.0),
             })
-            logger.info(
-                "[VEHICLE] track=%s plate=%s model=%s",
-                track_id, plate or "unreadable", model,
-            )
+
+        # Increment absent counter for cars not seen this frame
+        for key in list(cache.keys()):
+            if key not in seen_keys:
+                cache[key]["absent_frames"] += 1
+                if cache[key]["absent_frames"] >= EVICT_FRAMES:
+                    logger.info("[VEHICLE] Car left, clearing cache for key=%s", key)
+                    del cache[key]
+
+        # --- Save updated state back to Redis ---
+        set_state(redis_key, cache)
+
+        if not cars:
+            return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
         return {
             "triggered": True,
