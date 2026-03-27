@@ -13,11 +13,15 @@ def _slim_detection(detetion: Dict[str, Any]):
     ROI has been removed from the detection service — rules now evaluate
     against all detections regardless of position.
     """
-    return {
+    slim = {
         "class_name": detetion.get("class_name"),
         "confidence": detetion.get("confidence"),
         "bbox": detetion.get("bbox", {})
     }
+    # preserve track_id if present — required by parking_detection centroid tracker
+    if "track_id" in detetion:
+        slim["track_id"] = detetion["track_id"]
+    return slim
 
 def build_slim_payload(detection_output: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -35,7 +39,8 @@ def build_slim_payload(detection_output: Dict[str, Any]) -> Dict[str, Any]:
         "detections": [_slim_detection(d) for d in raw_detections],
         "snapshot_b64": detection_output.get("snapshot_b64"),
         "first_detection_id": detection_output.get("first_detection_id"),
-        "camera_id": detection_output.get("camera_id")
+        "camera_id": detection_output.get("camera_id"),
+        "rois": detection_output.get("rois"),
     }
 
 def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camera_id: str) -> UsecaseResult:
@@ -67,6 +72,11 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
 
         slim_matched = [_slim_detection(d) for d in matched]
 
+        # Collect every rule-specific key beyond the standard ones into extras.
+        # This is pluggable — any field a rule returns flows through automatically.
+        _standard_keys = {"triggered", "matched_objects"}
+        extras = {k: v for k, v in evaluation.items() if k not in _standard_keys}
+
         result = UsecaseResult(
             usecase_id=usecase_id,
             triggered=evaluation.get("triggered", False),
@@ -74,6 +84,7 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
             matched_objects=slim_matched,
             detection_id=slim_payload.get("first_detection_id"),
             snapshot_b64=slim_payload.get("snapshot_b64"),
+            extras=extras,
         )
         logger.info(
             f"[ENGINE] Usecase '{usecase_id}' evaluation completed. Triggered: {result.triggered}, Matched Count: {result.matched_count}, Matched Objects: {result.matched_objects}"
