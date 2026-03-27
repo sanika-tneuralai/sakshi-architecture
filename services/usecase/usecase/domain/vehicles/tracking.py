@@ -142,3 +142,39 @@ class CentroidTracker:
             self._centroids.clear()
             self._disappeared.clear()
             self._next_id = 0
+
+    # ------------------------------------------------------------------
+    # Redis serialization helpers
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """
+        Serialize tracker state to a plain JSON-compatible dict.
+
+        numpy arrays stored in ``_centroids`` are converted to plain lists
+        so the result can be safely passed to ``json.dumps``.
+        """
+        with self._lock:
+            return {
+                "next_id": self._next_id,
+                "centroids": {
+                    tid: centroid.tolist()
+                    for tid, centroid in self._centroids.items()
+                },
+                "disappeared": dict(self._disappeared),
+            }
+
+    def from_dict(self, data: dict) -> None:
+        """
+        Restore tracker state from a plain dict (as produced by ``to_dict``).
+
+        Lists stored in ``data["centroids"]`` are converted back to
+        numpy arrays so ``update()`` can operate on them unchanged.
+        """
+        with self._lock:
+            self._next_id = data.get("next_id", 0)
+            self._centroids = OrderedDict(
+                (tid, np.array(centroid, dtype=np.float32))
+                for tid, centroid in data.get("centroids", {}).items()
+            )
+            self._disappeared = dict(data.get("disappeared", {}))
