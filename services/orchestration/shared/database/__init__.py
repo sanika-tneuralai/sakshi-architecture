@@ -67,8 +67,13 @@ from shared.database.models import (
     Detection,
     UsecaseResult,
     Alert,
-    AnalyticsDaily
+    AnalyticsDaily,
+    ROIConfig,
+    CameraUsecase,
 )
+
+# Import persistence helpers
+from shared.database.persistence import get_camera_rois, get_camera_usecases
 
 # Define what gets exported when using "from shared.database import *"
 __all__ = [
@@ -80,13 +85,19 @@ __all__ = [
     'init_db',
     'test_connection',
     'DATABASE_URL',
-    
+
     # Models
     'Camera',
     'Detection',
     'UsecaseResult',
     'Alert',
     'AnalyticsDaily',
+    'ROIConfig',
+    'CameraUsecase',
+
+    # Persistence helpers
+    'get_camera_rois',
+    'get_camera_usecases',
 ]
 
 # Package metadata

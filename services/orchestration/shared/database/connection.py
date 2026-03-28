@@ -74,14 +74,17 @@ def init_db():
         Exception: If database connection or table creation fails
     """
     # Import models to register them with Base.metadata
-    from shared.database.models import Camera, Detection, UsecaseResult, Alert, AnalyticsDaily
+    from shared.database.models import (
+        Camera, Detection, UsecaseResult, Alert, AnalyticsDaily,
+        ROIConfig, CameraUsecase,
+    )
     
     print(f"[DATABASE] Initializing database...")
     print(f"[DATABASE] Database URL: {DATABASE_URL.split('@')[-1]}")  # Hide credentials
     
     try:
-        # Create all tables
-        Base.metadata.create_all(bind=engine)
+        # Create all tables (checkfirst=True skips tables that already exist)
+        Base.metadata.create_all(bind=engine, checkfirst=True)
         print(f"[DATABASE] Tables created successfully")
         
         # Test connection

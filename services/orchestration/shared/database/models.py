@@ -18,7 +18,7 @@ Usage:
     # Or import specific models needed by your service
     from shared.database.models import Camera, Detection
 """
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.sql import func
 from shared.database.connection import Base
 
@@ -139,4 +139,70 @@ class AnalyticsDaily(Base):
     
     __table_args__ = (
         UniqueConstraint('date', 'camera_id', name='uix_date_camera'),
+    )
+
+
+class ROIConfig(Base):
+    """
+    ROIConfig model for storing per-camera region-of-interest definitions.
+
+    Each row defines one ROI polygon for a camera. The orchestration layer
+    fetches these at runtime and forwards them to the usecase service so that
+    rules such as parking_detection, restricted_area, and people_counter can
+    evaluate detections against the correct geometry.
+
+    Attributes:
+        id (int): Auto-incrementing primary key
+        camera_id (str): Foreign key to cameras table
+        roi_id (str): Logical identifier used by rules (e.g. "roi_1")
+        roi_type (str): Rule-domain tag (e.g. "parking_zone", "restricted_zone",
+                        "counting_zone", "safety_zone")
+        points (list): JSON array of [x, y] coordinate pairs defining the polygon
+        label (str): Human-readable name shown in dashboards / logs
+        roi_metadata (dict): Rule-specific configuration stored as JSON
+                             e.g. {"max_occupancy": 5} for people_counter
+                                  {"allowed_hours": "08:00-20:00"} for parking_compliance
+    """
+    __tablename__ = "roi_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    camera_id = Column(String(255), ForeignKey("cameras.camera_id"), nullable=False, index=True)
+    roi_id = Column(String(100), nullable=False)
+    roi_type = Column(String(100), nullable=False)
+    points = Column(JSON, nullable=False)           # [[x1,y1], [x2,y2], ...]
+    label = Column(String(255), nullable=True)
+    roi_metadata = Column(JSON, nullable=True, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint('camera_id', 'roi_id', name='uix_camera_roi'),
+    )
+
+
+class CameraUsecase(Base):
+    """
+    CameraUsecase model for storing which usecases are enabled per camera
+    and any per-usecase configuration overrides.
+
+    The orchestration layer queries this table to build the `usecases` list
+    that is sent to the usecase evaluation service, replacing the hard-coded
+    default list in CameraConfig.
+
+    Attributes:
+        id (int): Auto-incrementing primary key
+        camera_id (str): Foreign key to cameras table
+        usecase_id (str): Usecase rule identifier (e.g. "parking_detection")
+        enabled (bool): Whether this usecase should run for this camera
+        config (dict): Per-usecase JSON config overrides
+                       e.g. {"confidence_threshold": 0.6, "max_occupancy": 10}
+    """
+    __tablename__ = "camera_usecases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    camera_id = Column(String(255), ForeignKey("cameras.camera_id"), nullable=False, index=True)
+    usecase_id = Column(String(100), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    config = Column(JSON, nullable=True, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint('camera_id', 'usecase_id', name='uix_camera_usecases_mapping'),
     )

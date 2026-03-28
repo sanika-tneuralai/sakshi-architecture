@@ -24,9 +24,14 @@ This service does NOT contain camera/detection/usecase logic itself.
 
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load .env before any os.getenv() calls
+load_dotenv()
+
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Set, Any
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -43,6 +48,7 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
+from shared.database.persistence import get_camera_rois, get_camera_usecases
 
 # Configure logging
 logging.basicConfig(
@@ -62,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 # Service URLs
 
-CAMERA_DETECTION_URL=os.getenv("CAMERA_DETECTION_URL","http://13.201.133.171:8000") #EC2
+CAMERA_DETECTION_URL=os.getenv("CAMERA_DETECTION_URL","http://13.201.133.171:8004") #EC2
 # CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8000") #edgeserver
 USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
@@ -222,17 +228,33 @@ async def run_detection(camera_id: str, confidence_threshold: float) -> dict:
 
 
 @retry_on_failure
-async def evaluate_usecases(camera_id: str, detection_data: dict, usecases: List[str]) -> dict:
-    """Evaluate usecases with retry"""
+async def evaluate_usecases(
+    camera_id: str,
+    detection_data: dict,
+    usecases: List[str],
+    rois: List[dict],
+) -> dict:
+    """Evaluate usecases with retry.
+
+    Merges ROI definitions (fetched from DB by the caller) into detection_output
+    so stateful rules (parking_detection, restricted_area, people_counter, etc.)
+    have the geometry they need.
+    """
     async with usecase_semaphore:
+        detection_output = dict(detection_data)
+        # Convert DB list-of-dicts → {"ROI_1": [[x,y], ...], "ROI_2": ...}
+        # Rules (parking_detection, gun_detection, etc.) expect this dict format.
+        detection_output["rois"] = {
+            r["roi_id"]: r["points"] for r in rois
+        }
         response = await http_client.post(
             f"{USECASE_SERVICE_URL}/usecase/evaluate",
             json={
                 "camera_id": camera_id,
-                "detection_output": detection_data,
-                "usecases": usecases
+                "detection_output": detection_output,
+                "usecases": usecases,
             },
-            timeout=REQUEST_TIMEOUT
+            timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         return response.json()
@@ -308,7 +330,7 @@ class PipelineManager:
                 "status": "started",
                 "camera_id": config.camera_id,
                 "message": f"Continuous pipeline started for {config.camera_id}",
-                "configuration": config.dict()
+                "configuration": config.model_dump()
             }
     
     async def stop_pipeline(self, camera_id: str) -> dict:
@@ -413,7 +435,7 @@ class PipelineManager:
                     last_run=stats.last_run,
                     avg_latency_ms=stats.avg_latency_ms,
                     last_error=stats.last_error
-                ).dict()
+                ).model_dump()
             else:
                 # All pipelines status
                 pipelines_status = []
@@ -426,7 +448,7 @@ class PipelineManager:
                         last_run=stats.last_run,
                         avg_latency_ms=stats.avg_latency_ms,
                         last_error=stats.last_error
-                    ).dict())
+                    ).model_dump())
                 
                 return {
                     "active_pipelines": len([s for s in self.stats.values() if s.running]),
@@ -471,13 +493,34 @@ class PipelineManager:
                     }
                     logger.debug(f"[{camera_id}] Snapshot cached ({total_det} detections)")
 
-                # STEP 2: Evaluate usecases
-                usecase_data = await evaluate_usecases(camera_id, detection_data, config.usecases)
+                # STEP 2: Fetch ROIs and enabled usecases from DB
+                rois = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_rois, camera_id
+                )
+                db_usecases = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_usecases, camera_id
+                )
+                # Fall back to config usecases if none configured in DB
+                active_usecases = db_usecases if db_usecases else config.usecases
+                logger.debug(
+                    f"[{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}"
+                )
+
+                # STEP 3: Evaluate usecases
+                usecase_data = await evaluate_usecases(camera_id, detection_data, active_usecases, rois)
                 results = usecase_data.get('results', [])
                 triggered = [r for r in results if r.get('triggered')]
                 logger.debug(f"[{camera_id}] Usecases evaluated | triggered={len(triggered)}/{len(results)}")
-                
-                # STEP 3: Send alerts (non-critical, don't fail on error)
+
+                # Log rule-specific extras from triggered results (parking events, vehicle details, etc.)
+                for r in triggered:
+                    extras = r.get('extras')
+                    if extras:
+                        logger.info(
+                            f"[{camera_id}] extras from {r.get('usecase_id', r.get('usecase_name'))} | {extras}"
+                        )
+
+                # STEP 4: Send alerts (non-critical, don't fail on error)
                 try:
                     alert_data = await send_alerts(camera_id, results)
                     alerts_sent = len(alert_data.get('alerts_sent', []))
@@ -890,12 +933,22 @@ async def execute_pipeline_once(request: PipelineRequest):
                         "detections": detection_data.get('detections', []),
                         "detection_count": total_det
                     }
-                
+
+                # Fetch ROIs and enabled usecases from DB
+                rois = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_rois, camera_id
+                )
+                db_usecases = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_usecases, camera_id
+                )
+                active_usecases = db_usecases if db_usecases else usecases
+                logger.info(f"DEBUG: [{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}")
+
                 # Evaluate usecases
                 logger.info(f"DEBUG: [{camera_id}] Calling evaluate_usecases...")
-                usecase_data = await evaluate_usecases(camera_id, detection_data, usecases)
+                usecase_data = await evaluate_usecases(camera_id, detection_data, active_usecases, rois)
                 logger.info(f"DEBUG: [{camera_id}] Usecases evaluated: {len(usecase_data.get('results', []))} results")
-                
+
                 # Send alerts (non-critical)
                 try:
                     logger.info(f"DEBUG: [{camera_id}] Calling send_alerts...")
@@ -904,7 +957,7 @@ async def execute_pipeline_once(request: PipelineRequest):
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Alert sending failed (non-critical): {str(e)}")
                     alert_data = {"alerts_sent": [], "status": "failed"}
-                
+
                 triggered_usecases = [r for r in usecase_data.get('results', []) if r.get('triggered')]
                 
                 return {
