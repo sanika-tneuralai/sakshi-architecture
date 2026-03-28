@@ -18,7 +18,7 @@ Usage:
     # Or import specific models needed by your service
     from shared.database.models import Camera, Detection
 """
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint, JSON, Text
 from sqlalchemy.sql import func
 from shared.database.connection import Base
 
@@ -106,11 +106,13 @@ class Alert(Base):
     alert_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("cameras.camera_id"), nullable=False, index=True)
     usecase_name = Column(String(100), nullable=False)
-    alert_type = Column(String(50), nullable=False)
+    alert_type = Column(String(100), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     status = Column(String(20), nullable=False)  # 'sent' or 'failed'
     detection_id = Column(Integer, ForeignKey("detections.detection_id"), nullable=True)
     screenshot_path = Column(String(500), nullable=True)
+    snapshot_b64 = Column(Text, nullable=True)        # base64 JPEG frame at alert time
+    extras = Column(JSON, nullable=True)              # rule-specific data (events, violations, etc.)
 
 
 class AnalyticsDaily(Base):

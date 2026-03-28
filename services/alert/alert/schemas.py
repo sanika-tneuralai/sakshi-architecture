@@ -2,11 +2,11 @@
 Pydantic schemas for alert module.
 """
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 class AlertRequest(BaseModel):
-    """Alert-ready payload from Usecase API"""
+    """Alert-ready payload from Usecase API (legacy single-alert endpoint)"""
     camera_id: str = Field(..., description="Camera ID")
     usecase_id: str = Field(..., description="Usecase identifier")
     alert_required: bool = Field(..., description="Whether alert is required")
@@ -22,15 +22,23 @@ class PipelineAlertRequest(BaseModel):
 
 
 class AlertDetail(BaseModel):
-    """Details of a single alert sent"""
-    usecase_id: str
-    alert_type: str
-    alert_count: int
-    message: str
+    """Details of a single alert that was fired"""
+    usecase_id: str                             # e.g. "parking_detection"
+    alert_type: str                             # e.g. "parking_detection_triggered"
+    alert_count: int                            # number of matched objects
+    message: str                                # human-readable summary
+    timestamp: str                              # ISO-8601 UTC when the alert fired
+    snapshot_b64: Optional[str] = None         # base64 JPEG frame from detection
+    extras: Optional[Dict[str, Any]] = None    # rule-specific data:
+                                                #   parking_detection  → events (intime/outtime)
+                                                #   gun_detection      → events (plugin/plugout)
+                                                #   parking_compliance → violations
+                                                #   people_counter     → occupancy details
+                                                #   any future rule    → whatever it returns
 
 
 class AlertResponse(BaseModel):
-    """Response after processing alert"""
+    """Response after processing a single alert (legacy endpoint)"""
     camera_id: str
     alert_sent: bool
     alert_type: str
@@ -39,25 +47,26 @@ class AlertResponse(BaseModel):
 
 
 class PipelineAlertResponse(BaseModel):
-    """Response after processing multiple alerts"""
+    """Response after processing multiple alerts from a pipeline iteration"""
     camera_id: str
     total_alerts_sent: int
     alerts_sent: List[AlertDetail]
 
 
 class AlertRecord(BaseModel):
-    """Alert record from database"""
+    """Alert record returned from the /alert/list endpoint"""
     alert_id: int
     camera_id: str
     usecase_name: str
     alert_type: str
     timestamp: str
     status: str
-    screenshot_path: str = None
+    snapshot_b64: Optional[str] = None
+    extras: Optional[Dict[str, Any]] = None
+    screenshot_path: Optional[str] = None
 
 
 class AlertListResponse(BaseModel):
-    """Response for alert list"""
+    """Response for the /alert/list endpoint"""
     alerts: List[AlertRecord]
     total: int
-

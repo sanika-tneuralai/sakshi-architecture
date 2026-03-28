@@ -118,7 +118,9 @@ def get_alerts(
                 alert_type=r.alert_type,
                 timestamp=r.timestamp.isoformat() if r.timestamp else None,
                 status=r.status,
-                screenshot_path=r.screenshot_path
+                screenshot_path=r.screenshot_path,
+                snapshot_b64=r.snapshot_b64,
+                extras=r.extras,
             )
             for r in results
         ]
