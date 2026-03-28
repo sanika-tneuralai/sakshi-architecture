@@ -37,6 +37,10 @@ env/
 # Environment
 .env
 .env.local
+.genv/
+
+screenshots/
+
 
 # Logs
 *.log
