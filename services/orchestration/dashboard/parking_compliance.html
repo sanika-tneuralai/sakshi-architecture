@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>GOEC — Parking Compliance</title>
+  <link rel="stylesheet" href="shared.css"/>
+  <style>
+    .uc-layout { display: grid; grid-template-columns: 1fr 400px; gap: var(--gap); }
+    .uc-layout .col-left  { display: flex; flex-direction: column; gap: var(--gap); }
+    .uc-layout .col-right { display: flex; flex-direction: column; gap: var(--gap); }
+    @media(max-width:1000px){ .uc-layout { grid-template-columns: 1fr; } }
+    .alerts-list { max-height: 420px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+<div id="toast-container"></div>
+<div id="sidebar-slot"></div>
+
+<div class="main-area" id="main-area">
+  <div class="topbar">
+    <div class="topbar-left">
+      <a href="home.html" style="color:var(--muted);font-size:12px;text-decoration:none;">← Home</a>
+      <h2 class="topbar-title">🚗 Parking Compliance</h2>
+      <span class="badge loading" id="page-badge">Loading…</span>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-refresh">Updated: <span id="last-refresh">—</span></span>
+    </div>
+  </div>
+
+  <div class="page-content">
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px">
+      <div class="status-chip"><div class="dot" id="dot-orch"></div><span id="lbl-orch">Orchestration</span></div>
+      <div class="status-chip"><div class="dot" id="dot-usecase"></div><span id="lbl-usecase">Usecase Service</span></div>
+      <div class="status-chip"><div class="dot" id="dot-alert"></div><span id="lbl-alert">Alert Service</span></div>
+      <div class="status-chip"><div class="dot" id="dot-cam"></div><span id="lbl-cam">Camera Detection</span></div>
+      <div class="status-chip"><div class="dot" id="dot-worker"></div><span id="lbl-worker">Celery Workers</span></div>
+    </div>
+
+    <div class="kpi-strip">
+      <div class="kpi-chip">
+        <div class="kpi-label">Total Alerts</div>
+        <div class="kpi-val" id="kpi-total">—</div>
+        <div class="kpi-sub">all time</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Latest Alert</div>
+        <div class="kpi-val" style="font-size:14px" id="kpi-latest">—</div>
+        <div class="kpi-sub">timestamp</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Pipeline</div>
+        <div class="kpi-val" id="kpi-pipeline">—</div>
+        <div class="kpi-sub">camera_01</div>
+      </div>
+    </div>
+
+    <div class="uc-layout">
+      <div class="col-left">
+        <div class="card">
+          <div class="card-header">
+            <h3>📷 Live Frame Viewer</h3>
+            <button class="filter-btn" onclick="refreshNow()">↻ Refresh</button>
+          </div>
+          <div class="live-frame-box" id="frame-box" style="max-height:340px">
+            <div class="frame-empty"><div class="frame-icon">📷</div>Fetching latest frame…</div>
+          </div>
+          <div class="card-footer">
+            <span id="frame-ts">—</span>
+            <span style="color:var(--warn)" id="frame-label">Latest alert snapshot</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>🔔 Violation Alert Feed</h3>
+          </div>
+          <div style="padding:10px 16px 0;border-bottom:1px solid var(--border)">
+            <div class="filter-bar">
+              <label>Time range:</label>
+              <select class="filter-select" id="filter-range">
+                <option value="20">Last 20</option>
+                <option value="50">Last 50</option>
+                <option value="100">Last 100</option>
+              </select>
+              <button class="filter-btn" onclick="refreshNow()">Apply</button>
+            </div>
+          </div>
+          <div class="alerts-list" id="alerts-list">
+            <div class="spinner-wrap"><div class="spinner"></div></div>
+          </div>
+          <div class="card-footer">
+            <span id="footer-count">—</span>
+            <span id="footer-ts">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-right">
+        <div class="card" style="flex:1">
+          <div class="card-header">
+            <h3>📋 Alert Detail</h3>
+          </div>
+          <div id="detail-panel" style="padding:20px">
+            <div style="text-align:center;color:var(--muted);padding:40px 0">
+              <div style="font-size:28px;margin-bottom:8px">👆</div>
+              Click any alert to see details
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="modal-overlay" class="modal-overlay" onclick="if(event.target===this)Modal.close()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Alert Detail</h3>
+      <button class="modal-close" onclick="Modal.close()">×</button>
+    </div>
+    <div class="modal-body">
+      <img id="modal-snapshot" class="modal-snapshot" alt="Alert Snapshot"/>
+      <div class="modal-field"><label>Camera</label><div class="val" id="m-camera">—</div></div>
+      <div class="modal-field"><label>Usecase</label><div class="val" id="m-usecase">—</div></div>
+      <div class="modal-field"><label>Alert Type</label><div class="val" id="m-type">—</div></div>
+      <div class="modal-field"><label>Timestamp</label><div class="val" id="m-ts">—</div></div>
+      <div class="modal-field"><label>Status</label><div class="val" id="m-status">—</div></div>
+      <div class="modal-field" id="m-extras-section" style="display:none">
+        <label>Extras</label><pre class="extras" id="m-extras"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+  if (!Auth.requireAuth()) throw new Error('unauthenticated');
+  injectSidebarHTML('parking_compliance');
+  initSidebar();
+
+  const UC_ID = 'parking_compliance';
+  let prevAlerts = null;
+
+  function renderDetailPanel(alert) {
+    const snap = alert.snapshot_b64
+      ? `<img src="data:image/jpeg;base64,${alert.snapshot_b64}" style="width:100%;border-radius:6px;margin-bottom:14px"/>`
+      : '';
+    const extras = alert.extras && Object.keys(alert.extras).length > 0
+      ? `<div class="modal-field"><label>Extras</label><pre class="extras">${JSON.stringify(alert.extras, null, 2)}</pre></div>`
+      : '';
+    document.getElementById('detail-panel').innerHTML = `
+      ${snap}
+      <div class="modal-field"><label>Alert Type</label><div class="val">${escHtml(alert.alert_type || '—')}</div></div>
+      <div class="modal-field"><label>Camera</label><div class="val">${escHtml(alert.camera_id || '—')}</div></div>
+      <div class="modal-field"><label>Timestamp</label><div class="val">${fmtTsFull(alert.timestamp)}</div></div>
+      <div class="modal-field"><label>Status</label><div class="val">${escHtml(alert.status || '—')}</div></div>
+      ${extras}
+    `;
+  }
+
+  async function refreshNow() {
+    const limit = document.getElementById('filter-range').value;
+    const [alertData, pipeline] = await Promise.all([
+      fetchJSON(`${CONFIG.alertUrl}/alert/list?camera_id=${CONFIG.cameraId}&usecase_name=${UC_ID}&limit=${limit}`, { alerts: [] }),
+      fetchJSON(`${CONFIG.orchestrationUrl}/pipeline/status/${CONFIG.cameraId}`),
+    ]);
+
+    await refreshServiceStatus();
+
+    const alerts = (alertData && alertData.alerts) ? alertData.alerts : null;
+    const alertsArr = alerts || [];
+
+    setDot('dot-alert', alertData !== null ? 'green' : 'red',
+      alertData !== null ? 'Alert Service: Up' : 'Alert Service: Down');
+
+    const badge = document.getElementById('page-badge');
+    badge.textContent = alertsArr.length > 0 ? 'Active' : 'No Alerts';
+    badge.className   = `badge ${alertsArr.length > 0 ? 'active' : 'inactive'}`;
+
+    document.getElementById('kpi-total').textContent   = alertsArr.length;
+    document.getElementById('kpi-latest').textContent  = alertsArr[0] ? fmtTs(alertsArr[0].timestamp) : '—';
+    document.getElementById('kpi-pipeline').textContent = pipeline
+      ? (pipeline.running ? '▶ Running' : '⏸ Idle') : '—';
+
+    renderSnapshot('frame-box', alertsArr);
+    document.getElementById('frame-ts').textContent = alertsArr[0] ? fmtTsFull(alertsArr[0].timestamp) : '—';
+
+    const listEl = document.getElementById('alerts-list');
+    if (alertData === null) {
+      listEl.innerHTML = '<div class="error-state">⚠️ Unable to fetch alert data. Check Alert Service.</div>';
+    } else if (alertsArr.length === 0) {
+      listEl.innerHTML = '<div class="no-alerts"><div class="no-alerts-icon">✅</div>No violations recorded</div>';
+    } else {
+      if (prevAlerts) {
+        const prevIds = new Set(prevAlerts.map(a => a.alert_id));
+        alertsArr.filter(a => !prevIds.has(a.alert_id)).forEach(a => {
+          Toast.show({ title: 'New Compliance Alert', message: a.alert_type, type: 'warn' });
+        });
+      }
+      listEl.innerHTML = alertsArr.map((a, i) => `
+        <div class="alert-item" id="alert-row-${i}" onclick="selectAlert(${i})">
+          <div class="alert-icon">🔔</div>
+          <div class="alert-body">
+            <div class="alert-type">${escHtml(a.alert_type || a.usecase_name || '—')}</div>
+            <div class="alert-meta">${escHtml(a.camera_id || '')} &mdash; ${escHtml(a.status || '')}</div>
+          </div>
+          <div class="alert-ts">${fmtTs(a.timestamp)}</div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('footer-count').textContent  = `${alertsArr.length} alert${alertsArr.length !== 1 ? 's' : ''}`;
+    document.getElementById('footer-ts').textContent     = alertsArr[0] ? `Last: ${fmtTs(alertsArr[0].timestamp)}` : '—';
+
+    prevAlerts = alertsArr;
+    setLastRefresh();
+    window._currentAlerts = alertsArr;
+  }
+
+  function selectAlert(idx) {
+    const a = (window._currentAlerts || [])[idx];
+    if (!a) return;
+    renderDetailPanel(a);
+    document.querySelectorAll('.alert-item').forEach((el, i) => {
+      el.style.background = i === idx ? 'rgba(56,139,253,0.1)' : '';
+    });
+  }
+
+  refreshNow();
+  setInterval(refreshNow, CONFIG.refreshIntervalMs);
+</script>
+</body>
+</html>

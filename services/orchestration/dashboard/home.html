@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>GOEC — Home</title>
+  <link rel="stylesheet" href="shared.css"/>
+  <style>
+    /* Usecase summary grid */
+    .uc-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: var(--gap);
+      margin-bottom: 32px;
+    }
+
+    .uc-summary-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      cursor: pointer;
+      text-decoration: none;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+      position: relative;
+      overflow: hidden;
+    }
+    .uc-summary-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--card-accent, var(--info));
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .uc-summary-card:hover {
+      border-color: var(--card-accent, var(--info));
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      transform: translateY(-2px);
+    }
+    .uc-summary-card:hover::before { opacity: 1; }
+
+    .uc-card-top {
+      display: flex; align-items: flex-start; justify-content: space-between;
+    }
+    .uc-icon {
+      width: 46px; height: 46px;
+      background: var(--surface2);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      border: 1px solid var(--border);
+    }
+    .uc-summary-card h3 { font-size: 15px; font-weight: 600; }
+    .uc-alert-count {
+      font-size: 32px;
+      font-weight: 700;
+      color: var(--card-accent, var(--info));
+    }
+    .uc-alert-label { font-size: 12px; color: var(--muted); }
+    .uc-go {
+      font-size: 12px;
+      color: var(--muted);
+      display: flex; align-items: center; gap: 4px;
+      margin-top: auto;
+    }
+
+    /* Pipeline KPI strip */
+    .kpi-strip { display: flex; gap: var(--gap); flex-wrap: wrap; margin-bottom: 28px; }
+
+    /* Service status */
+    #status-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 28px; }
+  </style>
+</head>
+<body>
+
+<div id="toast-container"></div>
+<div id="sidebar-slot"></div>
+
+<div class="main-area" id="main-area">
+  <div class="topbar">
+    <div class="topbar-left">
+      <h2 class="topbar-title">Home</h2>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-refresh">Updated: <span id="last-refresh">—</span></span>
+    </div>
+  </div>
+
+  <div class="page-content">
+
+    <!-- Service status -->
+    <div id="status-row">
+      <div class="status-chip"><div class="dot" id="dot-orch"></div><span id="lbl-orch">Orchestration</span></div>
+      <div class="status-chip"><div class="dot" id="dot-usecase"></div><span id="lbl-usecase">Usecase Service</span></div>
+      <div class="status-chip"><div class="dot" id="dot-alert"></div><span id="lbl-alert">Alert Service</span></div>
+      <div class="status-chip"><div class="dot" id="dot-cam"></div><span id="lbl-cam">Camera Detection</span></div>
+      <div class="status-chip"><div class="dot" id="dot-worker"></div><span id="lbl-worker">Celery Workers</span></div>
+    </div>
+
+    <!-- Pipeline KPIs -->
+    <div class="kpi-strip">
+      <div class="kpi-chip">
+        <div class="kpi-label">Pipeline</div>
+        <div class="kpi-val" id="kpi-running">—</div>
+        <div class="kpi-sub">camera_01</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Iterations</div>
+        <div class="kpi-val" id="kpi-iters">—</div>
+        <div class="kpi-sub">total processed</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Avg Latency</div>
+        <div class="kpi-val" id="kpi-latency">—</div>
+        <div class="kpi-sub">ms per cycle</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Errors</div>
+        <div class="kpi-val" id="kpi-errors">—</div>
+        <div class="kpi-sub">pipeline errors</div>
+      </div>
+      <div class="kpi-chip">
+        <div class="kpi-label">Total Alerts</div>
+        <div class="kpi-val" id="kpi-total-alerts">—</div>
+        <div class="kpi-sub">all usecases</div>
+      </div>
+    </div>
+
+    <!-- Usecase Cards -->
+    <p class="section-title">Usecase Monitoring</p>
+    <div class="uc-summary-grid" id="uc-grid">
+      <!-- Injected by JS -->
+    </div>
+
+    <!-- Analytics teaser -->
+    <p class="section-title">Analytics</p>
+    <div style="display:flex;gap:var(--gap);flex-wrap:wrap">
+      <a href="analytics.html" class="uc-summary-card" style="--card-accent:#388bfd; max-width:320px">
+        <div class="uc-card-top">
+          <div class="uc-icon">📊</div>
+          <span class="badge coming-soon">Coming Soon</span>
+        </div>
+        <div>
+          <h3>Analytics Dashboard</h3>
+          <p style="font-size:12px;color:var(--muted);margin-top:4px">
+            Charging Pattern Analysis &amp; Loss Analysis
+          </p>
+        </div>
+        <div class="uc-go">View Analytics →</div>
+      </a>
+    </div>
+
+  </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+  if (!Auth.requireAuth()) throw new Error('unauthenticated');
+
+  injectSidebarHTML('home');
+  initSidebar();
+
+  const alertCounts = {};
+
+  function buildGrid() {
+    const grid = document.getElementById('uc-grid');
+    grid.innerHTML = USECASES.map(uc => `
+      <a href="${uc.page}" class="uc-summary-card" style="--card-accent:${uc.color}" id="uc-card-${uc.id}">
+        <div class="uc-card-top">
+          <div class="uc-icon">${uc.icon}</div>
+          <span class="badge loading" id="badge-${uc.id}">Loading…</span>
+        </div>
+        <h3>${uc.label}</h3>
+        <div>
+          <div class="uc-alert-count" style="color:${uc.color}" id="count-${uc.id}">
+            <div class="spinner sm"></div>
+          </div>
+          <div class="uc-alert-label">alerts recorded</div>
+        </div>
+        <div class="uc-go">View details →</div>
+      </a>
+    `).join('');
+  }
+
+  async function refresh() {
+    const [pipeline, usecaseQ, ...alertResults] = await Promise.all([
+      fetchJSON(`${CONFIG.orchestrationUrl}/pipeline/status/${CONFIG.cameraId}`),
+      fetchJSON(`${CONFIG.usecaseUrl}/usecase/queue-status`),
+      ...USECASES.map(uc =>
+        fetchJSON(`${CONFIG.alertUrl}/alert/list?camera_id=${CONFIG.cameraId}&usecase_name=${uc.id}&limit=100`, { alerts: [] })
+      ),
+    ]);
+
+    // Service dots
+    if (pipeline === null) {
+      setDot('dot-orch', 'red', 'Orchestration: Down');
+    } else {
+      setDot('dot-orch', pipeline.running ? 'green' : 'yellow',
+        `Orchestration: ${pipeline.running ? 'Running' : 'Idle'}`);
+    }
+    if (usecaseQ === null) {
+      setDot('dot-usecase', 'red', 'Usecase Service: Down');
+      setDot('dot-worker',  'red', 'Workers: Unknown');
+    } else {
+      setDot('dot-usecase', 'green', 'Usecase Service: Up');
+      setDot('dot-worker', (usecaseQ.active_workers ?? 0) > 0 ? 'green' : 'yellow',
+        `Workers: ${usecaseQ.active_workers ?? 0} active`);
+    }
+    const alertUp = alertResults.some(r => r !== null);
+    setDot('dot-alert', alertUp ? 'green' : 'red', alertUp ? 'Alert Service: Up' : 'Alert Service: Down');
+    fetchJSON(`${CONFIG.cameraDetectionUrl}/detection/health`).then(h => {
+      setDot('dot-cam', h ? 'green' : 'red', h ? 'Camera Detection: Up' : 'Camera Detection: Down');
+    });
+
+    // Pipeline KPIs
+    if (pipeline) {
+      document.getElementById('kpi-running').textContent  = pipeline.running ? '▶ Running' : '⏸ Idle';
+      document.getElementById('kpi-iters').textContent    = pipeline.iterations ?? '—';
+      document.getElementById('kpi-latency').textContent  = pipeline.avg_latency_ms != null ? `${pipeline.avg_latency_ms.toFixed(0)} ms` : '—';
+      document.getElementById('kpi-errors').textContent   = pipeline.errors ?? '—';
+    }
+
+    // Usecase cards
+    let totalAlerts = 0;
+    USECASES.forEach((uc, i) => {
+      const data   = alertResults[i];
+      const alerts = (data && data.alerts) ? data.alerts : [];
+      const count  = alerts.length;
+      totalAlerts += count;
+
+      document.getElementById(`count-${uc.id}`).textContent = count;
+      const badge = document.getElementById(`badge-${uc.id}`);
+      badge.textContent = count > 0 ? 'Active' : 'No Alerts';
+      badge.className   = `badge ${count > 0 ? 'active' : 'inactive'}`;
+    });
+
+    document.getElementById('kpi-total-alerts').textContent = totalAlerts;
+    setLastRefresh();
+  }
+
+  buildGrid();
+  refresh();
+  setInterval(refresh, CONFIG.refreshIntervalMs);
+</script>
+</body>
+</html>

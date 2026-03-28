@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>GOEC Surveillance — Login</title>
+  <link rel="stylesheet" href="shared.css"/>
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: var(--bg);
+    }
+
+    .login-wrap {
+      width: 100%;
+      max-width: 400px;
+      padding: 16px;
+    }
+
+    .login-brand {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .login-brand .brand-logo {
+      width: 52px; height: 52px;
+      background: var(--info);
+      border-radius: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      margin-bottom: 14px;
+    }
+    .login-brand h1 {
+      font-size: 22px; font-weight: 700;
+    }
+    .login-brand h1 span { color: var(--info); }
+    .login-brand p { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 32px;
+    }
+
+    .form-group { margin-bottom: 18px; }
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 7px;
+    }
+    .form-group input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-group input:focus {
+      border-color: var(--info);
+      box-shadow: 0 0 0 3px rgba(56,139,253,0.15);
+    }
+
+    .login-btn {
+      width: 100%;
+      background: var(--info);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 11px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+      transition: background 0.2s, opacity 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .login-btn:hover { background: #1a7efb; }
+    .login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .login-error {
+      display: none;
+      background: var(--danger-soft);
+      border: 1px solid var(--danger);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #f85149;
+      margin-top: 14px;
+    }
+    .login-error.show { display: block; }
+
+    .login-footer {
+      text-align: center;
+      margin-top: 24px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="login-wrap">
+  <div class="login-brand">
+    <div class="brand-logo">⚡</div>
+    <h1>GO<span>EC</span> Surveillance</h1>
+    <p>EV Charging Station Monitoring Platform</p>
+  </div>
+
+  <div class="login-card">
+    <form id="login-form" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" placeholder="Enter username" autocomplete="username" required/>
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Enter password" autocomplete="current-password" required/>
+      </div>
+      <button type="submit" class="login-btn" id="login-btn">
+        <span id="btn-label">Sign In</span>
+        <span id="btn-spinner" style="display:none"><div class="spinner sm" style="border-top-color:#fff"></div></span>
+      </button>
+      <div class="login-error" id="login-error">
+        Invalid username or password. Please try again.
+      </div>
+    </form>
+  </div>
+
+  <div class="login-footer">
+    GOEC Surveillance Dashboard &copy; 2024
+  </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+  // If already logged in, skip to home
+  if (Auth.getUser()) {
+    window.location.href = 'home.html';
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const errorEl  = document.getElementById('login-error');
+    const btn      = document.getElementById('login-btn');
+    const lbl      = document.getElementById('btn-label');
+    const spinner  = document.getElementById('btn-spinner');
+
+    // Show spinner
+    btn.disabled  = true;
+    lbl.textContent = 'Signing in…';
+    spinner.style.display = 'inline-flex';
+    errorEl.classList.remove('show');
+
+    // Small delay for UX
+    await new Promise(r => setTimeout(r, 400));
+
+    if (Auth.login(username, password)) {
+      window.location.href = 'home.html';
+    } else {
+      btn.disabled = false;
+      lbl.textContent = 'Sign In';
+      spinner.style.display = 'none';
+      errorEl.classList.add('show');
+      document.getElementById('password').value = '';
+      document.getElementById('password').focus();
+    }
+  }
+</script>
+</body>
+</html>

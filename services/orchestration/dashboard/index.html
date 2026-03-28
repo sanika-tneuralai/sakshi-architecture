@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>GOEC Surveillance Dashboard</title>
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #30363d;
+      --accent:    #238636;
+      --danger:    #da3633;
+      --warn:      #d29922;
+      --info:      #388bfd;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --radius:    8px;
+      --gap:       16px;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+    header h1 span { color: var(--info); }
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .refresh-label { color: var(--muted); font-size: 12px; }
+    #last-refresh { color: var(--muted); font-size: 12px; }
+
+    main { padding: 24px; max-width: 1600px; margin: 0 auto; }
+
+    /* ── Section headings ── */
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      margin-bottom: 14px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ── Status bar ── */
+    #status-bar {
+      display: flex;
+      gap: var(--gap);
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .status-chip {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+    }
+    .dot.green  { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .dot.red    { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    .dot.yellow { background: var(--warn);   box-shadow: 0 0 6px var(--warn); }
+
+    /* ── Usecase grid ── */
+    .usecase-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+      gap: var(--gap);
+      margin-bottom: 32px;
+    }
+
+    .uc-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .uc-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .uc-card-header h3 { font-size: 14px; font-weight: 600; }
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      text-transform: uppercase;
+    }
+    .badge.active   { background: #1f3d2b; color: #56d364; border: 1px solid #238636; }
+    .badge.inactive { background: #2d1f1f; color: #f85149; border: 1px solid #da3633; }
+    .badge.loading  { background: #262d3d; color: #79c0ff; border: 1px solid #388bfd; }
+
+    .uc-card-body {
+      display: flex;
+      gap: 0;
+      flex: 1;
+    }
+
+    /* snapshot pane */
+    .snapshot-pane {
+      width: 200px;
+      flex-shrink: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-right: 1px solid var(--border);
+      position: relative;
+    }
+    .snapshot-pane img {
+      width: 100%;
+      height: 140px;
+      object-fit: cover;
+      display: block;
+    }
+    .snapshot-pane .no-frame {
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+      padding: 8px;
+    }
+    .snapshot-label {
+      position: absolute;
+      bottom: 4px;
+      left: 0; right: 0;
+      text-align: center;
+      font-size: 10px;
+      color: rgba(255,255,255,0.5);
+    }
+
+    /* alerts feed */
+    .alerts-pane {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .alerts-pane-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      padding: 8px 12px 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .alerts-list {
+      flex: 1;
+      overflow-y: auto;
+      max-height: 140px;
+    }
+    .alert-item {
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .alert-item:hover { background: rgba(255,255,255,0.03); }
+    .alert-item:last-child { border-bottom: none; }
+    .alert-icon { font-size: 13px; flex-shrink: 0; margin-top: 1px; }
+    .alert-body { flex: 1; min-width: 0; }
+    .alert-type { font-weight: 600; font-size: 12px; color: var(--warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .alert-meta { font-size: 11px; color: var(--muted); }
+    .alert-ts   { font-size: 10px; color: var(--muted); flex-shrink: 0; margin-top: 2px; }
+    .no-alerts  { padding: 20px 12px; text-align: center; color: var(--muted); font-size: 12px; }
+
+    .uc-card-footer {
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    /* ── Alert detail modal ── */
+    #modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    #modal-overlay.open { display: flex; }
+    #modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 560px;
+      max-width: 95vw;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    #modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    #modal-header h3 { font-size: 15px; }
+    #modal-close {
+      background: none; border: none;
+      color: var(--muted); cursor: pointer;
+      font-size: 20px; line-height: 1;
+    }
+    #modal-close:hover { color: var(--text); }
+    #modal-body { padding: 20px; }
+    #modal-snapshot { width: 100%; border-radius: 6px; margin-bottom: 16px; display: none; }
+    .modal-field { margin-bottom: 12px; }
+    .modal-field label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .modal-field .val { font-size: 13px; }
+    pre.extras {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px;
+      font-size: 11px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #79c0ff;
+    }
+
+    /* ── Analytics section ── */
+    .analytics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: var(--gap);
+    }
+    .analytics-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      min-height: 180px;
+      position: relative;
+      overflow: hidden;
+    }
+    .analytics-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        45deg,
+        transparent,
+        transparent 10px,
+        rgba(255,255,255,0.015) 10px,
+        rgba(255,255,255,0.015) 20px
+      );
+    }
+    .coming-soon-badge {
+      background: #1f2d3d;
+      color: #79c0ff;
+      border: 1px solid #388bfd;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    .analytics-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+    .analytics-card p  { font-size: 12px; color: var(--muted); max-width: 240px; line-height: 1.5; }
+    .analytics-icon { font-size: 32px; margin-bottom: 12px; }
+
+    /* ── Pipeline status strip ── */
+    #pipeline-strip {
+      display: flex;
+      gap: var(--gap);
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+    .pipeline-chip {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 16px;
+      min-width: 160px;
+    }
+    .pipeline-chip .pc-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .pipeline-chip .pc-val   { font-size: 20px; font-weight: 700; }
+    .pipeline-chip .pc-sub   { font-size: 11px; color: var(--muted); }
+
+    /* scrollbar */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════ HEADER ═══════════════════════ -->
+<header>
+  <h1>GOEC <span>Surveillance</span> Dashboard</h1>
+  <div class="header-right">
+    <span class="refresh-label">Last updated:</span>
+    <span id="last-refresh">—</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════ MAIN ═══════════════════════ -->
+<main>
+
+  <!-- Service Status Bar -->
+  <div id="status-bar">
+    <div class="status-chip"><div class="dot" id="dot-orch"></div><span id="lbl-orch">Orchestration</span></div>
+    <div class="status-chip"><div class="dot" id="dot-usecase"></div><span id="lbl-usecase">Usecase Service</span></div>
+    <div class="status-chip"><div class="dot" id="dot-alert"></div><span id="lbl-alert">Alert Service</span></div>
+    <div class="status-chip"><div class="dot" id="dot-cam"></div><span id="lbl-cam">Camera Detection</span></div>
+    <div class="status-chip"><div class="dot" id="dot-worker"></div><span id="lbl-worker">Celery Workers</span></div>
+  </div>
+
+  <!-- Pipeline KPIs -->
+  <div id="pipeline-strip">
+    <div class="pipeline-chip">
+      <div class="pc-label">Pipeline Status</div>
+      <div class="pc-val" id="kpi-running">—</div>
+      <div class="pc-sub">camera_01</div>
+    </div>
+    <div class="pipeline-chip">
+      <div class="pc-label">Iterations</div>
+      <div class="pc-val" id="kpi-iters">—</div>
+      <div class="pc-sub">total processed</div>
+    </div>
+    <div class="pipeline-chip">
+      <div class="pc-label">Avg Latency</div>
+      <div class="pc-val" id="kpi-latency">—</div>
+      <div class="pc-sub">ms per cycle</div>
+    </div>
+    <div class="pipeline-chip">
+      <div class="pc-label">Errors</div>
+      <div class="pc-val" id="kpi-errors">—</div>
+      <div class="pc-sub">pipeline errors</div>
+    </div>
+  </div>
+
+  <!-- Usecase Cards -->
+  <p class="section-title">Live Usecase Monitoring</p>
+  <div class="usecase-grid" id="usecase-grid">
+    <!-- Cards injected by JS -->
+  </div>
+
+  <!-- Analytics Section -->
+  <p class="section-title">Analytics</p>
+  <div class="analytics-grid">
+    <div class="analytics-card">
+      <div class="analytics-icon">⚡</div>
+      <div class="coming-soon-badge">Coming Soon</div>
+      <h3>Charging Pattern Analysis</h3>
+      <p>Analyse EV charging behaviour and peak demand trends from historical session data.</p>
+    </div>
+    <div class="analytics-card">
+      <div class="analytics-icon">📉</div>
+      <div class="coming-soon-badge">Coming Soon</div>
+      <h3>Loss Analysis</h3>
+      <p>Detect revenue leakage and operational losses using aggregated event and parking data.</p>
+    </div>
+  </div>
+
+</main>
+
+<!-- ═══════════════════════ MODAL ═══════════════════════ -->
+<div id="modal-overlay">
+  <div id="modal">
+    <div id="modal-header">
+      <h3 id="modal-title">Alert Detail</h3>
+      <button id="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div id="modal-body">
+      <img id="modal-snapshot" alt="Alert Snapshot" />
+      <div class="modal-field">
+        <label>Usecase</label>
+        <div class="val" id="m-usecase">—</div>
+      </div>
+      <div class="modal-field">
+        <label>Alert Type</label>
+        <div class="val" id="m-type">—</div>
+      </div>
+      <div class="modal-field">
+        <label>Timestamp</label>
+        <div class="val" id="m-ts">—</div>
+      </div>
+      <div class="modal-field">
+        <label>Status</label>
+        <div class="val" id="m-status">—</div>
+      </div>
+      <div class="modal-field" id="m-extras-section" style="display:none">
+        <label>Extras</label>
+        <pre class="extras" id="m-extras"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ─────────────────────────────────────────────
+  //  CONFIG — adjust URLs for your deployment
+  // ─────────────────────────────────────────────
+  const CONFIG = {
+    orchestrationUrl:    'http://localhost:8000',
+    usecaseUrl:          'http://localhost:8001',
+    alertUrl:            'http://localhost:8002',
+    cameraDetectionUrl:  'http://localhost:8004',
+    cameraId:            'camera_01',
+    refreshIntervalMs:   12000,   // 12 seconds
+    alertsLimit:         10,
+  };
+
+  // ─────────────────────────────────────────────
+  //  Usecase definitions
+  // ─────────────────────────────────────────────
+  const USECASES = [
+    {
+      id: 'parking_detection',
+      label: 'Parking Detection',
+      icon: '🅿️',
+      color: '#d29922',
+    },
+    {
+      id: 'gun_detection',
+      label: 'Gun Detection',
+      icon: '🔫',
+      color: '#da3633',
+    },
+    {
+      id: 'parking_compliance',
+      label: 'Parking Compliance',
+      icon: '🚗',
+      color: '#388bfd',
+    },
+    {
+      id: 'safety_monitoring',
+      label: 'Safety Monitoring',
+      icon: '⚠️',
+      color: '#238636',
+    },
+  ];
+
+  // ─────────────────────────────────────────────
+  //  State
+  // ─────────────────────────────────────────────
+  const state = {
+    alertsByUsecase: {},   // usecase_id → [alerts]
+    usecaseStatus: {},     // usecase_id → 'active' | 'inactive' | 'loading'
+    pipelineStatus: null,
+    workerStatus: null,
+  };
+
+  // ─────────────────────────────────────────────
+  //  Fetch helpers
+  // ─────────────────────────────────────────────
+  async function fetchJSON(url, fallback = null) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Build usecase cards (once)
+  // ─────────────────────────────────────────────
+  function buildCards() {
+    const grid = document.getElementById('usecase-grid');
+    grid.innerHTML = '';
+    for (const uc of USECASES) {
+      grid.insertAdjacentHTML('beforeend', `
+        <div class="uc-card" id="card-${uc.id}">
+          <div class="uc-card-header">
+            <h3>${uc.icon} ${uc.label}</h3>
+            <span class="badge loading" id="badge-${uc.id}">Loading…</span>
+          </div>
+          <div class="uc-card-body">
+            <div class="snapshot-pane" id="snap-${uc.id}">
+              <div class="no-frame">No snapshot yet</div>
+              <div class="snapshot-label">Latest alert frame</div>
+            </div>
+            <div class="alerts-pane">
+              <div class="alerts-pane-title">Recent Violations</div>
+              <div class="alerts-list" id="alerts-${uc.id}">
+                <div class="no-alerts">Fetching…</div>
+              </div>
+            </div>
+          </div>
+          <div class="uc-card-footer">
+            <span id="footer-ts-${uc.id}">—</span>
+            <span id="footer-count-${uc.id}">0 alerts today</span>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Render alerts for one usecase
+  // ─────────────────────────────────────────────
+  function renderAlerts(ucId) {
+    const alerts = state.alertsByUsecase[ucId] || [];
+    const listEl = document.getElementById(`alerts-${ucId}`);
+    const snapEl = document.getElementById(`snap-${ucId}`);
+    const footerTs = document.getElementById(`footer-ts-${ucId}`);
+    const footerCount = document.getElementById(`footer-count-${ucId}`);
+    const badge = document.getElementById(`badge-${ucId}`);
+
+    // Badge
+    const active = alerts.length > 0;
+    badge.textContent = active ? 'Active' : 'No Alerts';
+    badge.className   = 'badge ' + (active ? 'active' : 'inactive');
+
+    // Snapshot — use snapshot_b64 from most recent alert
+    const withSnap = alerts.find(a => a.snapshot_b64);
+    if (withSnap) {
+      snapEl.innerHTML = `
+        <img src="data:image/jpeg;base64,${withSnap.snapshot_b64}" alt="snapshot" />
+        <div class="snapshot-label">${fmtTs(withSnap.timestamp)}</div>
+      `;
+    } else {
+      snapEl.innerHTML = `<div class="no-frame">No snapshot<br>available</div><div class="snapshot-label">Latest alert frame</div>`;
+    }
+
+    // Alert feed
+    if (alerts.length === 0) {
+      listEl.innerHTML = '<div class="no-alerts">No violations recorded</div>';
+    } else {
+      listEl.innerHTML = alerts.map(a => `
+        <div class="alert-item" onclick="openModal(${JSON.stringify(a).replace(/"/g, '&quot;')})">
+          <div class="alert-icon">🔔</div>
+          <div class="alert-body">
+            <div class="alert-type">${a.alert_type || a.usecase_name}</div>
+            <div class="alert-meta">${a.camera_id || ''}</div>
+          </div>
+          <div class="alert-ts">${fmtTs(a.timestamp)}</div>
+        </div>
+      `).join('');
+    }
+
+    // Footer
+    const latest = alerts[0];
+    footerTs.textContent  = latest ? `Last: ${fmtTs(latest.timestamp)}` : '—';
+    footerCount.textContent = `${alerts.length} alert${alerts.length !== 1 ? 's' : ''} shown`;
+  }
+
+  // ─────────────────────────────────────────────
+  //  Render service status dots
+  // ─────────────────────────────────────────────
+  function setDot(id, cls, label) {
+    document.getElementById(id).className = `dot ${cls}`;
+    if (label) document.getElementById(id.replace('dot-', 'lbl-')).textContent = label;
+  }
+
+  function renderServiceStatus() {
+    // Orchestration
+    const p = state.pipelineStatus;
+    if (p === null) {
+      setDot('dot-orch', 'red', 'Orchestration: Down');
+    } else {
+      setDot('dot-orch', p.running ? 'green' : 'yellow',
+        `Orchestration: ${p.running ? 'Running' : 'Idle'}`);
+    }
+
+    // Usecase / Celery
+    const w = state.workerStatus;
+    if (w === null) {
+      setDot('dot-usecase', 'red', 'Usecase Service: Down');
+      setDot('dot-worker',  'red', 'Workers: Unknown');
+    } else {
+      setDot('dot-usecase', 'green', 'Usecase Service: Up');
+      const wok = w.active_workers > 0;
+      setDot('dot-worker', wok ? 'green' : 'yellow',
+        `Workers: ${w.active_workers ?? 0} active`);
+    }
+
+    // Pipeline KPIs
+    if (p) {
+      document.getElementById('kpi-running').textContent  = p.running ? '▶ Running' : '⏸ Idle';
+      document.getElementById('kpi-iters').textContent    = p.iterations ?? '—';
+      document.getElementById('kpi-latency').textContent  = p.avg_latency_ms != null ? `${p.avg_latency_ms.toFixed(0)} ms` : '—';
+      document.getElementById('kpi-errors').textContent   = p.errors ?? '—';
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Fetch all data
+  // ─────────────────────────────────────────────
+  async function refresh() {
+    // Parallel: pipeline status + usecase queue + alerts for each usecase
+    const [pipeline, usecaseQ, ...alertResults] = await Promise.all([
+      fetchJSON(`${CONFIG.orchestrationUrl}/pipeline/status/${CONFIG.cameraId}`),
+      fetchJSON(`${CONFIG.usecaseUrl}/usecase/queue-status`),
+      ...USECASES.map(uc =>
+        fetchJSON(
+          `${CONFIG.alertUrl}/alert/list?camera_id=${CONFIG.cameraId}&usecase_name=${uc.id}&limit=${CONFIG.alertsLimit}`,
+          { alerts: [] }
+        )
+      ),
+    ]);
+
+    state.pipelineStatus = pipeline;
+    state.workerStatus   = usecaseQ;
+
+    // Probe alert service and camera service health via side-effect
+    setDot('dot-alert', alertResults.some(r => r !== null) ? 'green' : 'red',
+      alertResults.some(r => r !== null) ? 'Alert Service: Up' : 'Alert Service: Down');
+
+    // Camera detection — just check if we got pipeline data as proxy; do a separate health check
+    fetchJSON(`${CONFIG.cameraDetectionUrl}/detection/health`).then(h => {
+      setDot('dot-cam', h ? 'green' : 'red',
+        h ? 'Camera Detection: Up' : 'Camera Detection: Down');
+    });
+
+    USECASES.forEach((uc, i) => {
+      const data = alertResults[i];
+      state.alertsByUsecase[uc.id] = (data && data.alerts) ? data.alerts : [];
+      renderAlerts(uc.id);
+    });
+
+    renderServiceStatus();
+    document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
+  }
+
+  // ─────────────────────────────────────────────
+  //  Modal
+  // ─────────────────────────────────────────────
+  function openModal(alert) {
+    document.getElementById('modal-title').textContent   = alert.alert_type || 'Alert Detail';
+    document.getElementById('m-usecase').textContent     = alert.usecase_name || '—';
+    document.getElementById('m-type').textContent        = alert.alert_type || '—';
+    document.getElementById('m-ts').textContent          = alert.timestamp ? new Date(alert.timestamp).toLocaleString() : '—';
+    document.getElementById('m-status').textContent      = alert.status || '—';
+
+    const snapEl = document.getElementById('modal-snapshot');
+    if (alert.snapshot_b64) {
+      snapEl.src = `data:image/jpeg;base64,${alert.snapshot_b64}`;
+      snapEl.style.display = 'block';
+    } else {
+      snapEl.style.display = 'none';
+    }
+
+    const extrasSection = document.getElementById('m-extras-section');
+    if (alert.extras && Object.keys(alert.extras).length > 0) {
+      document.getElementById('m-extras').textContent = JSON.stringify(alert.extras, null, 2);
+      extrasSection.style.display = 'block';
+    } else {
+      extrasSection.style.display = 'none';
+    }
+
+    document.getElementById('modal-overlay').classList.add('open');
+  }
+
+  function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+  }
+  document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal-overlay')) closeModal();
+  });
+
+  // ─────────────────────────────────────────────
+  //  Helpers
+  // ─────────────────────────────────────────────
+  function fmtTs(ts) {
+    if (!ts) return '—';
+    try {
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch { return ts; }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Boot
+  // ─────────────────────────────────────────────
+  buildCards();
+  refresh();
+  setInterval(refresh, CONFIG.refreshIntervalMs);
+</script>
+</body>
+</html>
