@@ -99,8 +99,15 @@ async def detect_objects(request: DetectionRequest):
     print(f"[DETECTION] Fetching camera configuration from Configuration API")
     camera_config = fetch_camera_config(request.camera_id)
     
-    # Determine confidence threshold: Config API > Request > Default
-    if camera_config and 'confidence_threshold' in camera_config:
+    # Determine per-class thresholds and base confidence threshold
+    class_thresholds = request.class_thresholds or {}
+
+    if class_thresholds:
+        # Run YOLO at the lowest threshold so all candidates are returned;
+        # per-class post-filtering is applied after inference.
+        confidence_threshold = min(class_thresholds.values())
+        print(f"[DETECTION] class_thresholds provided — running YOLO at base threshold: {confidence_threshold}")
+    elif camera_config and 'confidence_threshold' in camera_config:
         confidence_threshold = camera_config['confidence_threshold']
         print(f"[DETECTION] Using confidence_threshold from Configuration API: {confidence_threshold}")
     else:
@@ -145,6 +152,17 @@ async def detect_objects(request: DetectionRequest):
         classes=request.classes
     )
     
+    # Post-filter: apply per-class thresholds when provided
+    if class_thresholds:
+        default_thresh = request.confidence_threshold
+        before = len(result.detections)
+        result.detections = [
+            d for d in result.detections
+            if d.confidence >= class_thresholds.get(d.class_name, default_thresh)
+        ]
+        result.total_detections_count = len(result.detections)
+        print(f"[DETECTION] Per-class post-filter: {before} → {result.total_detections_count} detections")
+
     print(f"[DETECTION API] Detection completed")
     print(f"[DETECTION API]   - Total detections: {result.total_detections_count}")
     print(f"[DETECTION API]   - Processing time: {result.processing_time_ms}ms")

@@ -2,7 +2,7 @@
 Pydantic schemas for detection module.
 """
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 
 
@@ -25,9 +25,15 @@ class Detection(BaseModel):
 class DetectionRequest(BaseModel):
     """Request to run detection on a camera stream"""
     camera_id: str = Field(..., description="Camera ID to detect from")
-    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold (base when class_thresholds not provided)")
     iou_threshold: Optional[float] = Field(0.45, ge=0.0, le=1.0, description="IOU threshold for NMS")
     classes: Optional[List[int]] = Field(None, description="Filter specific class IDs (None = all classes)")
+    class_thresholds: Optional[Dict[str, float]] = Field(
+        None,
+        description="Per-class confidence thresholds e.g. {\"gun\": 0.3, \"fire\": 0.4, \"smoke\": 0.35, \"car\": 0.6}. "
+                    "YOLO runs at min(values); results are post-filtered per class. "
+                    "Classes not listed fall back to confidence_threshold."
+    )
 
 
 class DetectionResponse(BaseModel):
