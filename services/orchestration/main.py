@@ -48,7 +48,7 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds
+from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session
 
 # Configure logging
 logging.basicConfig(
@@ -530,6 +530,15 @@ class PipelineManager:
                         logger.info(
                             f"[{camera_id}] extras from {r.get('usecase_id', r.get('usecase_name'))} | {extras}"
                         )
+
+                # STEP 3.5: Persist charging session data
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, upsert_charging_session, camera_id, results
+                    )
+                    logger.debug(f"[{camera_id}] Charging session updated")
+                except Exception as e:
+                    logger.warning(f"[{camera_id}] Charging session update failed (non-critical): {str(e)}")
 
                 # STEP 4: Send alerts (non-critical, don't fail on error)
                 try:

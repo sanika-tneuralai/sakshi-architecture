@@ -10,10 +10,12 @@ Usage:
     rois    = get_camera_rois("cam_01")
     usecases = get_camera_usecases("cam_01")
 """
+import logging
+from datetime import datetime
 from typing import List, Dict, Any
 
 from shared.database.connection import SessionLocal
-from shared.database.models import ROIConfig, CameraUsecase
+from shared.database.models import ROIConfig, CameraUsecase, ChargingSession
 
 
 def get_camera_rois(camera_id: str) -> List[Dict[str, Any]]:
@@ -150,5 +152,229 @@ def get_class_thresholds(camera_id: str) -> Dict[str, float]:
             f"[DB] Failed to fetch class_thresholds for camera {camera_id}: {e}"
         )
         return {}
+    finally:
+        db.close()
+
+
+_persistence_logger = logging.getLogger(__name__)
+
+
+def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
+    """
+    Find or create an active ChargingSession for camera_id and update it with
+    data extracted from the current pipeline iteration's usecase results.
+
+    Events are sourced from three usecases:
+      - parking_detection : provides in_time / out_time via extras
+      - gun_detection      : provides gun_number, plug_time, plug_out_time via extras
+      - vehicle_extraction : provides car_number, car_model via extras
+
+    Session lookup priority:
+      1. Match on camera_id + gun_number (when gun_detection fired)
+      2. Match on camera_id + car_number (when vehicle_extraction fired)
+      3. Most-recent open session for camera_id
+
+    Session status transitions:
+      - 'active'     : in_time set, no plug_time yet
+      - 'charging'   : plug_time set, no plug_out_time yet
+      - 'completed'  : plug_out_time AND out_time both set
+      - 'incomplete' : out_time set but no plug_time
+
+    A session is considered "open" when session_status is 'active' or 'charging'.
+    Once out_time is written the status is finalised and the session is closed.
+    """
+    # ------------------------------------------------------------------ #
+    # 1. Extract events from usecase results                               #
+    #                                                                      #
+    # Each usecase returns its data at the TOP LEVEL of the result dict    #
+    # (not nested under "extras"). Relevant structures:                    #
+    #                                                                      #
+    # parking_detection:                                                   #
+    #   result["events"] = [                                               #
+    #     {"event_type": "parking_intime",  "timestamp": "...", ...},      #
+    #     {"event_type": "parking_outtime", "timestamp": "...", ...},      #
+    #   ]                                                                  #
+    #                                                                      #
+    # gun_detection:                                                       #
+    #   result["events"] = [                                               #
+    #     {"event_type": "gun_plugin",  "timestamp": "...",                #
+    #      "metadata": {"gun_name": "Gun 1", ...}},                        #
+    #     {"event_type": "gun_plugout", "timestamp": "...",                #
+    #      "metadata": {"gun_name": "Gun 1", ...}},                        #
+    #   ]                                                                  #
+    #                                                                      #
+    # vehicle_extraction:                                                  #
+    #   result["vehicle_details"] = [                                      #
+    #     {"car_number": "MH12AB1234", "car_model": "Toyota Innova", ...}  #
+    #   ]                                                                  #
+    # ------------------------------------------------------------------ #
+    in_time_raw = None
+    out_time_raw = None
+    plug_time_raw = None
+    plug_out_time_raw = None
+    gun_number = None
+    car_number = None
+    car_model = None
+
+    for result in usecase_results:
+        usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
+        if not result.get("triggered"):
+            continue
+
+        if usecase_id == "parking_detection":
+            for evt in result.get("events", []):
+                etype = evt.get("event_type")
+                ts = evt.get("timestamp")
+                if etype == "parking_intime" and in_time_raw is None:
+                    in_time_raw = ts
+                elif etype == "parking_outtime" and out_time_raw is None:
+                    out_time_raw = ts
+
+        elif usecase_id == "gun_detection":
+            for evt in result.get("events", []):
+                etype = evt.get("event_type")
+                ts = evt.get("timestamp")
+                meta = evt.get("metadata", {})
+                if etype == "gun_plugin" and plug_time_raw is None:
+                    plug_time_raw = ts
+                    gun_number = gun_number or meta.get("gun_name")
+                elif etype == "gun_plugout" and plug_out_time_raw is None:
+                    plug_out_time_raw = ts
+                    gun_number = gun_number or meta.get("gun_name")
+
+        elif usecase_id == "vehicle_extraction":
+            details = result.get("vehicle_details", [])
+            if details:
+                # Take the first successfully extracted vehicle
+                first = next(
+                    (d for d in details if d.get("car_number") not in (None, "unreadable")),
+                    details[0],
+                )
+                car_number = car_number or first.get("car_number")
+                car_model = car_model or first.get("car_model")
+
+    def _parse_dt(value) -> datetime | None:
+        """Convert a string or datetime to a timezone-naive datetime (or None)."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except (ValueError, TypeError):
+            return None
+
+    in_time = _parse_dt(in_time_raw)
+    out_time = _parse_dt(out_time_raw)
+    plug_time = _parse_dt(plug_time_raw)
+    plug_out_time = _parse_dt(plug_out_time_raw)
+
+    # Nothing actionable in this iteration — skip DB work entirely.
+    if not any([in_time, out_time, plug_time, plug_out_time, gun_number, car_number, car_model]):
+        return
+
+    # ------------------------------------------------------------------ #
+    # 2. Find or create an open session                                    #
+    # ------------------------------------------------------------------ #
+    db = SessionLocal()
+    try:
+        open_statuses = ("active", "charging")
+        session: ChargingSession | None = None
+
+        # Priority 1: match by gun_number
+        if gun_number:
+            session = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.gun_number == gun_number,
+                    ChargingSession.session_status.in_(open_statuses),
+                )
+                .order_by(ChargingSession.session_id.desc())
+                .first()
+            )
+
+        # Priority 2: match by car_number
+        if session is None and car_number:
+            session = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.car_number == car_number,
+                    ChargingSession.session_status.in_(open_statuses),
+                )
+                .order_by(ChargingSession.session_id.desc())
+                .first()
+            )
+
+        # Priority 3: most-recent open session for this camera
+        if session is None:
+            session = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.session_status.in_(open_statuses),
+                )
+                .order_by(ChargingSession.session_id.desc())
+                .first()
+            )
+
+        # Create a new session if none found
+        if session is None:
+            session = ChargingSession(
+                camera_id=camera_id,
+                session_status="active",
+            )
+            db.add(session)
+            db.flush()  # Populate session_id before we update fields below
+            _persistence_logger.debug(
+                f"[DB] Created new ChargingSession session_id={session.session_id} "
+                f"for camera {camera_id}"
+            )
+
+        # ---------------------------------------------------------------- #
+        # 3. Apply updates                                                  #
+        # ---------------------------------------------------------------- #
+        if gun_number and session.gun_number is None:
+            session.gun_number = gun_number
+        if car_number and session.car_number is None:
+            session.car_number = car_number
+        if car_model and session.car_model is None:
+            session.car_model = car_model
+        if in_time and session.in_time is None:
+            session.in_time = in_time
+        if plug_time and session.plug_time is None:
+            session.plug_time = plug_time
+        if plug_out_time and session.plug_out_time is None:
+            session.plug_out_time = plug_out_time
+        if out_time and session.out_time is None:
+            session.out_time = out_time
+
+        # ---------------------------------------------------------------- #
+        # 4. Derive session status                                          #
+        # ---------------------------------------------------------------- #
+        if session.out_time is not None:
+            # Session is over — finalise
+            if session.plug_time is not None:
+                session.session_status = "completed"
+            else:
+                session.session_status = "incomplete"
+        elif session.plug_time is not None:
+            session.session_status = "charging"
+        else:
+            session.session_status = "active"
+
+        db.commit()
+        _persistence_logger.debug(
+            f"[DB] ChargingSession session_id={session.session_id} "
+            f"status={session.session_status} updated for camera {camera_id}"
+        )
+
+    except Exception as e:
+        db.rollback()
+        _persistence_logger.warning(
+            f"[DB] Failed to upsert ChargingSession for camera {camera_id}: {e}"
+        )
+        raise
     finally:
         db.close()
