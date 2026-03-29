@@ -48,7 +48,7 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from shared.database.persistence import get_camera_rois, get_camera_usecases
+from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds
 
 # Configure logging
 logging.basicConfig(
@@ -212,15 +212,18 @@ async def fetch_frame(camera_id: str) -> dict:
 
 
 @retry_on_failure
-async def run_detection(camera_id: str, confidence_threshold: float) -> dict:
+async def run_detection(camera_id: str, confidence_threshold: float, class_thresholds: Optional[Dict[str, float]] = None) -> dict:
     """Run detection on frame with retry"""
     async with camera_detection_semaphore:
+        payload: Dict[str, Any] = {
+            "camera_id": camera_id,
+            "confidence_threshold": confidence_threshold,
+        }
+        if class_thresholds:
+            payload["class_thresholds"] = class_thresholds
         response = await http_client.post(
             f"{CAMERA_DETECTION_URL}/detection/detect",
-            json={
-                "camera_id": camera_id,
-                "confidence_threshold": confidence_threshold
-            },
+            json=payload,
             timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
@@ -477,10 +480,27 @@ class PipelineManager:
                 
                 logger.debug(f"[{camera_id}] Iteration {iteration} starting")
                 
-                # STEP 1: Run detection (detection service fetches its own frame internally)
-                detection_data = await run_detection(camera_id, config.confidence_threshold)
+                # STEP 1: Fetch ROIs, usecases, and per-class thresholds from DB
+                rois = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_rois, camera_id
+                )
+                db_usecases = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_usecases, camera_id
+                )
+                class_thresholds = await asyncio.get_event_loop().run_in_executor(
+                    None, get_class_thresholds, camera_id
+                )
+                # Fall back to config usecases if none configured in DB
+                active_usecases = db_usecases if db_usecases else config.usecases
+
+                # STEP 2: Run detection with per-class thresholds when configured
+                detection_data = await run_detection(
+                    camera_id,
+                    config.confidence_threshold,
+                    class_thresholds or None,
+                )
                 total_det = detection_data.get('total_detections_count', 0)
-                logger.debug(f"[{camera_id}] Detection complete | total={total_det}")
+                logger.debug(f"[{camera_id}] Detection complete | total={total_det} | class_thresholds={class_thresholds or 'none'}")
 
                 # Cache snapshot if detections found
                 if total_det > 0 and detection_data.get('snapshot_b64'):
@@ -492,16 +512,6 @@ class PipelineManager:
                         "detection_count": total_det
                     }
                     logger.debug(f"[{camera_id}] Snapshot cached ({total_det} detections)")
-
-                # STEP 2: Fetch ROIs and enabled usecases from DB
-                rois = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_rois, camera_id
-                )
-                db_usecases = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_usecases, camera_id
-                )
-                # Fall back to config usecases if none configured in DB
-                active_usecases = db_usecases if db_usecases else config.usecases
                 logger.debug(
                     f"[{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}"
                 )
@@ -918,9 +928,21 @@ async def execute_pipeline_once(request: PipelineRequest):
             try:
                 logger.info(f"DEBUG: Starting pipeline for camera {camera_id}")
                 
+                # Fetch ROIs, usecases, and per-class thresholds from DB
+                rois = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_rois, camera_id
+                )
+                db_usecases = await asyncio.get_event_loop().run_in_executor(
+                    None, get_camera_usecases, camera_id
+                )
+                class_thresholds = await asyncio.get_event_loop().run_in_executor(
+                    None, get_class_thresholds, camera_id
+                )
+                active_usecases = db_usecases if db_usecases else usecases
+
                 # Detection
                 logger.info(f"DEBUG: [{camera_id}] Calling run_detection...")
-                detection_data = await run_detection(camera_id, confidence_threshold)
+                detection_data = await run_detection(camera_id, confidence_threshold, class_thresholds or None)
                 total_det = detection_data.get('total_detections_count', 0)
                 logger.info(f"DEBUG: [{camera_id}] Detection completed: {total_det} detections")
 
@@ -933,15 +955,6 @@ async def execute_pipeline_once(request: PipelineRequest):
                         "detections": detection_data.get('detections', []),
                         "detection_count": total_det
                     }
-
-                # Fetch ROIs and enabled usecases from DB
-                rois = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_rois, camera_id
-                )
-                db_usecases = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_usecases, camera_id
-                )
-                active_usecases = db_usecases if db_usecases else usecases
                 logger.info(f"DEBUG: [{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}")
 
                 # Evaluate usecases

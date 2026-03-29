@@ -81,3 +81,41 @@ def get_camera_usecases(camera_id: str) -> List[str]:
         return []
     finally:
         db.close()
+
+
+def get_class_thresholds(camera_id: str) -> Dict[str, float]:
+    """
+    Return per-class confidence thresholds for a camera.
+
+    Reads the 'class_thresholds' key from the CameraUsecase.config JSON column
+    across all enabled usecases for this camera, merging them into one dict.
+
+    Example config column value:
+        {"class_thresholds": {"gun": 0.3, "fire": 0.4, "smoke": 0.35, "car": 0.6}}
+
+    Returns an empty dict if nothing is configured or on DB error.
+    The caller falls back to the global confidence_threshold when empty.
+    """
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(CameraUsecase)
+            .filter(
+                CameraUsecase.camera_id == camera_id,
+                CameraUsecase.enabled == True,  # noqa: E712
+            )
+            .all()
+        )
+        merged: Dict[str, float] = {}
+        for row in rows:
+            cfg = row.config or {}
+            merged.update(cfg.get("class_thresholds", {}))
+        return merged
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[DB] Failed to fetch class_thresholds for camera {camera_id}: {e}"
+        )
+        return {}
+    finally:
+        db.close()
