@@ -83,17 +83,46 @@ def get_camera_usecases(camera_id: str) -> List[str]:
         db.close()
 
 
+# Mapping from usecase_id → the YOLO class names that usecase operates on.
+# Each usecase's confidence_threshold in the config column applies to all
+# classes listed here. Derived from the rule implementations in the usecase service.
+_USECASE_CLASSES: Dict[str, list] = {
+    "gun_detection":      ["gun_plugged_in", "gun_plugged_out"],
+    "safety_monitoring":  ["fire", "smoke"],
+    "parking_detection":  ["car"],
+    "parking_compliance": ["car"],
+    "vehicle_extraction": ["car"],
+    "phone_detection":    ["cell phone"],
+    "smoking_detection":  ["cigarette"],
+    "mopping_detection":  ["mop"],
+    "cash_detection":     ["cash", "cash_drawer"],
+    "bag_detection":      ["backpack", "handbag", "suitcase"],
+    "dress_code":         ["uniform_grey", "uniform_black", "uniform_beige", "uniform_blue", "uniform_red",
+                           "untucked_shirt", "no_uniform"],
+    "staff_detector":     ["grey_uniform", "black_uniform", "beige_uniform", "blue_uniform", "red_uniform"],
+    "restricted_area":    ["uniform_grey", "uniform_black", "uniform_beige", "uniform_blue", "uniform_red",
+                           "no_uniform", "violation_uniform"],
+}
+
+
 def get_class_thresholds(camera_id: str) -> Dict[str, float]:
     """
-    Return per-class confidence thresholds for a camera.
+    Return per-class confidence thresholds for a camera, derived from
+    per-usecase confidence_threshold values in camera_usecases.config.
 
-    Reads the 'class_thresholds' key from the CameraUsecase.config JSON column
-    across all enabled usecases for this camera, merging them into one dict.
+    For each enabled usecase row, reads config.confidence_threshold and maps
+    it to all YOLO class names that usecase operates on (via _USECASE_CLASSES).
 
-    Example config column value:
-        {"class_thresholds": {"gun": 0.3, "fire": 0.4, "smoke": 0.35, "car": 0.6}}
+    Example DB row:
+        camera_id='camera_01', usecase_id='gun_detection', enabled=true,
+        config={"confidence_threshold": 0.3}
+        → produces {"gun_plugged_in": 0.3, "gun_plugged_out": 0.3}
 
-    Returns an empty dict if nothing is configured or on DB error.
+        camera_id='camera_01', usecase_id='safety_monitoring', enabled=true,
+        config={"confidence_threshold": 0.4}
+        → produces {"fire": 0.4, "smoke": 0.4}
+
+    Returns an empty dict if no thresholds are configured or on DB error.
     The caller falls back to the global confidence_threshold when empty.
     """
     db = SessionLocal()
@@ -109,7 +138,11 @@ def get_class_thresholds(camera_id: str) -> Dict[str, float]:
         merged: Dict[str, float] = {}
         for row in rows:
             cfg = row.config or {}
-            merged.update(cfg.get("class_thresholds", {}))
+            threshold = cfg.get("confidence_threshold")
+            if threshold is None:
+                continue
+            for class_name in _USECASE_CLASSES.get(row.usecase_id, []):
+                merged[class_name] = threshold
         return merged
     except Exception as e:
         import logging
