@@ -68,7 +68,8 @@ logger = logging.getLogger(__name__)
 
 # Service URLs
 
-CAMERA_DETECTION_URL=os.getenv("CAMERA_DETECTION_URL","http://13.201.133.171:8004") #EC2
+CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://localhost:8004")
+# CAMERA_DETECTION_URL=os.getenv("CAMERA_DETECTION_URL","http://13.201.133.171:8004") #EC2
 # CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8000") #edgeserver
 USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
