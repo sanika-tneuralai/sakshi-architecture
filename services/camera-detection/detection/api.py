@@ -156,6 +156,11 @@ async def detect_objects(request: DetectionRequest):
     if class_thresholds:
         default_thresh = request.confidence_threshold
         before = len(result.detections)
+        print(f"[DETECTION] Raw detections before filter:")
+        for d in result.detections:
+            thresh = class_thresholds.get(d.class_name, default_thresh)
+            status = "KEEP" if d.confidence >= thresh else "DROP"
+            print(f"  [{status}] {d.class_name}: confidence={d.confidence:.3f}, threshold={thresh}")
         result.detections = [
             d for d in result.detections
             if d.confidence >= class_thresholds.get(d.class_name, default_thresh)
