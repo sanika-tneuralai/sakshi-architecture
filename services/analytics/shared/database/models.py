@@ -21,6 +21,7 @@ Usage:
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from shared.database.connection import Base
+from sqlalchemy import JSON
 
 
 class Camera(Base):
@@ -140,3 +141,41 @@ class AnalyticsDaily(Base):
     __table_args__ = (
         UniqueConstraint('date', 'camera_id', name='uix_date_camera'),
     )
+
+
+class ChargingSession(Base):
+    """
+    ChargingSession model for storing EV charging session records.
+
+    Captures the full lifecycle of a vehicle at an EV charging station,
+    assembled from parking_detection, vehicle_extraction, and gun_detection
+    usecase results.
+
+    Attributes:
+        session_id (int): Auto-incrementing primary key
+        camera_id (str): Foreign key to cameras table
+        gun_number (str): Charging gun identifier (e.g. "Gun 1", "Gun 2")
+        car_number (str): Vehicle license plate number
+        car_model (str): Vehicle make/model
+        in_time (datetime): When the car entered the parking ROI
+        plug_time (datetime): When the charging gun was plugged in
+        plug_out_time (datetime): When the charging gun was plugged out
+        out_time (datetime): When the car exited the parking ROI
+        session_status (str): 'active', 'charging', 'completed', 'incomplete'
+        created_at (datetime): Record creation timestamp
+        updated_at (datetime): Record last-update timestamp
+    """
+    __tablename__ = "charging_sessions"
+
+    session_id = Column(Integer, primary_key=True, autoincrement=True)
+    camera_id = Column(String(255), ForeignKey("cameras.camera_id"), nullable=False, index=True)
+    gun_number = Column(String(100), nullable=True)
+    car_number = Column(String(100), nullable=True)
+    car_model = Column(String(255), nullable=True)
+    in_time = Column(DateTime(timezone=True), nullable=True)
+    plug_time = Column(DateTime(timezone=True), nullable=True)
+    plug_out_time = Column(DateTime(timezone=True), nullable=True)
+    out_time = Column(DateTime(timezone=True), nullable=True)
+    session_status = Column(String(50), nullable=False, default='active')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
