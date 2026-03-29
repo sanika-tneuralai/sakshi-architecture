@@ -501,7 +501,7 @@ class PipelineManager:
                     class_thresholds or None,
                 )
                 total_det = detection_data.get('total_detections_count', 0)
-                logger.debug(f"[{camera_id}] Detection complete | total={total_det} | class_thresholds={class_thresholds or 'none'}")
+                logger.info(f"[{camera_id}] Detection complete | total={total_det} | class_thresholds={class_thresholds or 'none'}")
 
                 # Cache snapshot if detections found
                 if total_det > 0 and detection_data.get('snapshot_b64'):
