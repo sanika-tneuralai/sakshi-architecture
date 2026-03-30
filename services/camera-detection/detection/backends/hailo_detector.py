@@ -206,6 +206,13 @@ class HailoDetector(BaseDetector):
         """
         orig_h, orig_w = original_shape[:2]
 
+        # DEBUG: log raw output tensor shapes and sample values
+        print(f"[HAILO DEBUG] raw_output keys: {list(raw_output.keys())}")
+        for key, tensor in raw_output.items():
+            t = np.array(tensor)
+            print(f"[HAILO DEBUG] key={key}, shape={t.shape}, dtype={t.dtype}, min={t.min():.4f}, max={t.max():.4f}")
+            print(f"[HAILO DEBUG] first 10 values: {t.flatten()[:10]}")
+
         # Collect all candidate detections across output heads
         boxes_xyxy: List[List[float]] = []
         scores: List[float] = []
