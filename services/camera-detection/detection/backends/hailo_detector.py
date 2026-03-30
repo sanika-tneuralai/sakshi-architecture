@@ -210,84 +210,122 @@ class HailoDetector(BaseDetector):
         print(f"[HAILO DEBUG] raw_output keys: {list(raw_output.keys())}")
         for key, tensor in raw_output.items():
             t = np.array(tensor)
-            print(f"[HAILO DEBUG] key={key}, shape={t.shape}, dtype={t.dtype}, min={t.min():.4f}, max={t.max():.4f}")
-            print(f"[HAILO DEBUG] first 10 values: {t.flatten()[:10]}")
-
-        # Collect all candidate detections across output heads
-        boxes_xyxy: List[List[float]] = []
-        scores: List[float] = []
-        class_ids: List[int] = []
-
-        for tensor in raw_output.values():
-            tensor = np.array(tensor)
-            # tensor shape: (1, num_anchors, 5 + num_classes) or (num_anchors, 5 + num_classes)
-            if tensor.ndim == 3:
-                tensor = tensor[0]  # remove batch dim
-
-            if tensor.ndim < 2 or tensor.shape[-1] < 6:
-                continue
-
-            num_classes = tensor.shape[1] - 5
-
-            for row in tensor:
-                cx, cy, w, h = row[0], row[1], row[2], row[3]
-                obj_conf = float(row[4])
-                cls_probs = row[5:]
-
-                cls_id = int(np.argmax(cls_probs))
-                confidence = obj_conf * float(cls_probs[cls_id])
-
-                if confidence < confidence_threshold:
-                    continue
-                if classes is not None and cls_id not in classes:
-                    continue
-
-                # Convert normalised cx,cy,w,h → pixel xyxy
-                x1 = (cx - w / 2) * orig_w
-                y1 = (cy - h / 2) * orig_h
-                x2 = (cx + w / 2) * orig_w
-                y2 = (cy + h / 2) * orig_h
-
-                boxes_xyxy.append([x1, y1, x2, y2])
-                scores.append(confidence)
-                class_ids.append(cls_id)
-
-        if not boxes_xyxy:
-            return []
-
-        # Apply NMS using OpenCV (no torch dependency)
-        boxes_xywh = [
-            [b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes_xyxy
-        ]
-        indices = cv2.dnn.NMSBoxes(
-            boxes_xywh,
-            scores,
-            score_threshold=confidence_threshold,
-            nms_threshold=iou_threshold,
-        )
+            flat = t.flatten()
+            print(f"[HAILO DEBUG] key={key}, shape={t.shape}, dtype={t.dtype}, size={flat.size}")
+            if flat.size > 0:
+                print(f"[HAILO DEBUG] min={flat.min():.4f}, max={flat.max():.4f}, first 10={flat[:10]}")
+            else:
+                print(f"[HAILO DEBUG] tensor is empty (no detections)")
 
         detections: List[Detection] = []
-        if len(indices) > 0:
-            for i in indices.flatten():
-                x1, y1, x2, y2 = boxes_xyxy[i]
-                cls_id = class_ids[i]
-                cls_name = (
-                    self.class_names[cls_id]
-                    if cls_id < len(self.class_names)
-                    else str(cls_id)
-                )
-                detections.append(
-                    Detection(
-                        class_id=cls_id,
-                        class_name=cls_name,
-                        confidence=scores[i],
-                        bbox=BoundingBox(
-                            x1=float(x1), y1=float(y1),
-                            x2=float(x2), y2=float(y2),
-                        ),
-                    )
-                )
 
+        for key, tensor in raw_output.items():
+            tensor = np.array(tensor)
+
+            # Remove batch dimension if present
+            if tensor.ndim == 3:
+                tensor = tensor[0]
+
+            if tensor.size == 0:
+                print(f"[HAILO DEBUG] skipping empty tensor for key={key}")
+                continue
+
+            # NMS-postprocess output layout: [num_detections, 6]
+            # columns: [y1, x1, y2, x2, score, class_id]  (normalised 0-1)
+            if tensor.ndim == 2 and tensor.shape[-1] == 6:
+                print(f"[HAILO DEBUG] decoding NMS-postprocess format: {tensor.shape[0]} candidates")
+                for row in tensor:
+                    y1_n, x1_n, y2_n, x2_n = row[0], row[1], row[2], row[3]
+                    score = float(row[4])
+                    cls_id = int(row[5])
+
+                    if score < confidence_threshold:
+                        continue
+                    if classes is not None and cls_id not in classes:
+                        continue
+
+                    x1 = x1_n * orig_w
+                    y1 = y1_n * orig_h
+                    x2 = x2_n * orig_w
+                    y2 = y2_n * orig_h
+
+                    cls_name = (
+                        self.class_names[cls_id]
+                        if cls_id < len(self.class_names)
+                        else str(cls_id)
+                    )
+                    detections.append(
+                        Detection(
+                            class_id=cls_id,
+                            class_name=cls_name,
+                            confidence=score,
+                            bbox=BoundingBox(
+                                x1=float(x1), y1=float(y1),
+                                x2=float(x2), y2=float(y2),
+                            ),
+                        )
+                    )
+
+            # Raw YOLO anchor output layout: [num_anchors, 5 + num_classes]
+            # columns: [cx, cy, w, h, obj_conf, cls0_prob, …]
+            elif tensor.ndim == 2 and tensor.shape[-1] > 6:
+                print(f"[HAILO DEBUG] decoding raw YOLO anchor format: {tensor.shape}")
+                boxes_xyxy: List[List[float]] = []
+                scores: List[float] = []
+                class_ids: List[int] = []
+
+                for row in tensor:
+                    cx, cy, w, h = row[0], row[1], row[2], row[3]
+                    obj_conf = float(row[4])
+                    cls_probs = row[5:]
+                    cls_id = int(np.argmax(cls_probs))
+                    confidence = obj_conf * float(cls_probs[cls_id])
+
+                    if confidence < confidence_threshold:
+                        continue
+                    if classes is not None and cls_id not in classes:
+                        continue
+
+                    x1 = (cx - w / 2) * orig_w
+                    y1 = (cy - h / 2) * orig_h
+                    x2 = (cx + w / 2) * orig_w
+                    y2 = (cy + h / 2) * orig_h
+
+                    boxes_xyxy.append([x1, y1, x2, y2])
+                    scores.append(confidence)
+                    class_ids.append(cls_id)
+
+                if boxes_xyxy:
+                    boxes_xywh = [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes_xyxy]
+                    indices = cv2.dnn.NMSBoxes(
+                        boxes_xywh, scores,
+                        score_threshold=confidence_threshold,
+                        nms_threshold=iou_threshold,
+                    )
+                    if len(indices) > 0:
+                        for i in indices.flatten():
+                            x1, y1, x2, y2 = boxes_xyxy[i]
+                            cls_id = class_ids[i]
+                            cls_name = (
+                                self.class_names[cls_id]
+                                if cls_id < len(self.class_names)
+                                else str(cls_id)
+                            )
+                            detections.append(
+                                Detection(
+                                    class_id=cls_id,
+                                    class_name=cls_name,
+                                    confidence=scores[i],
+                                    bbox=BoundingBox(
+                                        x1=float(x1), y1=float(y1),
+                                        x2=float(x2), y2=float(y2),
+                                    ),
+                                )
+                            )
+            else:
+                print(f"[HAILO DEBUG] unrecognised tensor shape {tensor.shape} for key={key} — skipping")
+
+        print(f"[HAILO DEBUG] total detections after postprocess: {len(detections)}")
         return detections
 
     @staticmethod
