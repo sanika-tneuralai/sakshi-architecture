@@ -81,9 +81,9 @@ class DetectionService:
 
         # Save screenshot if detections found
         screenshot_path = None
-        if detection_objects:
-            screenshot_path = self._save_screenshot(frame, camera_id)
-            print(f"[SCREENSHOT] Screenshot saved: {screenshot_path}")
+        # if detection_objects:
+        #     screenshot_path = self._save_screenshot(frame, camera_id)
+        #     print(f"[SCREENSHOT] Screenshot saved: {screenshot_path}")
 
         # Persist to database and get first detection_id
         first_detection_id = self._persist_detections(camera_id, detection_objects, screenshot_path)
