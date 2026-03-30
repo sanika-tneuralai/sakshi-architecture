@@ -9,7 +9,7 @@ const CONFIG = {
   orchestrationUrl:   'http://192.168.1.75:8000',
   usecaseUrl:         'http://3.6.160.230:8001',
   alertUrl:           'http://192.168.1.75:8000',  // alerts served from orchestrate DB
-  cameraDetectionUrl: 'http://100.123.244.59:8000',
+  cameraDetectionUrl: 'http://100.123.244.59:8004',
   cameraId:           'camera_01',
   refreshIntervalMs:  12000,
   alertsLimit:        20,
