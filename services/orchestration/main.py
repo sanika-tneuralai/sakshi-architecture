@@ -48,7 +48,7 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session
+from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results
 
 # Configure logging
 logging.basicConfig(
@@ -539,6 +539,15 @@ class PipelineManager:
                     logger.debug(f"[{camera_id}] Charging session updated")
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Charging session update failed (non-critical): {str(e)}")
+
+                # STEP 3.6: Persist triggered alerts to DB (for dashboard)
+                try:
+                    alerts_written = await asyncio.get_event_loop().run_in_executor(
+                        None, persist_alerts_from_results, camera_id, results
+                    )
+                    logger.debug(f"[{camera_id}] Alerts persisted to DB | count={alerts_written}")
+                except Exception as e:
+                    logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
 
                 # STEP 4: Send alerts (non-critical, don't fail on error)
                 try:

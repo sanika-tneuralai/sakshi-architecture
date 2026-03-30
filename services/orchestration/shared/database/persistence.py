@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from shared.database.connection import SessionLocal
-from shared.database.models import ROIConfig, CameraUsecase, ChargingSession
+from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert
 
 
 def get_camera_rois(camera_id: str) -> List[Dict[str, Any]]:
@@ -221,8 +221,12 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         if not result.get("triggered"):
             continue
 
+        # Rule-specific fields are nested under "extras" by the usecase service engine.
+        # Fall back to top-level for backwards compatibility.
+        extras = result.get("extras") or {}
+
         if usecase_id == "parking_detection":
-            for evt in result.get("events", []):
+            for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
                 if etype == "parking_intime" and in_time_raw is None:
@@ -231,7 +235,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     out_time_raw = ts
 
         elif usecase_id == "gun_detection":
-            for evt in result.get("events", []):
+            for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
                 meta = evt.get("metadata", {})
@@ -243,7 +247,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     gun_number = gun_number or meta.get("gun_name")
 
         elif usecase_id == "vehicle_extraction":
-            details = result.get("vehicle_details", [])
+            details = extras.get("vehicle_details", result.get("vehicle_details", []))
             if details:
                 # Take the first successfully extracted vehicle
                 first = next(
@@ -378,3 +382,63 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         raise
     finally:
         db.close()
+
+
+# Usecases that are analytics-only and should NOT generate alerts.
+_NO_ALERT_USECASES = {"people_counter", "heatmap", "vehicle_extraction"}
+
+
+def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
+    """
+    Save one Alert row per triggered usecase result (except analytics-only rules).
+
+    Called by the orchestration pipeline after every usecase evaluation so the
+    dashboard can display alerts for parking_detection, gun_detection,
+    parking_compliance, safety_monitoring, and any other triggered rule.
+
+    Returns the number of alert rows written.
+    """
+    db = SessionLocal()
+    written = 0
+    try:
+        for result in usecase_results:
+            usecase_id = result.get("usecase_id") or result.get("usecase_name", "unknown")
+
+            if not result.get("triggered"):
+                continue
+            if usecase_id in _NO_ALERT_USECASES:
+                continue
+
+            extras = result.get("extras") or {}
+
+            # Build a short human-readable message from extras
+            matched_count = result.get("matched_count", 0)
+            message = f"[{usecase_id}] {matched_count} object(s) detected"
+            if "events" in extras and extras["events"]:
+                event_types = list({e.get("event_type", "") for e in extras["events"]})
+                message += f" | events: {', '.join(event_types)}"
+            elif "violations" in extras and extras["violations"]:
+                reasons = list({v.get("metadata", {}).get("reason", "") for v in extras["violations"]})
+                message += f" | violations: {', '.join(r for r in reasons if r)}"
+
+            alert = Alert(
+                camera_id=camera_id,
+                usecase_name=usecase_id,
+                alert_type=f"{usecase_id}_triggered",
+                message=message,
+                status="sent",
+                snapshot_b64=result.get("snapshot_b64"),
+                extras=extras if extras else None,
+            )
+            db.add(alert)
+            written += 1
+
+        db.commit()
+        _persistence_logger.debug(f"[DB] Persisted {written} alert(s) for camera {camera_id}")
+    except Exception as e:
+        db.rollback()
+        _persistence_logger.warning(f"[DB] Failed to persist alerts for camera {camera_id}: {e}")
+    finally:
+        db.close()
+
+    return written
