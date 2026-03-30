@@ -166,7 +166,7 @@ class HailoDetector(BaseDetector):
 
         self._input_vstreams_params = InputVStreamParams.make(
             self._network_group,
-            format_type=FormatType.FLOAT32,
+            format_type=FormatType.UINT8,
         )
         self._output_vstreams_params = OutputVStreamParams.make(
             self._network_group,
@@ -181,11 +181,12 @@ class HailoDetector(BaseDetector):
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         """
-        Resize to model input size, convert BGR→RGB, normalise to [0, 1] float32.
+        Resize to model input size, convert BGR→RGB, return uint8.
+        Hailo NMS-baked models handle normalisation internally.
         """
         resized = cv2.resize(frame, (self.input_width, self.input_height))
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return (rgb.astype(np.float32) / 255.0)
+        return rgb.astype(np.uint8)
 
     def _postprocess(
         self,
@@ -228,6 +229,38 @@ class HailoDetector(BaseDetector):
 
             if tensor.size == 0:
                 print(f"[HAILO DEBUG] skipping empty tensor for key={key}")
+                continue
+
+            # Hailo YOLOv8 NMS output layout: [batch, num_classes, num_detections, 5]
+            # where last dim is [score, x1, y1, x2, y2] (normalised 0-1)
+            if tensor.ndim == 4:
+                print(f"[HAILO DEBUG] decoding Hailo YOLOv8 NMS format: {tensor.shape}")
+                _, num_classes, num_dets, _ = tensor.shape
+                for cls_id in range(num_classes):
+                    for det_idx in range(num_dets):
+                        row = tensor[0, cls_id, det_idx]
+                        score = float(row[0])
+                        if score < confidence_threshold:
+                            continue
+                        if classes is not None and cls_id not in classes:
+                            continue
+                        x1_n, y1_n, x2_n, y2_n = row[1], row[2], row[3], row[4]
+                        cls_name = (
+                            self.class_names[cls_id]
+                            if cls_id < len(self.class_names)
+                            else str(cls_id)
+                        )
+                        detections.append(
+                            Detection(
+                                class_id=cls_id,
+                                class_name=cls_name,
+                                confidence=score,
+                                bbox=BoundingBox(
+                                    x1=float(x1_n * orig_w), y1=float(y1_n * orig_h),
+                                    x2=float(x2_n * orig_w), y2=float(y2_n * orig_h),
+                                ),
+                            )
+                        )
                 continue
 
             # NMS-postprocess output layout: [num_detections, 6]
