@@ -68,6 +68,7 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
     try:
         rule = get_usecase_rule(usecase_id)
         evaluation = rule.evaluate(slim_payload)
+        print(f"[ENGINE DEBUG] usecase={usecase_id} | evaluation keys={list(evaluation.keys())}")
         matched = evaluation.get("matched_objects", [])
 
         slim_matched = [_slim_detection(d) for d in matched]

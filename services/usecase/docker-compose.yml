@@ -40,6 +40,7 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -72,6 +73,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
       USE_WORKER_QUEUE: 'true'
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
