@@ -6,10 +6,10 @@
    CONFIG — Change URLs to match your EC2 setup
 ───────────────────────────────────────────── */
 const CONFIG = {
-  orchestrationUrl:   'http://localhost:8000',
-  usecaseUrl:         'http://localhost:8001',
-  alertUrl:           'http://localhost:8002',
-  cameraDetectionUrl: 'http://localhost:8004',
+  orchestrationUrl:   'http://192.168.1.75:8000',
+  usecaseUrl:         'http://3.6.160.230:8001',
+  alertUrl:           'http://192.168.1.75:8000',  // alerts served from orchestrate DB
+  cameraDetectionUrl: 'http://100.123.244.59:8000',
   cameraId:           'camera_01',
   refreshIntervalMs:  12000,
   alertsLimit:        20,

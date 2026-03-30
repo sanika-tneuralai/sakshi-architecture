@@ -49,6 +49,7 @@ from tenacity import (
     before_sleep_log
 )
 from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results
+from shared.database.connection import SessionLocal
 
 # Configure logging
 logging.basicConfig(
@@ -68,9 +69,7 @@ logger = logging.getLogger(__name__)
 
 # Service URLs
 
-CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://localhost:8004")
-# CAMERA_DETECTION_URL=os.getenv("CAMERA_DETECTION_URL","http://13.201.133.171:8004") #EC2
-# CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8000") #edgeserver
+CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8000")
 USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
 
@@ -1090,6 +1089,92 @@ async def list_detection_snapshots():
             for cam_id, snap in detection_snapshots.items()
         ]
     }
+
+
+@app.get("/alert/list", tags=["dashboard"])
+async def list_alerts(
+    camera_id: Optional[str] = None,
+    usecase_name: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Return saved alert rows for the dashboard.
+    Query params: camera_id, usecase_name, limit (default 100).
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import Alert
+        q = db.query(Alert)
+        if camera_id:
+            q = q.filter(Alert.camera_id == camera_id)
+        if usecase_name:
+            q = q.filter(Alert.usecase_name == usecase_name)
+        rows = q.order_by(Alert.timestamp.desc()).limit(limit).all()
+        return {
+            "alerts": [
+                {
+                    "alert_id":    r.alert_id,
+                    "camera_id":   r.camera_id,
+                    "usecase_name": r.usecase_name,
+                    "alert_type":  r.alert_type,
+                    "message":     r.message,
+                    "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
+                    "status":      r.status,
+                    "snapshot_b64": r.snapshot_b64,
+                    "extras":      r.extras,
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        logger.warning(f"[DB] Failed to fetch alerts: {e}")
+        return {"alerts": []}
+    finally:
+        db.close()
+
+
+@app.get("/charging-sessions", tags=["dashboard"])
+async def list_charging_sessions(
+    camera_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Return charging session rows for the dashboard.
+    Query params: camera_id, status (active/charging/completed/incomplete), limit.
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import ChargingSession
+        q = db.query(ChargingSession)
+        if camera_id:
+            q = q.filter(ChargingSession.camera_id == camera_id)
+        if status:
+            q = q.filter(ChargingSession.session_status == status)
+        rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
+        return {
+            "sessions": [
+                {
+                    "session_id":     r.session_id,
+                    "camera_id":      r.camera_id,
+                    "gun_number":     r.gun_number,
+                    "car_number":     r.car_number,
+                    "car_model":      r.car_model,
+                    "in_time":        r.in_time.isoformat() if r.in_time else None,
+                    "plug_time":      r.plug_time.isoformat() if r.plug_time else None,
+                    "plug_out_time":  r.plug_out_time.isoformat() if r.plug_out_time else None,
+                    "out_time":       r.out_time.isoformat() if r.out_time else None,
+                    "session_status": r.session_status,
+                    "created_at":     r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        logger.warning(f"[DB] Failed to fetch charging sessions: {e}")
+        return {"sessions": []}
+    finally:
+        db.close()
 
 
 @app.get("/health", tags=["health"])
