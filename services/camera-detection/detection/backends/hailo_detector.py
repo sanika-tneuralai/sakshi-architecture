@@ -41,23 +41,9 @@ from shared.common.config import Config
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# COCO-80 fallback class names (same order as standard YOLO training)
+# Default class names for yolo_2903_v1 model
 # ---------------------------------------------------------------------------
-_COCO_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
-    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
-    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
-    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-    "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
-    "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush",
-]
+_DEFAULT_CLASSES = ["car", "gun", "fire", "smoke", "other"]
 
 
 class HailoDetector(BaseDetector):
@@ -265,7 +251,7 @@ class HailoDetector(BaseDetector):
     @staticmethod
     def _load_labels(labels_path: Optional[str]) -> List[str]:
         if not labels_path:
-            return _COCO_CLASSES
+            return _DEFAULT_CLASSES
         try:
             with open(labels_path) as f:
                 names = [line.strip() for line in f if line.strip()]
@@ -273,7 +259,7 @@ class HailoDetector(BaseDetector):
             return names
         except Exception as e:
             logger.warning("Could not load labels from %s: %s — using COCO defaults", labels_path, e)
-            return _COCO_CLASSES
+            return _DEFAULT_CLASSES
 
 
 print("✓ detection.backends.hailo_detector module loaded")
