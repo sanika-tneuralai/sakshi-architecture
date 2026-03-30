@@ -73,6 +73,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
             return {"triggered": False, "matched_objects": [], "events": []}
 
         cars = [d for d in detection_output.get("detections", []) if d.get("class_name") == "car"]
+        print(f"[PARKING] camera={camera_id} | rois={list(rois.keys())} | cars_detected={len(cars)}")
 
         # --- Load state from Redis ---
         redis_key = f"parking:{camera_id}"
@@ -100,6 +101,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
         entry_buf = state["entry_buf"]
         exit_buf = state["exit_buf"]
 
+        print(f"[PARKING] roi_occupants={roi_occupants}")
         for roi_name, occupant_ids in roi_occupants.items():
             s = roi_state[roi_name]
 
@@ -181,4 +183,5 @@ class ParkingDetectionRule(BaseUsecaseRule):
         state["exit_buf"] = exit_buf
         set_state(redis_key, state)
 
+        print(f"[PARKING] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
         return {"triggered": triggered, "matched_objects": tracked_cars, "events": events}

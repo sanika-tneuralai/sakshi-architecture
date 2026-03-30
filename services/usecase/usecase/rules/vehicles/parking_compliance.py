@@ -39,7 +39,9 @@ class ParkingComplianceRule(BaseUsecaseRule):
             return {"triggered": False, "matched_objects": [], "violations": []}
 
         cars = [d for d in detection_output.get("detections", []) if d.get("class_name") == "car"]
+        print(f"[COMPLIANCE] camera={camera_id} | rois={list(rois.keys())} | cars_detected={len(cars)}")
         if not cars:
+            print(f"[COMPLIANCE] no cars — skipping")
             return {"triggered": False, "matched_objects": [], "violations": []}
 
         violations: List[dict] = []
@@ -48,6 +50,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
         for car in cars:
             track_id = car.get("track_id", "unknown")
             matched_rois = which_rois(car["bbox"], rois)
+            print(f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}")
 
             if len(matched_rois) == 0:
                 evt = build_event(
@@ -90,6 +93,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     camera_id, track_id, matched_rois,
                 )
 
+        print(f"[COMPLIANCE] result: triggered={len(violations) > 0} | violations={[v['event_type'] for v in violations]}")
         return {
             "triggered": len(violations) > 0,
             "matched_objects": flagged,

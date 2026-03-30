@@ -93,6 +93,7 @@ class GunDetectionRule(BaseUsecaseRule):
         redis_key = f"gun:{camera_id}"
         state     = get_state(redis_key)
 
+        print(f"[GUN] camera={camera_id} | rois={list(rois.keys())} | total_dets={len(all_dets)}")
         # ── Step 2: track cars across frames ─────────────────────────────
         car_dets = [d for d in all_dets if d.get("class_name") == CAR_CLASS]
         tracker  = CentroidTracker(max_disappeared=15, max_distance=100)
@@ -112,6 +113,7 @@ class GunDetectionRule(BaseUsecaseRule):
                         roi_to_car[roi_name] = car["track_id"]
                     car_to_rois.setdefault(car["track_id"], []).append(roi_name)
 
+        print(f"[GUN] cars_tracked={len(tracked_cars)} | roi_to_car={roi_to_car}")
         # ── Step 3: map guns to ROIs ──────────────────────────────────────
         gun_dets = [d for d in all_dets if d.get("class_name") in GUN_CLASSES]
 
@@ -123,6 +125,7 @@ class GunDetectionRule(BaseUsecaseRule):
                 if roi_name not in roi_to_gun or gun.get("confidence", 0) > roi_to_gun[roi_name].get("confidence", 0):
                     roi_to_gun[roi_name] = gun
 
+        print(f"[GUN] guns_detected={len(gun_dets)} | roi_to_gun={list(roi_to_gun.keys())}")
         # ── Step 4: maintain per-(roi, car) state slots ───────────────────
         slots: Dict[str, dict] = state.get("slots", {})
 
@@ -256,4 +259,5 @@ class GunDetectionRule(BaseUsecaseRule):
         set_state(redis_key, state)
 
         triggered = bool(events) or bool(matched)
+        print(f"[GUN] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
         return {"triggered": triggered, "matched_objects": matched, "events": events}

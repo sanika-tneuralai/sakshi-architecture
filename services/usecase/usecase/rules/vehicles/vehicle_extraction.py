@@ -146,6 +146,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
         ]
 
         snapshot_b64 = detection_output.get("snapshot_b64")
+        print(f"[VEHICLE] camera={camera_id} | cars_detected={len(cars)} | snapshot={'yes' if snapshot_b64 else 'no'}")
         image = _decode_image(snapshot_b64) if snapshot_b64 else None
         vehicle_details: List[dict] = []
 
@@ -167,11 +168,12 @@ class VehicleExtractionRule(BaseUsecaseRule):
                 # Already extracted — return cached result, skip Gemini
                 cached = cache[key]
                 cached["absent_frames"] = 0
-                logger.debug("[VEHICLE] Cache hit for key=%s", key)
+                print(f"[VEHICLE] cache hit: key={key} plate={cached['car_number']} model={cached['car_model']}")
                 car_number = cached["car_number"]
                 car_model = cached["car_model"]
             else:
                 # New car — call Gemini once
+                print(f"[VEHICLE] new car detected: key={key} | calling Gemini")
                 car_number, car_model = "unreadable", "unknown"
                 if image is not None:
                     crop = _crop_bbox(image, bbox)
@@ -209,8 +211,10 @@ class VehicleExtractionRule(BaseUsecaseRule):
         set_state(redis_key, cache)
 
         if not cars:
+            print(f"[VEHICLE] no cars — skipping")
             return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
+        print(f"[VEHICLE] result: triggered=True | vehicles={[(v['car_number'], v['car_model']) for v in vehicle_details]}")
         return {
             "triggered": True,
             "matched_objects": cars,
