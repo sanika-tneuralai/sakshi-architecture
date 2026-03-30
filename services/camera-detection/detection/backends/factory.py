@@ -30,7 +30,7 @@ def create_detector(backend: Optional[str] = None) -> BaseDetector:
     Args:
         backend: Override the backend name. When None the value of
                  Config.get_inference_backend() (INFERENCE_BACKEND env var)
-                 is used, defaulting to 'pytorch'.
+                 is used, defaulting to 'hailo'.
 
     Returns:
         A fully-initialised BaseDetector subclass.

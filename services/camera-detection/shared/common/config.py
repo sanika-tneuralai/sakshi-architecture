@@ -95,7 +95,7 @@ class Config:
         Options: 'pytorch' (default) | 'hailo'
         Controlled via INFERENCE_BACKEND env var.
         """
-        return os.getenv("INFERENCE_BACKEND", "pytorch").lower().strip()
+        return os.getenv("INFERENCE_BACKEND", "hailo").lower().strip()
 
     # ==================== Hailo Settings ====================
     @staticmethod
