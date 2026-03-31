@@ -41,9 +41,10 @@ from shared.common.config import Config
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Default class names for yolo_2903_v1 model
+# Default class names — must match new model label order
+# {0: "fire", 1: "smoke", 2: "car", 3: "gun"}
 # ---------------------------------------------------------------------------
-_DEFAULT_CLASSES = ["car", "gun", "fire", "smoke", "other"]
+_DEFAULT_CLASSES = ["fire", "smoke", "car", "gun"]
 
 
 class HailoDetector(BaseDetector):
