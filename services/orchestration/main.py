@@ -536,9 +536,8 @@ class PipelineManager:
                     await asyncio.get_event_loop().run_in_executor(
                         None, upsert_charging_session, camera_id, results
                     )
-                    logger.debug(f"[{camera_id}] Charging session updated")
                 except Exception as e:
-                    logger.warning(f"[{camera_id}] Charging session update failed (non-critical): {str(e)}")
+                    logger.error(f"[{camera_id}] Charging session update failed: {str(e)}", exc_info=True)
 
                 # STEP 3.6: Persist triggered alerts to DB (for dashboard)
                 try:

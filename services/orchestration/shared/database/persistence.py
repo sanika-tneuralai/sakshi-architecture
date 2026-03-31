@@ -252,13 +252,20 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         elif usecase_id == "vehicle_extraction":
             details = extras.get("vehicle_details", result.get("vehicle_details", []))
             if details:
-                # Take the first successfully extracted vehicle
-                first = next(
+                # Only use a readable car_number — skip "unreadable"/"unknown" fallbacks
+                # so they don't pollute session lookup keys or create junk sessions.
+                readable = next(
                     (d for d in details if d.get("car_number") not in (None, "unreadable")),
-                    details[0],
+                    None,
                 )
-                car_number = car_number or first.get("car_number")
-                car_model = car_model or first.get("car_model")
+                if readable:
+                    car_number = car_number or readable.get("car_number")
+                    car_model = car_model or readable.get("car_model")
+                elif not car_model:
+                    # Accept model even if plate is unreadable, but only if model is known
+                    first = details[0]
+                    if first.get("car_model") not in (None, "unknown"):
+                        car_model = first.get("car_model")
 
     def _parse_dt(value) -> datetime | None:
         """Convert a string or datetime to a timezone-naive datetime (or None)."""
@@ -301,7 +308,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 .first()
             )
 
-        # Priority 2: match by car_number
+        # Priority 2: match by car_number (only when readable)
         if session is None and car_number:
             session = (
                 db.query(ChargingSession)
@@ -326,15 +333,23 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 .first()
             )
 
-        # Create a new session if none found
+        # Create a new session only when in_time is present.
+        # vehicle_extraction alone (no parking event) must never create a
+        # new session — it should only enrich an already-open session.
         if session is None:
+            if in_time is None:
+                _persistence_logger.debug(
+                    f"[DB] Skipping new session for camera {camera_id} — "
+                    f"no in_time yet (vehicle_extraction only)"
+                )
+                return
             session = ChargingSession(
                 camera_id=camera_id,
                 session_status="active",
             )
             db.add(session)
             db.flush()  # Populate session_id before we update fields below
-            _persistence_logger.debug(
+            _persistence_logger.info(
                 f"[DB] Created new ChargingSession session_id={session.session_id} "
                 f"for camera {camera_id}"
             )
@@ -372,9 +387,11 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             session.session_status = "active"
 
         db.commit()
-        _persistence_logger.debug(
+        _persistence_logger.info(
             f"[DB] ChargingSession session_id={session.session_id} "
-            f"status={session.session_status} updated for camera {camera_id}"
+            f"status={session.session_status} | in_time={session.in_time} "
+            f"plug_time={session.plug_time} out_time={session.out_time} "
+            f"car={session.car_number} gun={session.gun_number} camera={camera_id}"
         )
 
     except Exception as e:
