@@ -225,7 +225,10 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         # Fall back to top-level for backwards compatibility.
         extras = result.get("extras") or {}
 
-        if usecase_id == "parking_detection":
+        if usecase_id in ("parking_detection", "parking_compliance"):
+            # parking_detection fires intime/outtime for cars inside ROIs.
+            # parking_compliance also fires intime/outtime for unauthorized
+            # cars (outside all ROIs) so their sessions are tracked too.
             for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
