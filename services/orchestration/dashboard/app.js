@@ -6,8 +6,8 @@
    CONFIG — Change URLs to match your deployment
 ───────────────────────────────────────────── */
 const CONFIG = {
-  orchestrationUrl:   'http://192.168.1.75:8000',
-  alertUrl:           'http://192.168.1.75:8000',  // alerts served from orchestrate DB
+  orchestrationUrl:   'http://13.201.133.171:8000',
+  alertUrl:           'http://13.201.133.171:8000',  // alerts served from orchestrate DB
   cameraDetectionUrl: 'http://100.123.244.59:8004',
   cameraId:           'camera_01',
   refreshIntervalMs:  12000,
