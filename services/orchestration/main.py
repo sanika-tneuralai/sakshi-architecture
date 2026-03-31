@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8004")
 USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
+ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://3.6.160.230:8003")
 
 # Request timeout
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
@@ -1177,6 +1178,132 @@ async def list_charging_sessions(
         db.close()
 
 
+@app.get("/dashboard/sessions", tags=["dashboard"])
+async def dashboard_sessions(
+    camera_id: Optional[str] = None,
+    gun_number: Optional[str] = None,
+    car_number: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Primary dashboard session table — all 7 fields per vehicle session.
+
+    Gun Number | Car Number | Car Model | In Time |
+    Plug In Time | Plug Out Time | Car Out Time
+
+    Proxies to the analytics service /analytics/charging/sessions.
+    Fields populate automatically as the vehicle moves through the facility:
+    - in_time       — car enters parking ROI         (parking_detection)
+    - plug_time     — charging gun plugged in         (gun_detection)
+    - plug_out_time — charging gun unplugged          (gun_detection)
+    - out_time      — car exits parking ROI           (parking_detection)
+    - gun_number    — derived from ROI name           (gun_detection)
+    - car_number    — license plate via Gemini Vision (vehicle_extraction)
+    - car_model     — make/model via Gemini Vision    (vehicle_extraction)
+
+    Query params: camera_id, gun_number, car_number,
+                  status (active/charging/completed/incomplete), limit.
+    """
+    params: Dict[str, Any] = {"limit": limit}
+    if camera_id:
+        params["camera_id"] = camera_id
+    if gun_number:
+        params["gun_number"] = gun_number
+    if car_number:
+        params["car_number"] = car_number
+    if status:
+        params["status"] = status
+    try:
+        response = await http_client.get(
+            f"{ANALYTICS_SERVICE_URL}/analytics/charging/sessions",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] Failed to fetch sessions from analytics service: {e}")
+        raise HTTPException(status_code=502, detail=f"Analytics service unavailable: {e}")
+
+
+@app.get("/dashboard/parking-compliance", tags=["dashboard"])
+async def dashboard_parking_compliance(
+    camera_id: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Parking Compliance dashboard section.
+
+    Returns parking compliance violations from the alert service:
+    - unauthorized_parking  — car detected outside all defined ROIs
+    - wrong_parking         — car centroid inside multiple ROIs simultaneously
+    - multiple_cars_in_roi  — more than one car occupying the same ROI
+
+    Each violation row includes alert_type, message, timestamp, extras
+    (bbox, confidence, roi name), and snapshot_b64.
+
+    Proxies to the alert service /alert/list?usecase_name=parking_compliance.
+    Query params: camera_id, limit.
+    """
+    params: Dict[str, Any] = {"usecase_name": "parking_compliance", "limit": limit}
+    if camera_id:
+        params["camera_id"] = camera_id
+    try:
+        response = await http_client.get(
+            f"{ALERT_SERVICE_URL}/alert/list",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "violations": data.get("alerts", []),
+            "total": len(data.get("alerts", [])),
+        }
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] Failed to fetch parking compliance from alert service: {e}")
+        raise HTTPException(status_code=502, detail=f"Alert service unavailable: {e}")
+
+
+@app.get("/dashboard/safety-monitoring", tags=["dashboard"])
+async def dashboard_safety_monitoring(
+    camera_id: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Safety Monitoring dashboard section.
+
+    Returns safety alerts from the alert service:
+    - fire  — fire detected in camera frame
+    - smoke — smoke detected in camera frame
+
+    Each alert row includes alert_type, message, timestamp, extras
+    (hazard_type, confidence, bbox), and snapshot_b64.
+
+    Proxies to the alert service /alert/list?usecase_name=safety_monitoring.
+    Query params: camera_id, limit.
+    """
+    params: Dict[str, Any] = {"usecase_name": "safety_monitoring", "limit": limit}
+    if camera_id:
+        params["camera_id"] = camera_id
+    try:
+        response = await http_client.get(
+            f"{ALERT_SERVICE_URL}/alert/list",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "safety_alerts": data.get("alerts", []),
+            "total": len(data.get("alerts", [])),
+        }
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] Failed to fetch safety alerts from alert service: {e}")
+        raise HTTPException(status_code=502, detail=f"Alert service unavailable: {e}")
+
+
 @app.get("/health", tags=["health"])
 async def health_check():
     """
@@ -1197,7 +1324,8 @@ async def health_check():
     services = {
         "camera_detection": CAMERA_DETECTION_URL,
         "usecase": USECASE_SERVICE_URL,
-        "alert": ALERT_SERVICE_URL
+        "alert": ALERT_SERVICE_URL,
+        "analytics": ANALYTICS_SERVICE_URL,
     }
     
     for service_name, service_url in services.items():
@@ -1248,21 +1376,33 @@ async def root():
             "openapi_json": "/openapi.json"
         },
         "endpoints": {
-            "start_single": "POST /pipeline/start/{camera_id}",
-            "start_batch": "POST /pipeline/start-batch",
-            "stop_single": "POST /pipeline/stop/{camera_id}",
-            "stop_all": "POST /pipeline/stop-all",
-            "status_all": "GET /pipeline/status",
-            "status_single": "GET /pipeline/status/{camera_id}",
-            "execute_once": "POST /pipeline/execute (legacy)",
-            "snapshot_single": "GET /snapshots/{camera_id}",
-            "snapshot_list": "GET /snapshots",
+            "pipeline": {
+                "start_single": "POST /pipeline/start/{camera_id}",
+                "start_batch": "POST /pipeline/start-batch",
+                "stop_single": "POST /pipeline/stop/{camera_id}",
+                "stop_all": "POST /pipeline/stop-all",
+                "status_all": "GET /pipeline/status",
+                "status_single": "GET /pipeline/status/{camera_id}",
+                "execute_once": "POST /pipeline/execute (legacy)",
+            },
+            "dashboard": {
+                "sessions": "GET /dashboard/sessions — all 7 session fields (Gun Number | Car Number | Car Model | In Time | Plug In Time | Plug Out Time | Car Out Time)",
+                "parking_compliance": "GET /dashboard/parking-compliance — unauthorized parking, wrong parking, multiple cars in ROI",
+                "safety_monitoring": "GET /dashboard/safety-monitoring — fire and smoke alerts",
+                "charging_sessions_legacy": "GET /charging-sessions — direct DB session query (legacy)",
+                "alerts_legacy": "GET /alert/list — direct DB alert query (legacy)",
+            },
+            "snapshots": {
+                "snapshot_single": "GET /snapshots/{camera_id}",
+                "snapshot_list": "GET /snapshots",
+            },
             "health": "GET /health"
         },
         "configured_services": {
             "camera_detection": CAMERA_DETECTION_URL,
             "usecase": USECASE_SERVICE_URL,
-            "alert": ALERT_SERVICE_URL
+            "alert": ALERT_SERVICE_URL,
+            "analytics": ANALYTICS_SERVICE_URL,
         },
         "concurrency_limits": {
             "camera_detection": CAMERA_DETECTION_CONCURRENCY,

@@ -390,11 +390,16 @@ _NO_ALERT_USECASES = {"people_counter", "heatmap", "vehicle_extraction"}
 
 def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
     """
-    Save one Alert row per triggered usecase result (except analytics-only rules).
+    Save Alert rows from triggered usecase results (except analytics-only rules).
 
     Called by the orchestration pipeline after every usecase evaluation so the
     dashboard can display alerts for parking_detection, gun_detection,
     parking_compliance, safety_monitoring, and any other triggered rule.
+
+    Special handling for parking_detection:
+      - parking_intime / parking_outtime events → persisted as parking_detection alerts
+      - multiple_cars_in_roi events → persisted as separate parking_compliance alerts
+        so they surface correctly on the Parking Compliance dashboard section.
 
     Returns the number of alert rows written.
     """
@@ -410,8 +415,56 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 continue
 
             extras = result.get("extras") or {}
+            snapshot_b64 = result.get("snapshot_b64")
 
-            # Build a short human-readable message from extras
+            # ── Special case: split parking_detection events by type ──────────
+            # multiple_cars_in_roi violations must appear on the Parking
+            # Compliance dashboard, so they are stored under usecase_name
+            # "parking_compliance" with their own alert rows.
+            if usecase_id == "parking_detection":
+                events = extras.get("events", [])
+
+                session_events = [e for e in events if e.get("event_type") in ("parking_intime", "parking_outtime")]
+                violation_events = [e for e in events if e.get("event_type") == "multiple_cars_in_roi"]
+
+                # Persist session events as parking_detection alert
+                if session_events:
+                    matched_count = result.get("matched_count", 0)
+                    event_types = list({e.get("event_type", "") for e in session_events})
+                    message = f"[parking_detection] {matched_count} object(s) detected | events: {', '.join(event_types)}"
+                    alert = Alert(
+                        camera_id=camera_id,
+                        usecase_name="parking_detection",
+                        alert_type="parking_detection_triggered",
+                        message=message,
+                        status="sent",
+                        snapshot_b64=snapshot_b64,
+                        extras={"events": session_events},
+                    )
+                    db.add(alert)
+                    written += 1
+
+                # Persist each multiple_cars_in_roi as a parking_compliance violation
+                for evt in violation_events:
+                    meta = evt.get("metadata", {})
+                    roi = meta.get("roi", "unknown")
+                    count = meta.get("count", 2)
+                    message = f"[parking_compliance] {count} cars detected in {roi}"
+                    alert = Alert(
+                        camera_id=camera_id,
+                        usecase_name="parking_compliance",
+                        alert_type="multiple_cars_in_roi",
+                        message=message,
+                        status="sent",
+                        snapshot_b64=snapshot_b64,
+                        extras={"violations": [evt]},
+                    )
+                    db.add(alert)
+                    written += 1
+
+                continue  # handled above — skip the generic path below
+
+            # ── Generic path for all other usecases ───────────────────────────
             matched_count = result.get("matched_count", 0)
             message = f"[{usecase_id}] {matched_count} object(s) detected"
             if "events" in extras and extras["events"]:
@@ -427,7 +480,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 alert_type=f"{usecase_id}_triggered",
                 message=message,
                 status="sent",
-                snapshot_b64=result.get("snapshot_b64"),
+                snapshot_b64=snapshot_b64,
                 extras=extras if extras else None,
             )
             db.add(alert)
