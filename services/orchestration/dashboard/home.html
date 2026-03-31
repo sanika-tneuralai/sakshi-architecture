@@ -3,8 +3,97 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>GOEC — Overview</title>
+  <title>GOEC — Dashboard</title>
   <link rel="stylesheet" href="shared.css"/>
+  <style>
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .section-title {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .alert-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .alert-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 12px;
+      background: var(--surface2);
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .alert-row:hover { background: rgba(0,0,0,0.05); }
+    .alert-time {
+      color: var(--muted);
+      white-space: nowrap;
+      min-width: 72px;
+      font-size: 12px;
+      padding-top: 1px;
+    }
+    .alert-msg { flex: 1; color: var(--text); }
+    .alert-type {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      white-space: nowrap;
+    }
+    .empty-state {
+      text-align: center;
+      padding: 28px 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* Session table */
+    .table-wrap {
+      overflow-x: auto;
+    }
+    table.session-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.session-table th {
+      text-align: left;
+      padding: 9px 12px;
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    table.session-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    table.session-table tr:last-child td { border-bottom: none; }
+    table.session-table tr:hover td { background: rgba(0,0,0,0.03); }
+    .td-muted { color: var(--muted); }
+
+    .count-pill {
+      font-size: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2px 9px;
+      color: var(--muted);
+    }
+  </style>
 </head>
 <body>
 
@@ -15,26 +104,83 @@
 
     <div class="topbar">
       <div class="topbar-left">
-        <h2 class="topbar-title">Overview</h2>
+        <h2 class="topbar-title">Dashboard</h2>
       </div>
       <div class="topbar-right">
-        <span class="topbar-refresh">Updated: <span id="last-refresh">—</span></span>
+        <span id="monitoring-badge" class="badge loading">Checking…</span>
+        <span class="topbar-refresh" style="margin-left:14px">Updated: <span id="last-refresh">—</span></span>
       </div>
     </div>
 
     <div class="page-content">
 
-      <!-- Monitoring status badge -->
-      <div style="margin-bottom:28px">
-        <span class="badge loading" id="monitoring-badge">Checking…</span>
+      <!-- ── Row: Compliance + Safety side by side ── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+
+        <!-- Parking Compliance -->
+        <div class="card">
+          <div class="card-body">
+            <div class="section-header">
+              <div class="section-title">
+                <span>🚫</span> Parking Violations
+                <span class="count-pill" id="compliance-count">—</span>
+              </div>
+            </div>
+            <div class="alert-list" id="compliance-list">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Safety Monitoring -->
+        <div class="card">
+          <div class="card-body">
+            <div class="section-header">
+              <div class="section-title">
+                <span>🔥</span> Safety Alerts
+                <span class="count-pill" id="safety-count">—</span>
+              </div>
+            </div>
+            <div class="alert-list" id="safety-list">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
-      <!-- 2x2 usecase summary cards -->
-      <div class="grid-auto" id="uc-grid">
-        <!-- Injected by JS -->
+      <!-- ── Charging Sessions Table ── -->
+      <div class="card">
+        <div class="card-body">
+          <div class="section-header">
+            <div class="section-title">
+              <span>⚡</span> Charging Sessions
+              <span class="count-pill" id="sessions-count">—</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="session-table">
+              <thead>
+                <tr>
+                  <th>Gun #</th>
+                  <th>Car Number</th>
+                  <th>Car Model</th>
+                  <th>In Time</th>
+                  <th>Plug In Time</th>
+                  <th>Plug Out Time</th>
+                  <th>Car Out Time</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="sessions-tbody">
+                <tr><td colspan="8" class="empty-state">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
-    </div>
+    </div><!-- /page-content -->
   </div>
 </div>
 
@@ -46,113 +192,128 @@
   injectSidebarHTML('home');
   initSidebar();
 
-  /* ── Human-readable time-ago ── */
-  function timeAgo(ts) {
-    if (!ts) return 'unknown time';
-    const diffMs = Date.now() - new Date(ts).getTime();
-    if (isNaN(diffMs) || diffMs < 0) return 'just now';
-    const secs  = Math.floor(diffMs / 1000);
-    const mins  = Math.floor(secs  / 60);
-    const hours = Math.floor(mins  / 60);
-    const days  = Math.floor(hours / 24);
-    if (secs  <  60) return 'just now';
-    if (mins  <   2) return '1 minute ago';
-    if (mins  <  60) return `${mins} minutes ago`;
-    if (hours <   2) return '1 hour ago';
-    if (hours <  24) return `${hours} hours ago`;
-    if (days  <   2) return 'yesterday';
-    return `${days} days ago`;
-  }
-
-  /* ── Today's date string (YYYY-MM-DD) for filtering ── */
-  function todayStr() {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  /* ── Build card skeleton ── */
-  function buildGrid() {
-    const grid = document.getElementById('uc-grid');
-    grid.innerHTML = USECASES.map(uc => `
-      <div class="card usecase-card"
-           style="border-left:3px solid ${uc.color};cursor:pointer"
-           onclick="location.href='${uc.page}'">
-        <div class="card-body">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-            <span style="font-size:24px">${uc.icon}</span>
-            <span style="font-weight:600;font-size:15px">${uc.label}</span>
-          </div>
-          <div style="font-size:32px;font-weight:700;margin-bottom:4px" id="count-${uc.id}">—</div>
-          <div style="font-size:12px;color:var(--muted)" id="last-${uc.id}">Loading…</div>
-        </div>
+  /* ── Render helpers ── */
+  function renderComplianceList(violations) {
+    const el = document.getElementById('compliance-list');
+    document.getElementById('compliance-count').textContent = violations.length;
+    if (!violations.length) {
+      el.innerHTML = '<div class="empty-state">No violations today</div>';
+      return;
+    }
+    el.innerHTML = violations.map(v => `
+      <div class="alert-row">
+        <span class="alert-time">${fmtTs(v.timestamp)}</span>
+        <span class="alert-msg">${escHtml(v.message || v.alert_type || 'Violation')}</span>
+        <span class="alert-type" style="background:var(--warn-soft);color:var(--warn)">${escHtml(v.alert_type || '—')}</span>
       </div>
+    `).join('');
+  }
+
+  function renderSafetyList(alerts) {
+    const el = document.getElementById('safety-list');
+    document.getElementById('safety-count').textContent = alerts.length;
+    if (!alerts.length) {
+      el.innerHTML = '<div class="empty-state">No safety alerts today</div>';
+      return;
+    }
+    el.innerHTML = alerts.map(a => `
+      <div class="alert-row">
+        <span class="alert-time">${fmtTs(a.timestamp)}</span>
+        <span class="alert-msg">${escHtml(a.message || a.alert_type || 'Alert')}</span>
+        <span class="alert-type" style="background:var(--danger-soft);color:var(--danger)">${escHtml(a.alert_type || '—')}</span>
+      </div>
+    `).join('');
+  }
+
+  function statusBadge(status) {
+    if (!status) return '<span class="td-muted">—</span>';
+    const map = {
+      active:     ['var(--accent-soft)',  'var(--accent)',  'Active'],
+      charging:   ['var(--info-soft)',    'var(--info)',    'Charging'],
+      completed:  ['var(--surface2)',     'var(--muted)',   'Completed'],
+    };
+    const [bg, fg, label] = map[status] || ['var(--surface2)', 'var(--muted)', status];
+    return `<span class="alert-type" style="background:${bg};color:${fg}">${escHtml(label)}</span>`;
+  }
+
+  function cell(val) {
+    return val ? escHtml(String(val)) : '<span class="td-muted">—</span>';
+  }
+
+  function renderSessionsTable(sessions) {
+    const tbody = document.getElementById('sessions-tbody');
+    document.getElementById('sessions-count').textContent = sessions.length;
+    if (!sessions.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No sessions found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = sessions.map(s => `
+      <tr>
+        <td>${cell(s.gun_number)}</td>
+        <td>${cell(s.car_number)}</td>
+        <td>${cell(s.car_model)}</td>
+        <td>${s.in_time  ? fmtTsFull(s.in_time)       : '<span class="td-muted">—</span>'}</td>
+        <td>${s.plug_time     ? fmtTsFull(s.plug_time)     : '<span class="td-muted">—</span>'}</td>
+        <td>${s.plug_out_time ? fmtTsFull(s.plug_out_time) : '<span class="td-muted">—</span>'}</td>
+        <td>${s.out_time ? fmtTsFull(s.out_time)      : '<span class="td-muted">—</span>'}</td>
+        <td>${statusBadge(s.session_status || s.status)}</td>
+      </tr>
     `).join('');
   }
 
   /* ── Main refresh ── */
   async function refresh() {
-    const today = todayStr();
+    const cam = CONFIG.cameraId;
+    const base = CONFIG.orchestrationUrl;
 
-    const [pipeline, ...alertResults] = await Promise.all([
-      fetchJSON(`${CONFIG.orchestrationUrl}/pipeline/status/${CONFIG.cameraId}`),
-      ...USECASES.map(uc =>
-        fetchJSON(
-          `${CONFIG.alertUrl}/alert/list?camera_id=${CONFIG.cameraId}&usecase_name=${uc.id}&limit=200`,
-          null
-        )
-      ),
+    const [pipeline, complianceData, safetyData, sessionsData] = await Promise.all([
+      fetchJSON(`${base}/pipeline/status/${cam}`),
+      fetchJSON(`${base}/dashboard/parking-compliance?camera_id=${cam}&limit=100`, null),
+      fetchJSON(`${base}/dashboard/safety-monitoring?camera_id=${cam}&limit=100`, null),
+      fetchJSON(`${base}/dashboard/sessions?camera_id=${cam}&limit=200`, null),
     ]);
 
     /* Monitoring badge */
     const badge = document.getElementById('monitoring-badge');
-    if (pipeline === null) {
-      badge.textContent = 'Offline';
-      badge.className   = 'badge inactive';
+    if (!pipeline) {
+      badge.textContent = 'Offline';  badge.className = 'badge inactive';
     } else if (pipeline.running) {
-      badge.textContent = 'Monitoring';
-      badge.className   = 'badge active';
+      badge.textContent = 'Monitoring'; badge.className = 'badge active';
     } else {
-      badge.textContent = 'Offline';
-      badge.className   = 'badge inactive';
+      badge.textContent = 'Not Running'; badge.className = 'badge inactive';
     }
 
-    /* Usecase cards */
-    USECASES.forEach((uc, i) => {
-      const raw    = alertResults[i];
-      const alerts = Array.isArray(raw)
-        ? raw
-        : (raw && Array.isArray(raw.alerts) ? raw.alerts : []);
+    /* Parking compliance */
+    if (complianceData === null) {
+      document.getElementById('compliance-list').innerHTML = '<div class="empty-state">Unable to load</div>';
+      document.getElementById('compliance-count').textContent = '—';
+    } else {
+      const violations = complianceData.violations || [];
+      renderComplianceList(violations);
+    }
 
-      /* Filter to today only */
-      const todayAlerts = alerts.filter(a => {
-        if (!a.timestamp) return false;
-        return a.timestamp.slice(0, 10) === today;
-      });
+    /* Safety monitoring */
+    if (safetyData === null) {
+      document.getElementById('safety-list').innerHTML = '<div class="empty-state">Unable to load</div>';
+      document.getElementById('safety-count').textContent = '—';
+    } else {
+      const alerts = safetyData.safety_alerts || [];
+      renderSafetyList(alerts);
+    }
 
-      const count    = todayAlerts.length;
-      const countEl  = document.getElementById(`count-${uc.id}`);
-      const lastEl   = document.getElementById(`last-${uc.id}`);
-
-      if (countEl) countEl.textContent = raw === null ? '—' : count;
-
-      if (lastEl) {
-        if (raw === null) {
-          lastEl.textContent = 'Unable to load';
-        } else if (todayAlerts.length === 0) {
-          lastEl.textContent = 'No events today';
-        } else {
-          /* Most recent alert by timestamp */
-          const latest = todayAlerts.reduce((best, a) =>
-            new Date(a.timestamp) > new Date(best.timestamp) ? a : best
-          , todayAlerts[0]);
-          lastEl.textContent = `Last event: ${timeAgo(latest.timestamp)}`;
-        }
-      }
-    });
+    /* Charging sessions */
+    if (sessionsData === null) {
+      document.getElementById('sessions-tbody').innerHTML =
+        '<tr><td colspan="8" class="empty-state">Unable to load</td></tr>';
+      document.getElementById('sessions-count').textContent = '—';
+    } else {
+      const sessions = sessionsData.sessions || sessionsData || [];
+      renderSessionsTable(Array.isArray(sessions) ? sessions : []);
+    }
 
     setLastRefresh();
   }
 
-  buildGrid();
   refresh();
   setInterval(refresh, CONFIG.refreshIntervalMs);
 </script>

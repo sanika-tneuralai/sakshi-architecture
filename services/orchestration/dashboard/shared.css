@@ -5,20 +5,20 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:          #0d1117;
-  --surface:     #161b22;
-  --surface2:    #1c2230;
-  --border:      #30363d;
-  --accent:      #238636;
-  --accent-soft: #1f3d2b;
-  --danger:      #da3633;
-  --danger-soft: #2d1f1f;
-  --warn:        #d29922;
-  --warn-soft:   #2d2208;
-  --info:        #388bfd;
-  --info-soft:   #1f2d3d;
-  --text:        #e6edf3;
-  --muted:       #8b949e;
+  --bg:          #f4f6f9;
+  --surface:     #ffffff;
+  --surface2:    #eef1f5;
+  --border:      #d0d7de;
+  --accent:      #1a7f37;
+  --accent-soft: #d4f0dc;
+  --danger:      #cf222e;
+  --danger-soft: #fce8e8;
+  --warn:        #9a6700;
+  --warn-soft:   #fff8e1;
+  --info:        #0969da;
+  --info-soft:   #dbeafe;
+  --text:        #1f2328;
+  --muted:       #636c76;
   --radius:      8px;
   --radius-lg:   12px;
   --gap:         16px;
@@ -148,7 +148,7 @@ html, body {
   width: calc(100% - 16px);
   text-align: left;
 }
-.nav-item:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+.nav-item:hover { color: var(--text); background: rgba(0,0,0,0.05); }
 .nav-item.active { color: var(--info); background: var(--info-soft); }
 .nav-item.active .nav-icon { color: var(--info); }
 .nav-item.danger:hover { color: var(--danger); background: var(--danger-soft); }
@@ -210,14 +210,14 @@ html, body {
   white-space: nowrap;
 }
 .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.badge.active   { background: var(--accent-soft); color: #56d364; border: 1px solid var(--accent); }
-.badge.active::before { background: #56d364; box-shadow: 0 0 5px #56d364; }
-.badge.inactive { background: var(--danger-soft); color: #f85149; border: 1px solid var(--danger); }
-.badge.inactive::before { background: #f85149; }
-.badge.loading  { background: var(--info-soft);   color: #79c0ff; border: 1px solid var(--info); }
-.badge.loading::before { background: #79c0ff; animation: pulse 1.2s infinite; }
-.badge.error    { background: var(--danger-soft); color: #f85149; border: 1px solid var(--danger); }
-.badge.coming-soon { background: var(--info-soft); color: #79c0ff; border: 1px solid var(--info); }
+.badge.active   { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
+.badge.active::before { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+.badge.inactive { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger); }
+.badge.inactive::before { background: var(--danger); }
+.badge.loading  { background: var(--info-soft);   color: var(--info); border: 1px solid var(--info); }
+.badge.loading::before { background: var(--info); animation: pulse 1.2s infinite; }
+.badge.error    { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger); }
+.badge.coming-soon { background: var(--info-soft); color: var(--info); border: 1px solid var(--info); }
 .badge.coming-soon::before { display: none; }
 
 /* ══════════════════════════════════════════
@@ -296,7 +296,7 @@ html, body {
   cursor: pointer;
   transition: background var(--transition);
 }
-.alert-item:hover { background: rgba(255,255,255,0.03); }
+.alert-item:hover { background: rgba(0,0,0,0.03); }
 .alert-item:last-child { border-bottom: none; }
 .alert-item.new-alert { animation: flash-in 0.5s ease; }
 .alert-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
@@ -354,7 +354,7 @@ html, body {
   max-width: 360px;
   pointer-events: all;
   animation: slide-in 0.25s ease;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.12);
 }
 .toast.warn  { border-left: 3px solid var(--warn); }
 .toast.danger{ border-left: 3px solid var(--danger); }
@@ -415,10 +415,10 @@ html, body {
 }
 .modal-field .val { font-size: 13px; }
 pre.extras {
-  background: var(--bg); border: 1px solid var(--border);
+  background: var(--surface2); border: 1px solid var(--border);
   border-radius: 6px; padding: 12px; font-size: 11px;
   overflow-x: auto; white-space: pre-wrap; word-break: break-all;
-  color: #79c0ff; font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--info); font-family: "SFMono-Regular", Consolas, monospace;
 }
 
 /* ══════════════════════════════════════════
@@ -448,7 +448,7 @@ pre.extras {
    SNAPSHOT VIEWER
 ══════════════════════════════════════════ */
 .live-frame-box {
-  background: #000;
+  background: #1a1a1a;
   border-radius: var(--radius);
   overflow: hidden;
   position: relative;
