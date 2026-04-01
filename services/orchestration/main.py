@@ -548,14 +548,18 @@ class PipelineManager:
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
 
-                # STEP 4: Send alerts (non-critical, don't fail on error)
-                try:
-                    alert_data = await send_alerts(camera_id, results)
-                    alerts_sent = len(alert_data.get('alerts_sent', []))
-                    logger.debug(f"[{camera_id}] Alerts sent | count={alerts_sent}")
-                except Exception as e:
-                    logger.warning(f"[{camera_id}] Alert sending failed (non-critical): {str(e)}")
-                
+                # STEP 4: Send dashboard alerts for parking_compliance and safety_monitoring only
+                _DASHBOARD_USECASES = {"parking_compliance", "safety_monitoring"}
+                dashboard_results = [
+                    r for r in results
+                    if r.get("usecase_id") in _DASHBOARD_USECASES or r.get("usecase_name") in _DASHBOARD_USECASES
+                ]
+                if dashboard_results:
+                    try:
+                        await send_alerts(camera_id, dashboard_results)
+                    except Exception as e:
+                        logger.warning(f"[{camera_id}] Dashboard alert send failed (non-critical): {str(e)}")
+
                 # Update stats
                 iteration_time = (datetime.now() - iteration_start).total_seconds() * 1000
                 stats.add_latency(iteration_time)
@@ -980,14 +984,26 @@ async def execute_pipeline_once(request: PipelineRequest):
                 usecase_data = await evaluate_usecases(camera_id, detection_data, active_usecases, rois)
                 logger.info(f"DEBUG: [{camera_id}] Usecases evaluated: {len(usecase_data.get('results', []))} results")
 
-                # Send alerts (non-critical)
+                # Persist all results to DB; send dashboard alerts only for parking_compliance + safety_monitoring
+                results = usecase_data.get('results', [])
                 try:
-                    logger.info(f"DEBUG: [{camera_id}] Calling send_alerts...")
-                    alert_data = await send_alerts(camera_id, usecase_data.get('results', []))
-                    logger.info(f"DEBUG: [{camera_id}] Alerts sent: {len(alert_data.get('alerts_sent', []))}")
+                    alerts_written = await asyncio.get_event_loop().run_in_executor(
+                        None, persist_alerts_from_results, camera_id, results
+                    )
+                    logger.info(f"DEBUG: [{camera_id}] Alerts persisted to DB | count={alerts_written}")
                 except Exception as e:
-                    logger.warning(f"[{camera_id}] Alert sending failed (non-critical): {str(e)}")
-                    alert_data = {"alerts_sent": [], "status": "failed"}
+                    logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
+
+                _DASHBOARD_USECASES = {"parking_compliance", "safety_monitoring"}
+                dashboard_results = [
+                    r for r in results
+                    if r.get("usecase_id") in _DASHBOARD_USECASES or r.get("usecase_name") in _DASHBOARD_USECASES
+                ]
+                if dashboard_results:
+                    try:
+                        await send_alerts(camera_id, dashboard_results)
+                    except Exception as e:
+                        logger.warning(f"[{camera_id}] Dashboard alert send failed (non-critical): {str(e)}")
 
                 triggered_usecases = [r for r in usecase_data.get('results', []) if r.get('triggered')]
                 

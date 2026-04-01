@@ -89,7 +89,7 @@ def get_camera_usecases(camera_id: str) -> List[str]:
 # Each usecase's confidence_threshold in the config column applies to all
 # classes listed here. Derived from the rule implementations in the usecase service.
 _USECASE_CLASSES: Dict[str, list] = {
-    "gun_detection":      ["gun", "gun_plugged_in", "gun_plugged_out"],
+    "gun_detection":      ["gun"],
     "safety_monitoring":  ["fire", "smoke"],
     "parking_detection":  ["car"],
     "parking_compliance": ["car"],
