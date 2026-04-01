@@ -49,7 +49,11 @@ def _build_message(usecase_id: str, matched_count: int, extras: Optional[Dict[st
             base += f" | violations: {', '.join(r for r in reasons if r)}"
         elif "vehicle_details" in extras:
             vd = extras["vehicle_details"]
-            base += f" | plate: {vd.get('car_number', 'N/A')}  model: {vd.get('car_model', 'N/A')}"
+            if isinstance(vd, list):
+                parts = [f"plate: {v.get('car_number', 'N/A')}  model: {v.get('car_model', 'N/A')}" for v in vd]
+                base += " | " + " | ".join(parts)
+            elif isinstance(vd, dict):
+                base += f" | plate: {vd.get('car_number', 'N/A')}  model: {vd.get('car_model', 'N/A')}"
 
     return base
 
