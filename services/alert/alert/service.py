@@ -118,23 +118,6 @@ def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertRespo
             extras=extras if extras else None,
         ))
 
-        # Persist to database
-        try:
-            from shared.database.persistence import persist_alert
-            persist_alert(
-                camera_id=request.camera_id,
-                usecase_name=usecase_id,
-                alert_type=alert_type,
-                status="sent",
-                detection_id=detection_id,
-                screenshot_path=screenshot_path,
-                snapshot_b64=snapshot_b64,
-                extras=extras if extras else None,
-            )
-            print(f"[SERVICE]  persisted alert for {usecase_id}")
-        except Exception as e:
-            print(f"[SERVICE]  DB error persisting alert for {usecase_id}: {e}")
-
     print(f"[SERVICE] process_pipeline_alerts done | alerts_sent={len(alerts_sent)}\n")
 
     return PipelineAlertResponse(
