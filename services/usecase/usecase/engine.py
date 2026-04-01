@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 from usecase.rules import get_usecase_rule
 from usecase.schemas import UsecaseResult
+from workers.redis_state import set_snapshot, get_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -26,20 +27,24 @@ def _slim_detection(detetion: Dict[str, Any]):
 def build_slim_payload(detection_output: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build a slim version of the detection output for queueing.
-    The orchestrator or API calls this once before submitting the tasks.
-    Each celery task then receives this slim payload instead of the full detection output.
-    You build it once, reuse across all tasks.
-
-    Args: detection_output: The full detection output from the camera.
-
-    Returns: slim dict with only what usecase rules need.
+    snapshot_b64 is stored in Redis separately (via set_snapshot) and NOT
+    included in the task payload — base64 images are 500KB-1MB each and
+    bloat RabbitMQ messages causing tasks to fail/timeout when sent 5× per frame.
+    Workers retrieve the snapshot via get_snapshot(camera_id) instead.
     """
+    camera_id = detection_output.get("camera_id")
+    snapshot_b64 = detection_output.get("snapshot_b64")
+
+    # Store snapshot in Redis so workers can fetch it without it travelling
+    # through RabbitMQ inside every task message.
+    if camera_id and snapshot_b64:
+        set_snapshot(camera_id, snapshot_b64)
+
     raw_detections = detection_output.get("detections", [])
     return {
         "detections": [_slim_detection(d) for d in raw_detections],
-        "snapshot_b64": detection_output.get("snapshot_b64"),
         "first_detection_id": detection_output.get("first_detection_id"),
-        "camera_id": detection_output.get("camera_id"),
+        "camera_id": camera_id,
         "rois": detection_output.get("rois"),
     }
 
@@ -67,7 +72,16 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
 
     try:
         rule = get_usecase_rule(usecase_id)
-        evaluation = rule.evaluate(slim_payload)
+
+        # Fetch snapshot from Redis (stored by build_slim_payload, not in task payload)
+        snapshot_b64 = get_snapshot(camera_id)
+
+        # Inject snapshot into the payload so rules like vehicle_extraction can use it
+        payload_with_snapshot = dict(slim_payload)
+        if snapshot_b64:
+            payload_with_snapshot["snapshot_b64"] = snapshot_b64
+
+        evaluation = rule.evaluate(payload_with_snapshot)
         print(f"[ENGINE DEBUG] usecase={usecase_id} | evaluation keys={list(evaluation.keys())}")
         matched = evaluation.get("matched_objects", [])
 
@@ -84,7 +98,7 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
             matched_count=len(matched),
             matched_objects=slim_matched,
             detection_id=slim_payload.get("first_detection_id"),
-            snapshot_b64=slim_payload.get("snapshot_b64"),
+            snapshot_b64=snapshot_b64,
             extras=extras,
         )
         logger.info(

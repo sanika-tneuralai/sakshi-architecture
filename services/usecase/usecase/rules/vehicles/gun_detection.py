@@ -1,41 +1,23 @@
 """
 Gun Plug-in / Plug-out Detection Rule
 =======================================
-Tracks when an EV charging gun is plugged in and plugged out, per ROI.
+Only handles the generic "gun" YOLO class (no gun_plugged_in / gun_plugged_out).
 
-The YOLO model emits a single class: "gun".
-Plugin and plugout are inferred purely from presence/absence debouncing:
+Plugin logic (debounced):
+    Gun in same ROI as a confirmed car for GUN_PLUGIN_FRAMES consecutive frames
+    → gun_plugin event (once per car per ROI).
 
-  Plugin:  gun detected in a ROI for GUN_PLUGIN_FRAMES consecutive frames
-           → fire gun_plugin event (once per session)
+Plugout logic (debounced):
+    Gun absent for GUN_PLUGOUT_FRAMES consecutive frames while the same car is
+    still in its ROI + plugin already logged → gun_plugout event.
+    GUN_PLUGOUT_FRAMES = 7 to tolerate poor detections on small guns.
 
-  Plugout: gun absent from that ROI for GUN_PLUGOUT_FRAMES consecutive frames
-           after a plugin was already logged
-           → fire gun_plugout event, then re-arm so the next cycle works
+Re-arm after plugout: slot resets so a second plugin cycle fires correctly.
 
-Poor-detection tolerance:
-  GUN_PLUGOUT_FRAMES = 7 so a small gun flickering for a few frames does
-  not falsely fire a plugout. The absent counter resets to 0 the moment
-  the gun reappears.
+triggered=True only when a real event fires — not during debounce phase.
 
-Car association:
-  State is keyed by (roi_name, car_identity).
-  car_identity is resolved in priority order:
-    1. license plate from vehicle_extraction cache  (plate:MH12AB1234)
-    2. car model from vehicle_extraction cache       (model:Toyota Innova)
-    3. centroid track_id as last resort
-
-  This means the same physical car is recognised even if the tracker
-  resets (service restart) as long as the plate/model is known.
-
-ROI assignment:
-  Gun and car are both mapped to the ROI whose polygon contains their
-  bounding-box centroid. A gun in ROI_1 belongs to the car in ROI_1.
-
-triggered semantics:
-  triggered=True ONLY when a gun_plugin or gun_plugout event fires.
-  Frames where the gun is in debounce do NOT set triggered=True, which
-  prevents empty-event alert rows from being written to the DB.
+Car identity falls back to car_number / car_model from vehicle_extraction
+so the same physical car is recognised even after a tracker reset.
 
 State persisted in Redis key ``gun:<camera_id>``.
 """
@@ -53,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 GUN_CLASS          = "gun"
 CAR_CLASS          = "car"
-GUN_PLUGIN_FRAMES  = 3   # consecutive frames gun must be present → confirm plugin
-GUN_PLUGOUT_FRAMES = 7   # consecutive frames gun must be absent  → confirm plugout
+GUN_PLUGIN_FRAMES  = 3
+GUN_PLUGOUT_FRAMES = 7   # raised from 4 to handle poor detections on small guns
 
 
 def _now() -> str:
@@ -66,7 +48,6 @@ def _slot_key(roi_name: str, car_identity: str) -> str:
 
 
 def _gun_name_for_roi(roi_name: str) -> str:
-    """ROI_1 → 'Gun 1', ROI_2 → 'Gun 2', etc."""
     parts = roi_name.rsplit("_", 1)
     suffix = parts[-1] if len(parts) == 2 and parts[-1].isdigit() else roi_name
     return f"Gun {suffix}"
@@ -88,18 +69,18 @@ def _init_slot() -> dict:
 
 def _car_identity(car: dict, vehicle_cache: dict) -> str:
     """
-    Return a stable string identity for a car, preferring plate > model > track_id.
-    vehicle_cache maps track_id → {car_number, car_model}.
+    Stable identity for a car: car_number > car_model > track_id.
+    Uses vehicle_extraction results cached in Redis state.
     """
-    track_id = car.get("track_id", "unknown")
-    cached   = vehicle_cache.get(track_id, {})
-    plate    = cached.get("car_number")
-    model    = cached.get("car_model")
+    track_id   = car.get("track_id", "unknown")
+    cached     = vehicle_cache.get(track_id, {})
+    car_number = cached.get("car_number")
+    car_model  = cached.get("car_model")
 
-    if plate and plate not in ("unreadable", "unknown"):
-        return f"plate:{plate}"
-    if model and model not in ("unknown",):
-        return f"model:{model}"
+    if car_number and car_number not in ("unreadable", "unknown"):
+        return f"plate:{car_number}"
+    if car_model and car_model not in ("unknown",):
+        return f"model:{car_model}"
     return track_id
 
 
@@ -111,23 +92,19 @@ class GunDetectionRule(BaseUsecaseRule):
         rois      = detection_output.get("rois", {})
         all_dets  = detection_output.get("detections", [])
 
-        # ── Step 1: load Redis state ──────────────────────────────────────
         redis_key = f"gun:{camera_id}"
         state     = get_state(redis_key)
 
         print(f"[GUN] camera={camera_id} | rois={list(rois.keys())} | total_dets={len(all_dets)}")
 
-        # ── Step 2: track cars ────────────────────────────────────────────
+        # ── Track cars ───────────────────────────────────────────────────
         car_dets = [d for d in all_dets if d.get("class_name") == CAR_CLASS]
         tracker  = CentroidTracker(max_disappeared=15, max_distance=100)
         if state.get("tracker"):
             tracker.from_dict(state["tracker"])
         tracked_cars = tracker.update(car_dets)
 
-        # vehicle_extraction cache: track_id → {car_number, car_model}
         vehicle_cache: dict = state.get("vehicle_cache", {})
-
-        # Merge any vehicle_details forwarded from vehicle_extraction this frame
         for vd in detection_output.get("vehicle_details", []):
             tid = vd.get("track_id")
             if tid:
@@ -136,9 +113,8 @@ class GunDetectionRule(BaseUsecaseRule):
                     "car_model":  vd.get("car_model"),
                 }
 
-        # roi_name → (car_identity, raw_track_id) for cars inside a ROI
-        roi_to_car: Dict[str, str]   = {}  # roi_name → car_identity
-        roi_to_track: Dict[str, str] = {}  # roi_name → raw track_id (for event metadata)
+        roi_to_car: Dict[str, str] = {}
+        roi_to_track: Dict[str, str] = {}
         if rois:
             for car in tracked_cars:
                 for roi_name in which_rois(car["bbox"], rois):
@@ -148,35 +124,31 @@ class GunDetectionRule(BaseUsecaseRule):
 
         print(f"[GUN] cars_tracked={len(tracked_cars)} | roi_to_car={roi_to_car}")
 
-        # ── Step 3: map guns to ROIs ──────────────────────────────────────
+        # ── Map guns to ROIs ─────────────────────────────────────────────
         gun_dets = [d for d in all_dets if d.get("class_name") == GUN_CLASS]
 
         roi_to_gun: Dict[str, dict] = {}
         for gun in gun_dets:
             for roi_name in (which_rois(gun.get("bbox", {}), rois) if rois else []):
-                # keep highest-confidence gun per ROI
                 if roi_name not in roi_to_gun or gun.get("confidence", 0) > roi_to_gun[roi_name].get("confidence", 0):
                     roi_to_gun[roi_name] = gun
 
         print(f"[GUN] guns_detected={len(gun_dets)} | roi_to_gun={list(roi_to_gun.keys())}")
 
-        # ── Step 4: maintain per-(roi, car) slots ────────────────────────
+        # ── Maintain per-(roi, car) state slots ──────────────────────────
         slots: Dict[str, dict] = state.get("slots", {})
-
         active_keys = {_slot_key(roi, ident) for roi, ident in roi_to_car.items()}
 
-        # Drop slots for cars that left
         for k in list(slots.keys()):
             if k not in active_keys:
                 del slots[k]
 
-        # Create fresh slot for new (roi, car) pairs
         for roi_name, identity in roi_to_car.items():
             k = _slot_key(roi_name, identity)
             if k not in slots:
                 slots[k] = _init_slot()
 
-        # ── Step 5: debounce and fire events ─────────────────────────────
+        # ── Debounce and fire events ─────────────────────────────────────
         events: List[dict] = []
 
         for roi_name, identity in roi_to_car.items():
@@ -187,7 +159,6 @@ class GunDetectionRule(BaseUsecaseRule):
             gun_name = _gun_name_for_roi(roi_name)
 
             if gun_det:
-                # ── Gun present this frame ────────────────────────────────
                 cs["gun_present_buf"] += 1
                 cs["gun_absent_buf"]   = 0
                 cs["gun_name"]         = gun_name
@@ -205,6 +176,7 @@ class GunDetectionRule(BaseUsecaseRule):
                         metadata={
                             "gun_name":     gun_name,
                             "roi":          roi_name,
+                            "car_track":    track_id,
                             "car_identity": identity,
                             "bbox":         cs["gun_bbox"],
                             "confidence":   cs["gun_confidence"],
@@ -212,13 +184,9 @@ class GunDetectionRule(BaseUsecaseRule):
                     )
                     events.append(evt)
                     publish_sync("gun_events", evt)
-                    logger.info(
-                        "[GUN] Plugin: camera=%s roi=%s car=%s gun=%s",
-                        camera_id, roi_name, identity, gun_name,
-                    )
+                    logger.info("[GUN] Plugin: camera=%s roi=%s car=%s gun=%s", camera_id, roi_name, identity, gun_name)
 
             else:
-                # ── Gun absent this frame ─────────────────────────────────
                 cs["gun_present_buf"] = 0
 
                 if cs["logged_plugin"] and not cs["logged_plugout"]:
@@ -234,6 +202,7 @@ class GunDetectionRule(BaseUsecaseRule):
                             metadata={
                                 "gun_name":     cs["gun_name"] or gun_name,
                                 "roi":          roi_name,
+                                "car_track":    track_id,
                                 "car_identity": identity,
                                 "plugin_time":  cs["plugin_time"],
                                 "plugout_time": cs["plugout_time"],
@@ -241,14 +210,10 @@ class GunDetectionRule(BaseUsecaseRule):
                         )
                         events.append(evt)
                         publish_sync("gun_events", evt)
-                        logger.info(
-                            "[GUN] Plugout: camera=%s roi=%s car=%s gun=%s",
-                            camera_id, roi_name, identity, gun_name,
-                        )
-                        # Re-arm so a second plug cycle on the same car works
-                        slots[k] = _init_slot()
+                        logger.info("[GUN] Plugout: camera=%s roi=%s car=%s gun=%s", camera_id, roi_name, identity, gun_name)
+                        slots[k] = _init_slot()  # re-arm for next cycle
 
-        # ── Step 6: save state ────────────────────────────────────────────
+        # ── Persist state ─────────────────────────────────────────────────
         state["tracker"]       = tracker.to_dict()
         state["slots"]         = slots
         state["vehicle_cache"] = vehicle_cache
@@ -256,4 +221,4 @@ class GunDetectionRule(BaseUsecaseRule):
 
         triggered = bool(events)
         print(f"[GUN] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
-        return {"triggered": triggered, "matched_objects": gun_dets, "events": events}
+        return {"triggered": triggered, "matched_objects": list(gun_dets), "events": events}
