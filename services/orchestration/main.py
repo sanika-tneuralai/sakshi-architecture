@@ -262,6 +262,11 @@ async def evaluate_usecases(
         detection_output["rois"] = {
             r["roi_id"]: r["points"] for r in rois
         }
+        logger.info(
+            f"[{camera_id}] DEBUG usecase request: usecases={usecases} | "
+            f"rois={detection_output['rois']} | "
+            f"detections={detection_output.get('detections', [])}"
+        )
         response = await http_client.post(
             f"{USECASE_SERVICE_URL}/usecase/evaluate",
             json={
