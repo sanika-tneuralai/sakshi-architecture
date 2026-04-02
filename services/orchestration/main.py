@@ -228,7 +228,18 @@ async def run_detection(camera_id: str, confidence_threshold: float, class_thres
             timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logger.info(f"[{camera_id}] DEBUG detection response: {_strip_snapshots(data)}")
+        return data
+
+
+def _strip_snapshots(data):
+    """Recursively remove snapshot_b64 keys from a dict/list for compact debug logging."""
+    if isinstance(data, dict):
+        return {k: _strip_snapshots(v) for k, v in data.items() if k != "snapshot_b64"}
+    if isinstance(data, list):
+        return [_strip_snapshots(i) for i in data]
+    return data
 
 
 @retry_on_failure
@@ -261,7 +272,9 @@ async def evaluate_usecases(
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logger.info(f"[{camera_id}] DEBUG usecase response: {_strip_snapshots(data)}")
+        return data
 
 
 @retry_on_failure
@@ -277,7 +290,9 @@ async def send_alerts(camera_id: str, usecase_results: List[dict]) -> dict:
             timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logger.info(f"[{camera_id}] DEBUG alert response: {data}")
+        return data
 
 
 # =============================================================================
