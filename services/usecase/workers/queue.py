@@ -62,7 +62,7 @@ def submit_usecase_tasks(
 async def await_usecase_results(
         task_handles: Dict[str, AsyncResult],
         camera_id: str,
-        timeeout: int = TAKE_RESULT_TIMEOUT,
+        timeout: int = TAKE_RESULT_TIMEOUT,
 ) -> List[UsecaseResult]:
     
     """ 
@@ -86,7 +86,7 @@ async def await_usecase_results(
         try:
             result_dict = await asyncio.to_thread(
                 handle.get,
-                timeout=timeeout,
+                timeout=timeout,
                 propagate=False,
             )
 

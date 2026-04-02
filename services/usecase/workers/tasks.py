@@ -68,6 +68,10 @@ def _persist_result(camera_id: str, result: UsecaseResult):
     (retry, serialization, logging) This function handles DB concerns.
     If you swap databases, you change only this function. So if DB persistence fails, we can log and continue without failing the entire task."""
     try:
+        from shared.database.connection import SessionLocal
+        if SessionLocal is None:
+            logger.debug(f'[Task] DATABASE_URL not configured — skipping DB persistence for {camera_id}/{result.usecase_id}')
+            return
         from shared.database.persistence import persist_usecase_result
         persist_usecase_result(
             camera_id=camera_id,
