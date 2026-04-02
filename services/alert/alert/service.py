@@ -83,7 +83,6 @@ def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertRespo
         matched_count = len(matched_objects) if matched_objects else result.get("matched_count", 0)
         detection_id  = result.get("detection_id")
         screenshot_path = result.get("screenshot_path")
-        snapshot_b64  = result.get("snapshot_b64")
         extras        = result.get("extras") or {}
         # Use timestamp from the result if available, otherwise use now
         timestamp     = result.get("timestamp") or fired_at
@@ -114,7 +113,6 @@ def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertRespo
             alert_count=matched_count,
             message=message,
             timestamp=timestamp,
-            snapshot_b64=snapshot_b64,
             extras=extras if extras else None,
         ))
 

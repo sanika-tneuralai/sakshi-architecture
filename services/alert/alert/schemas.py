@@ -28,7 +28,6 @@ class AlertDetail(BaseModel):
     alert_count: int                            # number of matched objects
     message: str                                # human-readable summary
     timestamp: str                              # ISO-8601 UTC when the alert fired
-    snapshot_b64: Optional[str] = None         # base64 JPEG frame from detection
     extras: Optional[Dict[str, Any]] = None    # rule-specific data:
                                                 #   parking_detection  → events (intime/outtime)
                                                 #   gun_detection      → events (plugin/plugout)
@@ -53,20 +52,3 @@ class PipelineAlertResponse(BaseModel):
     alerts_sent: List[AlertDetail]
 
 
-class AlertRecord(BaseModel):
-    """Alert record returned from the /alert/list endpoint"""
-    alert_id: int
-    camera_id: str
-    usecase_name: str
-    alert_type: str
-    timestamp: str
-    status: str
-    snapshot_b64: Optional[str] = None
-    extras: Optional[Dict[str, Any]] = None
-    screenshot_path: Optional[str] = None
-
-
-class AlertListResponse(BaseModel):
-    """Response for the /alert/list endpoint"""
-    alerts: List[AlertRecord]
-    total: int
