@@ -521,17 +521,25 @@ class PipelineManager:
                 usecase_data = await evaluate_usecases(camera_id, detection_data, active_usecases, rois)
                 results = usecase_data.get('results', [])
                 triggered = [r for r in results if r.get('triggered')]
-                logger.debug(f"[{camera_id}] Usecases evaluated | triggered={len(triggered)}/{len(results)}")
+                logger.info(f"[{camera_id}] DEBUG: Usecases evaluated | total={len(results)} triggered={len(triggered)}")
+
+                # DEBUG: Log full raw results from usecase API
+                import json as _json
+                logger.info(f"[{camera_id}] DEBUG: Raw usecase results = {_json.dumps(results, default=str)}")
 
                 # Log rule-specific extras from triggered results (parking events, vehicle details, etc.)
                 for r in triggered:
+                    uid = r.get('usecase_id', r.get('usecase_name'))
                     extras = r.get('extras')
-                    if extras:
-                        logger.info(
-                            f"[{camera_id}] extras from {r.get('usecase_id', r.get('usecase_name'))} | {extras}"
-                        )
+                    events = r.get('events')
+                    vehicle_details = r.get('vehicle_details')
+                    logger.info(
+                        f"[{camera_id}] DEBUG: triggered usecase={uid} | "
+                        f"extras={extras} | events={events} | vehicle_details={vehicle_details}"
+                    )
 
                 # STEP 3.5: Persist charging session data
+                logger.info(f"[{camera_id}] DEBUG: Calling upsert_charging_session with {len(results)} results")
                 try:
                     await asyncio.get_event_loop().run_in_executor(
                         None, upsert_charging_session, camera_id, results
@@ -540,11 +548,12 @@ class PipelineManager:
                     logger.error(f"[{camera_id}] Charging session update failed: {str(e)}", exc_info=True)
 
                 # STEP 3.6: Persist triggered alerts to DB (for dashboard)
+                logger.info(f"[{camera_id}] DEBUG: Calling persist_alerts_from_results with {len(results)} results")
                 try:
                     alerts_written = await asyncio.get_event_loop().run_in_executor(
                         None, persist_alerts_from_results, camera_id, results
                     )
-                    logger.debug(f"[{camera_id}] Alerts persisted to DB | count={alerts_written}")
+                    logger.info(f"[{camera_id}] DEBUG: Alerts persisted to DB | count={alerts_written}")
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
 

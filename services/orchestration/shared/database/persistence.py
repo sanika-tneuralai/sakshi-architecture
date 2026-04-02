@@ -283,8 +283,16 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     plug_time = _parse_dt(plug_time_raw)
     plug_out_time = _parse_dt(plug_out_time_raw)
 
+    _persistence_logger.info(
+        f"[DB][{camera_id}] DEBUG upsert_charging_session extracted: "
+        f"in_time={in_time_raw}, out_time={out_time_raw}, "
+        f"plug_time={plug_time_raw}, plug_out_time={plug_out_time_raw}, "
+        f"gun_number={gun_number}, car_number={car_number}, car_model={car_model}"
+    )
+
     # Nothing actionable in this iteration — skip DB work entirely.
     if not any([in_time, out_time, plug_time, plug_out_time, gun_number, car_number, car_model]):
+        _persistence_logger.info(f"[DB][{camera_id}] DEBUG: Nothing actionable — skipping DB write")
         return
 
     # ------------------------------------------------------------------ #
@@ -423,6 +431,10 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
 
     Returns the number of alert rows written.
     """
+    _persistence_logger.info(
+        f"[DB][{camera_id}] DEBUG persist_alerts: received {len(usecase_results)} results, "
+        f"triggered={[r.get('usecase_id', r.get('usecase_name')) for r in usecase_results if r.get('triggered')]}"
+    )
     db = SessionLocal()
     written = 0
     try:
@@ -432,9 +444,11 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
             if not result.get("triggered"):
                 continue
             if usecase_id in _NO_ALERT_USECASES:
+                _persistence_logger.info(f"[DB][{camera_id}] DEBUG: skipping {usecase_id} (in _NO_ALERT_USECASES)")
                 continue
 
             extras = result.get("extras") or {}
+            _persistence_logger.info(f"[DB][{camera_id}] DEBUG: processing alert for usecase={usecase_id} | extras keys={list(extras.keys())}")
             snapshot_b64 = result.get("snapshot_b64")
 
             # ── Special case: split parking_detection events by type ──────────
