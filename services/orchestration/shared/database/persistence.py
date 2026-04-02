@@ -218,12 +218,15 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
 
     for result in usecase_results:
         usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
-        if not result.get("triggered"):
-            continue
-
-        # Rule-specific fields are nested under "extras" by the usecase service engine.
-        # Fall back to top-level for backwards compatibility.
         extras = result.get("extras") or {}
+
+        # parking_detection and gun_detection fire events (outtime, plugout) on the frame
+        # the car/gun leaves — at that point triggered=False and matched_count=0.
+        # We must still process those events, so skip the triggered guard for event-bearing usecases.
+        _event_usecases = {"parking_detection", "parking_compliance", "gun_detection"}
+        has_events = bool(extras.get("events")) or bool(extras.get("vehicle_details"))
+        if not result.get("triggered") and not (usecase_id in _event_usecases and has_events):
+            continue
 
         if usecase_id in ("parking_detection", "parking_compliance"):
             # parking_detection fires intime/outtime for cars inside ROIs.
@@ -440,14 +443,18 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
     try:
         for result in usecase_results:
             usecase_id = result.get("usecase_id") or result.get("usecase_name", "unknown")
+            extras = result.get("extras") or {}
 
-            if not result.get("triggered"):
+            # parking_detection and gun_detection fire exit events (outtime, plugout) on the
+            # frame the object leaves — triggered=False at that point. Still need to persist.
+            _event_usecases = {"parking_detection", "gun_detection"}
+            has_events = bool(extras.get("events"))
+            if not result.get("triggered") and not (usecase_id in _event_usecases and has_events):
                 continue
             if usecase_id in _NO_ALERT_USECASES:
                 _persistence_logger.info(f"[DB][{camera_id}] DEBUG: skipping {usecase_id} (in _NO_ALERT_USECASES)")
                 continue
 
-            extras = result.get("extras") or {}
             _persistence_logger.info(f"[DB][{camera_id}] DEBUG: processing alert for usecase={usecase_id} | extras keys={list(extras.keys())}")
             snapshot_b64 = result.get("snapshot_b64")
 
