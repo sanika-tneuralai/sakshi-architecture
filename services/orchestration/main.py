@@ -1309,27 +1309,35 @@ async def dashboard_parking_compliance(
     Each violation row includes alert_type, message, timestamp, extras
     (bbox, confidence, roi name), and snapshot_b64.
 
-    Proxies to the alert service /alert/list?usecase_name=parking_compliance.
     Query params: camera_id, limit.
     """
-    params: Dict[str, Any] = {"usecase_name": "parking_compliance", "limit": limit}
-    if camera_id:
-        params["camera_id"] = camera_id
+    db = SessionLocal()
     try:
-        response = await http_client.get(
-            f"{ALERT_SERVICE_URL}/alert/list",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "violations": data.get("alerts", []),
-            "total": len(data.get("alerts", [])),
-        }
+        from shared.database.models import Alert
+        q = db.query(Alert).filter(Alert.usecase_name == "parking_compliance")
+        if camera_id:
+            q = q.filter(Alert.camera_id == camera_id)
+        rows = q.order_by(Alert.timestamp.desc()).limit(limit).all()
+        alerts = [
+            {
+                "alert_id":    r.alert_id,
+                "camera_id":   r.camera_id,
+                "usecase_name": r.usecase_name,
+                "alert_type":  r.alert_type,
+                "message":     r.message,
+                "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
+                "status":      r.status,
+                "has_snapshot": r.snapshot_b64 is not None,
+                "extras":      r.extras,
+            }
+            for r in rows
+        ]
+        return {"violations": alerts, "total": len(alerts)}
     except Exception as e:
-        logger.warning(f"[DASHBOARD] Failed to fetch parking compliance from alert service: {e}")
-        raise HTTPException(status_code=502, detail=f"Alert service unavailable: {e}")
+        logger.warning(f"[DASHBOARD] Failed to fetch parking compliance: {e}")
+        return {"violations": [], "total": 0}
+    finally:
+        db.close()
 
 
 @app.get("/dashboard/safety-monitoring", tags=["dashboard"])
@@ -1347,27 +1355,35 @@ async def dashboard_safety_monitoring(
     Each alert row includes alert_type, message, timestamp, extras
     (hazard_type, confidence, bbox), and snapshot_b64.
 
-    Proxies to the alert service /alert/list?usecase_name=safety_monitoring.
     Query params: camera_id, limit.
     """
-    params: Dict[str, Any] = {"usecase_name": "safety_monitoring", "limit": limit}
-    if camera_id:
-        params["camera_id"] = camera_id
+    db = SessionLocal()
     try:
-        response = await http_client.get(
-            f"{ALERT_SERVICE_URL}/alert/list",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "safety_alerts": data.get("alerts", []),
-            "total": len(data.get("alerts", [])),
-        }
+        from shared.database.models import Alert
+        q = db.query(Alert).filter(Alert.usecase_name == "safety_monitoring")
+        if camera_id:
+            q = q.filter(Alert.camera_id == camera_id)
+        rows = q.order_by(Alert.timestamp.desc()).limit(limit).all()
+        alerts = [
+            {
+                "alert_id":    r.alert_id,
+                "camera_id":   r.camera_id,
+                "usecase_name": r.usecase_name,
+                "alert_type":  r.alert_type,
+                "message":     r.message,
+                "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
+                "status":      r.status,
+                "has_snapshot": r.snapshot_b64 is not None,
+                "extras":      r.extras,
+            }
+            for r in rows
+        ]
+        return {"safety_alerts": alerts, "total": len(alerts)}
     except Exception as e:
-        logger.warning(f"[DASHBOARD] Failed to fetch safety alerts from alert service: {e}")
-        raise HTTPException(status_code=502, detail=f"Alert service unavailable: {e}")
+        logger.warning(f"[DASHBOARD] Failed to fetch safety alerts: {e}")
+        return {"safety_alerts": [], "total": 0}
+    finally:
+        db.close()
 
 
 @app.get("/health", tags=["health"])
