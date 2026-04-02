@@ -1165,7 +1165,7 @@ async def list_alerts(
                     "message":     r.message,
                     "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                     "status":      r.status,
-                    "snapshot_b64": r.snapshot_b64,
+                    "has_snapshot": r.snapshot_b64 is not None,
                     "extras":      r.extras,
                 }
                 for r in rows
@@ -1174,6 +1174,28 @@ async def list_alerts(
     except Exception as e:
         logger.warning(f"[DB] Failed to fetch alerts: {e}")
         return {"alerts": []}
+    finally:
+        db.close()
+
+
+@app.get("/alert/{alert_id}/snapshot", tags=["dashboard"])
+async def get_alert_snapshot(alert_id: int):
+    """
+    Return the snapshot_b64 image for a specific alert.
+    Call this on demand when displaying an alert's image in the dashboard.
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import Alert
+        row = db.query(Alert).filter(Alert.alert_id == alert_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+        return {"alert_id": alert_id, "snapshot_b64": row.snapshot_b64}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[DB] Failed to fetch snapshot for alert {alert_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch snapshot")
     finally:
         db.close()
 
