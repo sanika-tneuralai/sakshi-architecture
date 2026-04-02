@@ -204,15 +204,21 @@ function extractAlerts(data) {
   return null;
 }
 
-function renderSnapshot(containerId, alerts) {
+async function renderSnapshot(containerId, alerts) {
   const el = document.getElementById(containerId);
   if (!el) return;
-  const withSnap = (alerts || []).find(a => a.snapshot_b64);
+  const withSnap = (alerts || []).find(a => a.has_snapshot && a.alert_id);
   if (withSnap) {
-    el.innerHTML = `
-      <img src="data:image/jpeg;base64,${withSnap.snapshot_b64}" alt="Latest frame" />
-      <div class="frame-label">${fmtTsFull(withSnap.timestamp)}</div>
-    `;
+    el.innerHTML = `<div class="frame-empty"><div class="frame-icon">📷</div>Loading...</div>`;
+    const data = await fetchJSON(`${CONFIG.alertUrl}/alert/${withSnap.alert_id}/snapshot`);
+    if (data && data.snapshot_b64) {
+      el.innerHTML = `
+        <img src="data:image/jpeg;base64,${data.snapshot_b64}" alt="Latest frame" />
+        <div class="frame-label">${fmtTsFull(withSnap.timestamp)}</div>
+      `;
+    } else {
+      el.innerHTML = `<div class="frame-empty"><div class="frame-icon">📷</div>No snapshot available</div>`;
+    }
   } else {
     el.innerHTML = `<div class="frame-empty"><div class="frame-icon">📷</div>No snapshot available</div>`;
   }
