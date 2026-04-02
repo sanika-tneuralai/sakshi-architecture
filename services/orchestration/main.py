@@ -1271,26 +1271,42 @@ async def dashboard_sessions(
     Query params: camera_id, gun_number, car_number,
                   status (active/charging/completed/incomplete), limit.
     """
-    params: Dict[str, Any] = {"limit": limit}
-    if camera_id:
-        params["camera_id"] = camera_id
-    if gun_number:
-        params["gun_number"] = gun_number
-    if car_number:
-        params["car_number"] = car_number
-    if status:
-        params["status"] = status
+    db = SessionLocal()
     try:
-        response = await http_client.get(
-            f"{ANALYTICS_SERVICE_URL}/analytics/charging/sessions",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        return response.json()
+        from shared.database.models import ChargingSession
+        q = db.query(ChargingSession)
+        if camera_id:
+            q = q.filter(ChargingSession.camera_id == camera_id)
+        if gun_number:
+            q = q.filter(ChargingSession.gun_number == gun_number)
+        if car_number:
+            q = q.filter(ChargingSession.car_number == car_number)
+        if status:
+            q = q.filter(ChargingSession.session_status == status)
+        rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
+        sessions = [
+            {
+                "session_id":    r.session_id,
+                "camera_id":     r.camera_id,
+                "gun_number":    r.gun_number,
+                "car_number":    r.car_number,
+                "car_model":     r.car_model,
+                "in_time":       r.in_time.isoformat() if r.in_time else None,
+                "plug_time":     r.plug_time.isoformat() if r.plug_time else None,
+                "plug_out_time": r.plug_out_time.isoformat() if r.plug_out_time else None,
+                "out_time":      r.out_time.isoformat() if r.out_time else None,
+                "session_status": r.session_status,
+                "created_at":    r.created_at.isoformat() if r.created_at else None,
+                "updated_at":    r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ]
+        return {"sessions": sessions, "total": len(sessions)}
     except Exception as e:
-        logger.warning(f"[DASHBOARD] Failed to fetch sessions from analytics service: {e}")
-        raise HTTPException(status_code=502, detail=f"Analytics service unavailable: {e}")
+        logger.warning(f"[DASHBOARD] Failed to fetch sessions: {e}")
+        return {"sessions": [], "total": 0}
+    finally:
+        db.close()
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
