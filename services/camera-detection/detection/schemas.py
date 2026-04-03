@@ -44,7 +44,6 @@ class DetectionResponse(BaseModel):
     detections: List[Detection]
     total_detections_count: int = Field(..., description="Total number of detections")
     processing_time_ms: float = Field(..., description="Detection processing time in milliseconds")
-    first_detection_id: Optional[int] = Field(None, description="ID of first persisted detection")
     snapshot_b64: Optional[str] = Field(None, description="Base64 JPEG snapshot of frame with detections (only when detections > 0)")
 
 

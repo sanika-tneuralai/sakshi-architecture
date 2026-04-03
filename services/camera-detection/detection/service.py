@@ -79,15 +79,6 @@ class DetectionService:
 
         processing_time = (time.time() - start_time) * 1000  # ms
 
-        # Save screenshot if detections found
-        screenshot_path = None
-        # if detection_objects:
-        #     screenshot_path = self._save_screenshot(frame, camera_id)
-        #     print(f"[SCREENSHOT] Screenshot saved: {screenshot_path}")
-
-        # Persist to database and get first detection_id
-        first_detection_id = self._persist_detections(camera_id, detection_objects, screenshot_path)
-
         # Update stats
         self._update_stats(camera_id, len(detection_objects), processing_time)
 
@@ -98,7 +89,6 @@ class DetectionService:
             detections=detection_objects,
             total_detections_count=len(detection_objects),
             processing_time_ms=processing_time,
-            first_detection_id=first_detection_id,
         )
 
         print(
@@ -140,48 +130,48 @@ class DetectionService:
     # Private helpers (unchanged from original)
     # ------------------------------------------------------------------
 
-    def _save_screenshot(self, frame: np.ndarray, camera_id: str) -> Optional[str]:
-        """Save detection frame as screenshot."""
-        try:
-            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"{camera_id}_{timestamp}.jpg"
-            filepath = os.path.join(SCREENSHOTS_DIR, filename)
-            cv2.imwrite(filepath, frame)
-            logger.info("Screenshot saved: %s", filepath)
-            return filepath
-        except Exception as e:
-            logger.error("Failed to save screenshot: %s", e)
-            print(f"[SCREENSHOT] Error saving screenshot: {e}")
-            return None
+    # def _save_screenshot(self, frame: np.ndarray, camera_id: str) -> Optional[str]:
+    #     """Save detection frame as screenshot."""
+    #     try:
+    #         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    #         filename = f"{camera_id}_{timestamp}.jpg"
+    #         filepath = os.path.join(SCREENSHOTS_DIR, filename)
+    #         cv2.imwrite(filepath, frame)
+    #         logger.info("Screenshot saved: %s", filepath)
+    #         return filepath
+    #     except Exception as e:
+    #         logger.error("Failed to save screenshot: %s", e)
+    #         print(f"[SCREENSHOT] Error saving screenshot: {e}")
+    #         return None
 
-    def _persist_detections(
-        self,
-        camera_id: str,
-        detections: List[Detection],
-        screenshot_path: Optional[str] = None,
-    ) -> Optional[int]:
-        """Persist detections to database and return first detection_id."""
-        first_detection_id = None
-        try:
-            from shared.database.persistence import persist_camera, persist_detection
-
-            persist_camera(camera_id)
-            for idx, det in enumerate(detections):
-                detection_id = persist_detection(
-                    camera_id=camera_id,
-                    object_type=det.class_name,
-                    confidence=det.confidence,
-                    screenshot_path=screenshot_path,
-                )
-                if idx == 0 and detection_id:
-                    first_detection_id = detection_id
-
-            print(f"[DB] Persisted {len(detections)} detections for camera {camera_id}")
-        except Exception as e:
-            print(f"[DB] Error persisting detections: {e}")
-
-        return first_detection_id
+    # def _persist_detections(
+    #     self,
+    #     camera_id: str,
+    #     detections: List[Detection],
+    #     screenshot_path: Optional[str] = None,
+    # ) -> Optional[int]:
+    #     """Persist detections to database and return first detection_id."""
+    #     first_detection_id = None
+    #     try:
+    #         from shared.database.persistence import persist_camera, persist_detection
+    #
+    #         persist_camera(camera_id)
+    #         for idx, det in enumerate(detections):
+    #             detection_id = persist_detection(
+    #                 camera_id=camera_id,
+    #                 object_type=det.class_name,
+    #                 confidence=det.confidence,
+    #                 screenshot_path=screenshot_path,
+    #             )
+    #             if idx == 0 and detection_id:
+    #                 first_detection_id = detection_id
+    #
+    #         print(f"[DB] Persisted {len(detections)} detections for camera {camera_id}")
+    #     except Exception as e:
+    #         print(f"[DB] Error persisting detections: {e}")
+    #
+    #     return first_detection_id
 
     def _update_stats(self, camera_id: str, total_dets: int, proc_time: float) -> None:
         """Update per-camera detection statistics."""
