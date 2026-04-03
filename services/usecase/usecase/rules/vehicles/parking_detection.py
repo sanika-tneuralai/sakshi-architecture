@@ -44,6 +44,10 @@ def _init_state(state: dict, roi_names: List[str]) -> dict:
     """
     Ensure all required keys exist in the loaded state dict.
     Adds missing ROI slots without overwriting existing data.
+
+    roi_state[roi_name] = {track_id: {"intime": str, "confirmed": bool}}
+    entry_buf[roi_name] = {track_id: frame_count}
+    exit_buf[roi_name]  = {track_id: frame_count}
     """
     state.setdefault("tracker", {})
     state.setdefault("roi_state", {})
@@ -51,13 +55,9 @@ def _init_state(state: dict, roi_names: List[str]) -> dict:
     state.setdefault("exit_buf", {})
 
     for name in roi_names:
-        state["roi_state"].setdefault(name, {
-            "occupied": False,
-            "track_id": None,
-            "intime": None,
-        })
+        state["roi_state"].setdefault(name, {})
         state["entry_buf"].setdefault(name, {})
-        state["exit_buf"].setdefault(name, 0)
+        state["exit_buf"].setdefault(name, {})
 
     return state
 
@@ -103,7 +103,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
         print(f"[PARKING] roi_occupants={roi_occupants}")
         for roi_name, occupant_ids in roi_occupants.items():
-            s = roi_state[roi_name]
+            car_states = roi_state[roi_name]  # {track_id: {"intime": str, "confirmed": bool}}
 
             if occupant_ids:
                 triggered = True
@@ -120,61 +120,61 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     events.append(evt)
                     publish_sync("violation_events", evt)
 
-                primary_id = occupant_ids[0]
-                exit_buf[roi_name] = 0
-                entry_buf[roi_name][primary_id] = entry_buf[roi_name].get(primary_id, 0) + 1
+                # Process every car in this ROI independently
+                for tid in occupant_ids:
+                    exit_buf[roi_name].pop(tid, None)  # reset exit counter since car is present
+                    entry_buf[roi_name][tid] = entry_buf[roi_name].get(tid, 0) + 1
 
-                if (
-                    not s["occupied"]
-                    and entry_buf[roi_name][primary_id] >= ENTRY_FRAMES
-                ):
-                    s["occupied"] = True
-                    s["track_id"] = primary_id
-                    s["intime"] = _now()
-                    entry_buf[roi_name].clear()
+                    if tid not in car_states and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
+                        intime = _now()
+                        car_states[tid] = {"intime": intime, "confirmed": True}
+                        entry_buf[roi_name].pop(tid, None)
 
-                    evt = build_event(
-                        event_type="parking_intime",
-                        camera_id=camera_id,
-                        timestamp=s["intime"],
-                        track_id=primary_id,
-                        metadata={"roi": roi_name},
-                    )
-                    events.append(evt)
-                    publish_sync("parking_events", evt)
-                    logger.info(
-                        "[PARKING] Intime confirmed: camera=%s roi=%s track=%s",
-                        camera_id, roi_name, primary_id,
-                    )
-            else:
-                # No car in ROI this frame
-                entry_buf[roi_name].clear()
-
-                if s["occupied"]:
-                    exit_buf[roi_name] += 1
-                    if exit_buf[roi_name] >= EXIT_FRAMES:
-                        outtime = _now()
                         evt = build_event(
-                            event_type="parking_outtime",
+                            event_type="parking_intime",
                             camera_id=camera_id,
-                            timestamp=outtime,
-                            track_id=s["track_id"] or "unknown",
-                            metadata={
-                                "roi": roi_name,
-                                "intime": s["intime"],
-                                "outtime": outtime,
-                            },
+                            timestamp=intime,
+                            track_id=tid,
+                            metadata={"roi": roi_name},
                         )
                         events.append(evt)
                         publish_sync("parking_events", evt)
                         logger.info(
-                            "[PARKING] Outtime confirmed: camera=%s roi=%s track=%s",
-                            camera_id, roi_name, s["track_id"],
+                            "[PARKING] Intime confirmed: camera=%s roi=%s track=%s",
+                            camera_id, roi_name, tid,
                         )
-                        s["occupied"] = False
-                        s["track_id"] = None
-                        s["intime"] = None
-                        exit_buf[roi_name] = 0
+
+                # Handle cars that were confirmed but are no longer in this ROI
+                departed_ids = [tid for tid in car_states if tid not in occupant_ids]
+            else:
+                # No car in ROI this frame — all confirmed cars are potentially departing
+                entry_buf[roi_name].clear()
+                departed_ids = list(car_states.keys())
+
+            for tid in departed_ids:
+                exit_buf[roi_name][tid] = exit_buf[roi_name].get(tid, 0) + 1
+                if exit_buf[roi_name][tid] >= EXIT_FRAMES:
+                    outtime = _now()
+                    intime = car_states[tid].get("intime")
+                    evt = build_event(
+                        event_type="parking_outtime",
+                        camera_id=camera_id,
+                        timestamp=outtime,
+                        track_id=tid,
+                        metadata={
+                            "roi": roi_name,
+                            "intime": intime,
+                            "outtime": outtime,
+                        },
+                    )
+                    events.append(evt)
+                    publish_sync("parking_events", evt)
+                    logger.info(
+                        "[PARKING] Outtime confirmed: camera=%s roi=%s track=%s",
+                        camera_id, roi_name, tid,
+                    )
+                    del car_states[tid]
+                    exit_buf[roi_name].pop(tid, None)
 
         # --- Save updated state back to Redis ---
         state["tracker"] = tracker.to_dict()
