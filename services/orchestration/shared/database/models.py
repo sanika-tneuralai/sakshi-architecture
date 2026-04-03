@@ -238,6 +238,7 @@ class ChargingSession(Base):
 
     session_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
+    track_id = Column(String(50), nullable=True, index=True)
     gun_number = Column(String(100), nullable=True)
     car_number = Column(String(100), nullable=True)
     car_model = Column(String(255), nullable=True)

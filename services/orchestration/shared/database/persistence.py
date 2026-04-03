@@ -165,14 +165,15 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     data extracted from the current pipeline iteration's usecase results.
 
     Events are sourced from three usecases:
-      - parking_detection : provides in_time / out_time via extras
+      - parking_detection : provides in_time / out_time via extras, grouped by track_id
       - gun_detection      : provides gun_number, plug_time, plug_out_time via extras
       - vehicle_extraction : provides car_number, car_model via extras
 
     Session lookup priority:
-      1. Match on camera_id + gun_number (when gun_detection fired)
-      2. Match on camera_id + car_number (when vehicle_extraction fired)
-      3. Most-recent open session for camera_id
+      1. Match on camera_id + track_id (stable per-car identity)
+      2. Match on camera_id + gun_number (when gun_detection fired)
+      3. Match on camera_id + car_number (when vehicle_extraction fired)
+      4. Most-recent open session for camera_id (only when no track_id)
 
     Session status transitions:
       - 'active'     : in_time set, no plug_time yet
@@ -183,33 +184,21 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     A session is considered "open" when session_status is 'active' or 'charging'.
     Once out_time is written the status is finalised and the session is closed.
     """
+    def _parse_dt(value) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except (ValueError, TypeError):
+            return None
+
     # ------------------------------------------------------------------ #
     # 1. Extract events from usecase results                               #
-    #                                                                      #
-    # Each usecase returns its data at the TOP LEVEL of the result dict    #
-    # (not nested under "extras"). Relevant structures:                    #
-    #                                                                      #
-    # parking_detection:                                                   #
-    #   result["events"] = [                                               #
-    #     {"event_type": "parking_intime",  "timestamp": "...", ...},      #
-    #     {"event_type": "parking_outtime", "timestamp": "...", ...},      #
-    #   ]                                                                  #
-    #                                                                      #
-    # gun_detection:                                                       #
-    #   result["events"] = [                                               #
-    #     {"event_type": "gun_plugin",  "timestamp": "...",                #
-    #      "metadata": {"gun_name": "Gun 1", ...}},                        #
-    #     {"event_type": "gun_plugout", "timestamp": "...",                #
-    #      "metadata": {"gun_name": "Gun 1", ...}},                        #
-    #   ]                                                                  #
-    #                                                                      #
-    # vehicle_extraction:                                                  #
-    #   result["vehicle_details"] = [                                      #
-    #     {"car_number": "MH12AB1234", "car_model": "Toyota Innova", ...}  #
-    #   ]                                                                  #
     # ------------------------------------------------------------------ #
-    in_time_raw = None
-    out_time_raw = None
+    # parking events grouped by track_id: {track_id: {"in_time": ts, "out_time": ts}}
+    parking_events_by_track: dict = {}
     plug_time_raw = None
     plug_out_time_raw = None
     gun_number = None
@@ -220,25 +209,24 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
         extras = result.get("extras") or {}
 
-        # parking_detection and gun_detection fire events (outtime, plugout) on the frame
-        # the car/gun leaves — at that point triggered=False and matched_count=0.
-        # We must still process those events, so skip the triggered guard for event-bearing usecases.
         _event_usecases = {"parking_detection", "parking_compliance", "gun_detection"}
         has_events = bool(extras.get("events")) or bool(extras.get("vehicle_details"))
         if not result.get("triggered") and not (usecase_id in _event_usecases and has_events):
             continue
 
         if usecase_id in ("parking_detection", "parking_compliance"):
-            # parking_detection fires intime/outtime for cars inside ROIs.
-            # parking_compliance also fires intime/outtime for unauthorized
-            # cars (outside all ROIs) so their sessions are tracked too.
             for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
-                if etype == "parking_intime" and in_time_raw is None:
-                    in_time_raw = ts
-                elif etype == "parking_outtime" and out_time_raw is None:
-                    out_time_raw = ts
+                tid = evt.get("track_id", "unknown")
+                if etype not in ("parking_intime", "parking_outtime"):
+                    continue
+                if tid not in parking_events_by_track:
+                    parking_events_by_track[tid] = {"in_time": None, "out_time": None}
+                if etype == "parking_intime" and parking_events_by_track[tid]["in_time"] is None:
+                    parking_events_by_track[tid]["in_time"] = ts
+                elif etype == "parking_outtime" and parking_events_by_track[tid]["out_time"] is None:
+                    parking_events_by_track[tid]["out_time"] = ts
 
         elif usecase_id == "gun_detection":
             for evt in extras.get("events", result.get("events", [])):
@@ -255,8 +243,6 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         elif usecase_id == "vehicle_extraction":
             details = extras.get("vehicle_details", result.get("vehicle_details", []))
             if details:
-                # Only use a readable car_number — skip "unreadable"/"unknown" fallbacks
-                # so they don't pollute session lookup keys or create junk sessions.
                 readable = next(
                     (d for d in details if d.get("car_number") not in (None, "unreadable")),
                     None,
@@ -265,154 +251,160 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     car_number = car_number or readable.get("car_number")
                     car_model = car_model or readable.get("car_model")
                 elif not car_model:
-                    # Accept model even if plate is unreadable, but only if model is known
                     first = details[0]
                     if first.get("car_model") not in (None, "unknown"):
                         car_model = first.get("car_model")
 
-    def _parse_dt(value) -> datetime | None:
-        """Convert a string or datetime to a timezone-naive datetime (or None)."""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value
-        try:
-            return datetime.fromisoformat(str(value))
-        except (ValueError, TypeError):
-            return None
-
-    in_time = _parse_dt(in_time_raw)
-    out_time = _parse_dt(out_time_raw)
     plug_time = _parse_dt(plug_time_raw)
     plug_out_time = _parse_dt(plug_out_time_raw)
 
-    _persistence_logger.info(
-        f"[DB][{camera_id}] DEBUG upsert_charging_session extracted: "
-        f"in_time={in_time_raw}, out_time={out_time_raw}, "
-        f"plug_time={plug_time_raw}, plug_out_time={plug_out_time_raw}, "
-        f"gun_number={gun_number}, car_number={car_number}, car_model={car_model}"
-    )
-
-    # Nothing actionable in this iteration — skip DB work entirely.
-    if not any([in_time, out_time, plug_time, plug_out_time, gun_number, car_number, car_model]):
-        _persistence_logger.info(f"[DB][{camera_id}] DEBUG: Nothing actionable — skipping DB write")
-        return
-
     # ------------------------------------------------------------------ #
-    # 2. Find or create an open session                                    #
+    # 2. Upsert one session per tracked car                                #
+    # If no parking events fired this frame (gun/vehicle data only),       #
+    # fall back to a single upsert with no track_id.                       #
     # ------------------------------------------------------------------ #
-    db = SessionLocal()
-    try:
-        open_statuses = ("active", "charging")
-        session: ChargingSession | None = None
+    if not parking_events_by_track:
+        parking_events_by_track = {"__no_track__": {"in_time": None, "out_time": None}}
 
-        # Priority 1: match by gun_number
-        if gun_number:
-            session = (
-                db.query(ChargingSession)
-                .filter(
-                    ChargingSession.camera_id == camera_id,
-                    ChargingSession.gun_number == gun_number,
-                    ChargingSession.session_status.in_(open_statuses),
-                )
-                .order_by(ChargingSession.session_id.desc())
-                .first()
-            )
+    for track_id, times in parking_events_by_track.items():
+        in_time = _parse_dt(times["in_time"])
+        out_time = _parse_dt(times["out_time"])
+        effective_track_id = None if track_id == "__no_track__" else track_id
 
-        # Priority 2: match by car_number (only when readable)
-        if session is None and car_number:
-            session = (
-                db.query(ChargingSession)
-                .filter(
-                    ChargingSession.camera_id == camera_id,
-                    ChargingSession.car_number == car_number,
-                    ChargingSession.session_status.in_(open_statuses),
-                )
-                .order_by(ChargingSession.session_id.desc())
-                .first()
-            )
-
-        # Priority 3: most-recent open session for this camera
-        if session is None:
-            session = (
-                db.query(ChargingSession)
-                .filter(
-                    ChargingSession.camera_id == camera_id,
-                    ChargingSession.session_status.in_(open_statuses),
-                )
-                .order_by(ChargingSession.session_id.desc())
-                .first()
-            )
-
-        # Create a new session only when in_time is present.
-        # vehicle_extraction alone (no parking event) must never create a
-        # new session — it should only enrich an already-open session.
-        if session is None:
-            if in_time is None:
-                _persistence_logger.debug(
-                    f"[DB] Skipping new session for camera {camera_id} — "
-                    f"no in_time yet (vehicle_extraction only)"
-                )
-                return
-            session = ChargingSession(
-                camera_id=camera_id,
-                session_status="active",
-            )
-            db.add(session)
-            db.flush()  # Populate session_id before we update fields below
-            _persistence_logger.info(
-                f"[DB] Created new ChargingSession session_id={session.session_id} "
-                f"for camera {camera_id}"
-            )
-
-        # ---------------------------------------------------------------- #
-        # 3. Apply updates                                                  #
-        # ---------------------------------------------------------------- #
-        if gun_number and session.gun_number is None:
-            session.gun_number = gun_number
-        if car_number and session.car_number is None:
-            session.car_number = car_number
-        if car_model and session.car_model is None:
-            session.car_model = car_model
-        if in_time and session.in_time is None:
-            session.in_time = in_time
-        if plug_time and session.plug_time is None:
-            session.plug_time = plug_time
-        if plug_out_time and session.plug_out_time is None:
-            session.plug_out_time = plug_out_time
-        if out_time and session.out_time is None:
-            session.out_time = out_time
-
-        # ---------------------------------------------------------------- #
-        # 4. Derive session status                                          #
-        # ---------------------------------------------------------------- #
-        if session.out_time is not None:
-            # Session is over — finalise
-            if session.plug_time is not None:
-                session.session_status = "completed"
-            else:
-                session.session_status = "incomplete"
-        elif session.plug_time is not None:
-            session.session_status = "charging"
-        else:
-            session.session_status = "active"
-
-        db.commit()
         _persistence_logger.info(
-            f"[DB] ChargingSession session_id={session.session_id} "
-            f"status={session.session_status} | in_time={session.in_time} "
-            f"plug_time={session.plug_time} out_time={session.out_time} "
-            f"car={session.car_number} gun={session.gun_number} camera={camera_id}"
+            f"[DB][{camera_id}] upsert track={effective_track_id} "
+            f"in_time={times['in_time']} out_time={times['out_time']} "
+            f"plug_time={plug_time_raw} plug_out_time={plug_out_time_raw} "
+            f"gun={gun_number} car={car_number}"
         )
 
-    except Exception as e:
-        db.rollback()
-        _persistence_logger.warning(
-            f"[DB] Failed to upsert ChargingSession for camera {camera_id}: {e}"
-        )
-        raise
-    finally:
-        db.close()
+        if not any([in_time, out_time, plug_time, plug_out_time, gun_number, car_number, car_model]):
+            _persistence_logger.info(
+                f"[DB][{camera_id}] Nothing actionable for track={effective_track_id} — skipping"
+            )
+            continue
+
+        db = SessionLocal()
+        try:
+            open_statuses = ("active", "charging")
+            session: ChargingSession | None = None
+
+            # Priority 1: match by track_id
+            if effective_track_id:
+                session = (
+                    db.query(ChargingSession)
+                    .filter(
+                        ChargingSession.camera_id == camera_id,
+                        ChargingSession.track_id == effective_track_id,
+                        ChargingSession.session_status.in_(open_statuses),
+                    )
+                    .order_by(ChargingSession.session_id.desc())
+                    .first()
+                )
+
+            # Priority 2: match by gun_number
+            if session is None and gun_number:
+                session = (
+                    db.query(ChargingSession)
+                    .filter(
+                        ChargingSession.camera_id == camera_id,
+                        ChargingSession.gun_number == gun_number,
+                        ChargingSession.session_status.in_(open_statuses),
+                    )
+                    .order_by(ChargingSession.session_id.desc())
+                    .first()
+                )
+
+            # Priority 3: match by car_number
+            if session is None and car_number:
+                session = (
+                    db.query(ChargingSession)
+                    .filter(
+                        ChargingSession.camera_id == camera_id,
+                        ChargingSession.car_number == car_number,
+                        ChargingSession.session_status.in_(open_statuses),
+                    )
+                    .order_by(ChargingSession.session_id.desc())
+                    .first()
+                )
+
+            # Priority 4: most-recent open session (only when no track_id to avoid cross-car collision)
+            if session is None and effective_track_id is None:
+                session = (
+                    db.query(ChargingSession)
+                    .filter(
+                        ChargingSession.camera_id == camera_id,
+                        ChargingSession.session_status.in_(open_statuses),
+                    )
+                    .order_by(ChargingSession.session_id.desc())
+                    .first()
+                )
+
+            # Create a new session only when in_time is present.
+            if session is None:
+                if in_time is None:
+                    _persistence_logger.debug(
+                        f"[DB] Skipping new session for camera {camera_id} track={effective_track_id} — no in_time yet"
+                    )
+                    continue
+                session = ChargingSession(
+                    camera_id=camera_id,
+                    track_id=effective_track_id,
+                    session_status="active",
+                )
+                db.add(session)
+                db.flush()
+                _persistence_logger.info(
+                    f"[DB] Created new ChargingSession session_id={session.session_id} "
+                    f"track={effective_track_id} for camera {camera_id}"
+                )
+
+            # ------------------------------------------------------------ #
+            # 3. Apply updates                                               #
+            # ------------------------------------------------------------ #
+            if effective_track_id and session.track_id is None:
+                session.track_id = effective_track_id
+            if gun_number and session.gun_number is None:
+                session.gun_number = gun_number
+            if car_number and session.car_number is None:
+                session.car_number = car_number
+            if car_model and session.car_model is None:
+                session.car_model = car_model
+            if in_time and session.in_time is None:
+                session.in_time = in_time
+            if plug_time and session.plug_time is None:
+                session.plug_time = plug_time
+            if plug_out_time and session.plug_out_time is None:
+                session.plug_out_time = plug_out_time
+            if out_time and session.out_time is None:
+                session.out_time = out_time
+
+            # ------------------------------------------------------------ #
+            # 4. Derive session status                                       #
+            # ------------------------------------------------------------ #
+            if session.out_time is not None:
+                session.session_status = "completed" if session.plug_time is not None else "incomplete"
+            elif session.plug_time is not None:
+                session.session_status = "charging"
+            else:
+                session.session_status = "active"
+
+            db.commit()
+            _persistence_logger.info(
+                f"[DB] ChargingSession session_id={session.session_id} track={session.track_id} "
+                f"status={session.session_status} | in_time={session.in_time} "
+                f"plug_time={session.plug_time} out_time={session.out_time} "
+                f"car={session.car_number} gun={session.gun_number} camera={camera_id}"
+            )
+
+        except Exception as e:
+            db.rollback()
+            _persistence_logger.warning(
+                f"[DB] Failed to upsert ChargingSession for camera {camera_id} track={effective_track_id}: {e}"
+            )
+            raise
+        finally:
+            db.close()
 
 
 # Usecases that are analytics-only and should NOT generate alerts.
