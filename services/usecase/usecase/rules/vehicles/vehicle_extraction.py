@@ -28,9 +28,9 @@ import logging
 import os
 from typing import Any, ClassVar, Dict, List
 
+import boto3
 import cv2
 import numpy as np
-import requests
 
 from usecase.rules.base import BaseUsecaseRule
 from workers.redis_state import get_state, set_state
@@ -59,11 +59,29 @@ def _car_key(camera_id: str, bbox: dict) -> str:
 
 
 def _download_image(snapshot_url: str):
-    """Download a frame from an S3 URL and decode it into a numpy BGR array."""
+    """
+    Download a frame from a private S3 URL using boto3 (authenticated).
+    URL format: https://<bucket>.s3.<region>.amazonaws.com/<key>
+    """
     try:
-        response = requests.get(snapshot_url, timeout=10)
-        response.raise_for_status()
-        arr = np.frombuffer(response.content, dtype=np.uint8)
+        # Parse bucket and key from the URL
+        # e.g. https://sakshi-vehicle-detection-frames.s3.ap-south-1.amazonaws.com/frames/cam/123.jpg
+        url_path = snapshot_url.split(".amazonaws.com/", 1)
+        if len(url_path) != 2:
+            raise ValueError(f"Unrecognised S3 URL format: {snapshot_url}")
+        key = url_path[1]
+        host = snapshot_url.split("//")[1].split(".s3.")[0]
+        bucket = host
+
+        s3 = boto3.client(
+            "s3",
+            region_name=os.getenv("AWS_REGION", "ap-south-1"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+        response = s3.get_object(Bucket=bucket, Key=key)
+        data = response["Body"].read()
+        arr = np.frombuffer(data, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
         logger.error("[VEHICLE] Failed to download snapshot from %s: %s", snapshot_url, exc)
