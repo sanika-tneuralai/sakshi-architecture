@@ -7,6 +7,7 @@ Thread-safe — a single tracker instance can be shared across threads.
 """
 import logging
 import threading
+import uuid
 from collections import OrderedDict
 from typing import Dict, List, Tuple
 
@@ -36,6 +37,9 @@ class CentroidTracker:
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
         self._next_id = 0
+        # Short session prefix (8 hex chars) — changes on every restart so
+        # track_ids like "a3f1b2c0_trk_0000" never collide with a previous run.
+        self._session = uuid.uuid4().hex[:8]
         # OrderedDict: track_id (str) -> centroid np.ndarray shape (2,)
         self._centroids: OrderedDict = OrderedDict()
         # track_id -> consecutive frames without a match
@@ -43,7 +47,7 @@ class CentroidTracker:
         self._lock = threading.Lock()
 
     def _new_id(self) -> str:
-        tid = f"trk_{self._next_id:04d}"
+        tid = f"{self._session}_trk_{self._next_id:04d}"
         self._next_id += 1
         return tid
 
@@ -156,6 +160,7 @@ class CentroidTracker:
         """
         with self._lock:
             return {
+                "session": self._session,
                 "next_id": self._next_id,
                 "centroids": {
                     tid: centroid.tolist()
@@ -170,8 +175,11 @@ class CentroidTracker:
 
         Lists stored in ``data["centroids"]`` are converted back to
         numpy arrays so ``update()`` can operate on them unchanged.
+        The session prefix is restored so IDs remain consistent within
+        the same run.
         """
         with self._lock:
+            self._session = data.get("session", self._session)
             self._next_id = data.get("next_id", 0)
             self._centroids = OrderedDict(
                 (tid, np.array(centroid, dtype=np.float32))
