@@ -6,7 +6,6 @@ import logging
 import requests
 import time
 import cv2
-import base64
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,6 +15,7 @@ from detection.schemas import (
 )
 from detection.service import get_detection_service
 from camera.service import camera_manager
+from shared.common.s3_frame_store import get_s3_frame_store
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +176,17 @@ async def detect_objects(request: DetectionRequest):
 
     if result.total_detections_count > 0:
         resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-        _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        result.snapshot_b64 = base64.b64encode(buffer).decode('utf-8')
+        print(f"[S3 DEBUG] Attempting S3 upload for camera={request.camera_id} | frame shape={resized.shape}")
+        try:
+            store = get_s3_frame_store()
+            print(f"[S3 DEBUG] S3FrameStore initialized | bucket={store._bucket} | region={store._region}")
+            frame_id = str(int(time.time() * 1000))
+            print(f"[S3 DEBUG] Uploading frame_id={frame_id} ...")
+            result.snapshot_url = store.upload_frame(request.camera_id, resized, frame_id=frame_id)
+            print(f"[S3 DEBUG] ✓ Upload successful | url={result.snapshot_url}")
+        except Exception as e:
+            logger.warning(f"[S3] Frame upload failed (non-fatal): {e}")
+            print(f"[S3 DEBUG] ✗ Upload FAILED | error={e}")
 
     print(f"[DETECTION API] ✓ Detection completed\n")
     print(f"✓ detect_objects completed for {request.camera_id}")
@@ -234,11 +243,20 @@ def _detect_single_camera(
         
         processing_time_ms = (time.time() - start_time) * 1000
 
-        snapshot_b64 = None
+        snapshot_url = None
         if result.total_detections_count > 0:
             resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-            _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            snapshot_b64 = base64.b64encode(buffer).decode('utf-8')
+            print(f"[S3 DEBUG] Attempting S3 upload for camera={camera_id} (batch) | frame shape={resized.shape}")
+            try:
+                store = get_s3_frame_store()
+                print(f"[S3 DEBUG] S3FrameStore initialized | bucket={store._bucket} | region={store._region}")
+                frame_id = str(int(time.time() * 1000))
+                print(f"[S3 DEBUG] Uploading frame_id={frame_id} ...")
+                snapshot_url = store.upload_frame(camera_id, resized, frame_id=frame_id)
+                print(f"[S3 DEBUG] ✓ Upload successful | url={snapshot_url}")
+            except Exception as e:
+                logger.warning(f"[S3] Frame upload failed for {camera_id} (non-fatal): {e}")
+                print(f"[S3 DEBUG] ✗ Upload FAILED | camera={camera_id} | error={e}")
 
         return CameraDetectionResult(
             camera_id=camera_id,
@@ -247,7 +265,7 @@ def _detect_single_camera(
             processing_time_ms=processing_time_ms,
             detections=result.detections,
             error=None,
-            snapshot_b64=snapshot_b64
+            snapshot_url=snapshot_url
         )
         
     except Exception as e:

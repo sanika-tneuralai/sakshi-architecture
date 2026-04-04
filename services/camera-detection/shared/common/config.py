@@ -229,6 +229,27 @@ class Config:
             "postgresql://postgres:postgres@localhost:5432/goec"
         )
     
+    # ==================== S3 Settings ====================
+    @staticmethod
+    def get_s3_bucket() -> Optional[str]:
+        """S3 bucket name for frame storage"""
+        return os.getenv("AWS_S3_BUCKET", "sakshi-vehicle-detection-frames")
+
+    @staticmethod
+    def get_s3_region() -> str:
+        """AWS region"""
+        return os.getenv("AWS_REGION", "ap-south-1")
+
+    @staticmethod
+    def get_s3_access_key() -> Optional[str]:
+        """AWS access key ID"""
+        return os.getenv("AWS_ACCESS_KEY_ID")
+
+    @staticmethod
+    def get_s3_secret_key() -> Optional[str]:
+        """AWS secret access key"""
+        return os.getenv("AWS_SECRET_ACCESS_KEY")
+
     # ==================== Service URLs (for orchestration) ====================
     @staticmethod
     def get_camera_detection_url() -> str:
