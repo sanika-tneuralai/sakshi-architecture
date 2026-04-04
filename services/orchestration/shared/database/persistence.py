@@ -448,7 +448,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 continue
 
             _persistence_logger.info(f"[DB][{camera_id}] DEBUG: processing alert for usecase={usecase_id} | extras keys={list(extras.keys())}")
-            snapshot_b64 = result.get("snapshot_b64")
+            snapshot_url = result.get("snapshot_url")
 
             # ── Special case: split parking_detection events by type ──────────
             # multiple_cars_in_roi violations must appear on the Parking
@@ -471,7 +471,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                         alert_type="parking_detection_triggered",
                         message=message,
                         status="sent",
-                        snapshot_b64=snapshot_b64,
+                        snapshot_url=snapshot_url,
                         extras={"events": session_events},
                     )
                     db.add(alert)
@@ -489,7 +489,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                         alert_type="multiple_cars_in_roi",
                         message=message,
                         status="sent",
-                        snapshot_b64=snapshot_b64,
+                        snapshot_url=snapshot_url,
                         extras={"violations": [evt]},
                     )
                     db.add(alert)
@@ -513,7 +513,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 alert_type=f"{usecase_id}_triggered",
                 message=message,
                 status="sent",
-                snapshot_b64=snapshot_b64,
+                snapshot_url=snapshot_url,
                 extras=extras if extras else None,
             )
             db.add(alert)

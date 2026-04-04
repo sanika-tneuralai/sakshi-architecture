@@ -229,17 +229,8 @@ async def run_detection(camera_id: str, confidence_threshold: float, class_thres
         )
         response.raise_for_status()
         data = response.json()
-        logger.info(f"[{camera_id}] DEBUG detection response: {_strip_snapshots(data)}")
+        logger.info(f"[{camera_id}] DEBUG detection response: {data}")
         return data
-
-
-def _strip_snapshots(data):
-    """Recursively remove snapshot_b64 keys from a dict/list for compact debug logging."""
-    if isinstance(data, dict):
-        return {k: _strip_snapshots(v) for k, v in data.items() if k != "snapshot_b64"}
-    if isinstance(data, list):
-        return [_strip_snapshots(i) for i in data]
-    return data
 
 
 @retry_on_failure
@@ -278,7 +269,7 @@ async def evaluate_usecases(
         )
         response.raise_for_status()
         data = response.json()
-        logger.info(f"[{camera_id}] DEBUG usecase response: {_strip_snapshots(data)}")
+        logger.info(f"[{camera_id}] DEBUG usecase response: {data}")
         return data
 
 
@@ -523,16 +514,16 @@ class PipelineManager:
                 total_det = detection_data.get('total_detections_count', 0)
                 logger.info(f"[{camera_id}] Detection complete | total={total_det} | class_thresholds={class_thresholds or 'none'}")
 
-                # Cache snapshot if detections found
-                if total_det > 0 and detection_data.get('snapshot_b64'):
+                # Cache snapshot URL if detections found
+                if total_det > 0 and detection_data.get('snapshot_url'):
                     detection_snapshots[camera_id] = {
                         "camera_id": camera_id,
-                        "frame_b64": detection_data['snapshot_b64'],
+                        "snapshot_url": detection_data['snapshot_url'],
                         "timestamp": detection_data.get('timestamp'),
                         "detections": detection_data.get('detections', []),
                         "detection_count": total_det
                     }
-                    logger.debug(f"[{camera_id}] Snapshot cached ({total_det} detections)")
+                    logger.debug(f"[{camera_id}] Snapshot URL cached ({total_det} detections)")
                 logger.debug(
                     f"[{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}"
                 )
@@ -643,7 +634,7 @@ class PipelineManager:
 # Global pipeline manager
 pipeline_manager: Optional[PipelineManager] = None
 
-# In-memory detection snapshot store: {camera_id: {frame_b64, timestamp, detections, detection_count}}
+# In-memory detection snapshot store: {camera_id: {snapshot_url, timestamp, detections, detection_count}}
 detection_snapshots: Dict[str, Dict[str, Any]] = {}
 
 
@@ -997,11 +988,11 @@ async def execute_pipeline_once(request: PipelineRequest):
                 total_det = detection_data.get('total_detections_count', 0)
                 logger.info(f"DEBUG: [{camera_id}] Detection completed: {total_det} detections")
 
-                # Cache snapshot if detections found
-                if total_det > 0 and detection_data.get('snapshot_b64'):
+                # Cache snapshot URL if detections found
+                if total_det > 0 and detection_data.get('snapshot_url'):
                     detection_snapshots[camera_id] = {
                         "camera_id": camera_id,
-                        "frame_b64": detection_data['snapshot_b64'],
+                        "snapshot_url": detection_data['snapshot_url'],
                         "timestamp": detection_data.get('timestamp'),
                         "detections": detection_data.get('detections', []),
                         "detection_count": total_det
@@ -1165,7 +1156,7 @@ async def list_alerts(
                     "message":     r.message,
                     "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                     "status":      r.status,
-                    "has_snapshot": r.snapshot_b64 is not None,
+                    "snapshot_url": r.snapshot_url,
                     "extras":      r.extras,
                 }
                 for r in rows
@@ -1181,7 +1172,7 @@ async def list_alerts(
 @app.get("/alert/{alert_id}/snapshot", tags=["dashboard"])
 async def get_alert_snapshot(alert_id: int):
     """
-    Return the snapshot_b64 image for a specific alert.
+    Return the S3 snapshot URL for a specific alert.
     Call this on demand when displaying an alert's image in the dashboard.
     """
     db = SessionLocal()
@@ -1190,7 +1181,7 @@ async def get_alert_snapshot(alert_id: int):
         row = db.query(Alert).filter(Alert.alert_id == alert_id).first()
         if not row:
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-        return {"alert_id": alert_id, "snapshot_b64": row.snapshot_b64}
+        return {"alert_id": alert_id, "snapshot_url": row.snapshot_url}
     except HTTPException:
         raise
     except Exception as e:
@@ -1323,7 +1314,7 @@ async def dashboard_parking_compliance(
     - multiple_cars_in_roi  — more than one car occupying the same ROI
 
     Each violation row includes alert_type, message, timestamp, extras
-    (bbox, confidence, roi name), and snapshot_b64.
+    (bbox, confidence, roi name), and snapshot_url.
 
     Query params: camera_id, limit.
     """
@@ -1343,7 +1334,7 @@ async def dashboard_parking_compliance(
                 "message":     r.message,
                 "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                 "status":      r.status,
-                "has_snapshot": r.snapshot_b64 is not None,
+                "snapshot_url": r.snapshot_url,
                 "extras":      r.extras,
             }
             for r in rows
@@ -1369,7 +1360,7 @@ async def dashboard_safety_monitoring(
     - smoke — smoke detected in camera frame
 
     Each alert row includes alert_type, message, timestamp, extras
-    (hazard_type, confidence, bbox), and snapshot_b64.
+    (hazard_type, confidence, bbox), and snapshot_url.
 
     Query params: camera_id, limit.
     """
@@ -1389,7 +1380,7 @@ async def dashboard_safety_monitoring(
                 "message":     r.message,
                 "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                 "status":      r.status,
-                "has_snapshot": r.snapshot_b64 is not None,
+                "snapshot_url": r.snapshot_url,
                 "extras":      r.extras,
             }
             for r in rows

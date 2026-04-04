@@ -211,9 +211,9 @@ async function renderSnapshot(containerId, alerts) {
   if (withSnap) {
     el.innerHTML = `<div class="frame-empty"><div class="frame-icon">📷</div>Loading...</div>`;
     const data = await fetchJSON(`${CONFIG.alertUrl}/alert/${withSnap.alert_id}/snapshot`);
-    if (data && data.snapshot_b64) {
+    if (data && data.snapshot_url) {
       el.innerHTML = `
-        <img src="data:image/jpeg;base64,${data.snapshot_b64}" alt="Latest frame" />
+        <img src="${data.snapshot_url}" alt="Latest frame" />
         <div class="frame-label">${fmtTsFull(withSnap.timestamp)}</div>
       `;
     } else {

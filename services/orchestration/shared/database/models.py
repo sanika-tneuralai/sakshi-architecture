@@ -101,7 +101,7 @@ class Alert(Base):
         status (str): Alert status ('sent' or 'failed')
         detection_id (int): Optional foreign key to detections table
         screenshot_path (str): Optional path to alert screenshot
-        snapshot_b64 (str): Base64-encoded JPEG frame captured at alert time
+        snapshot_url (str): S3 HTTPS URL of the frame captured at alert time
         extras (dict): Rule-specific data (events, violations, vehicle_details, etc.)
     """
     __tablename__ = "alerts"
@@ -113,7 +113,7 @@ class Alert(Base):
     message = Column(String(500), nullable=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     status = Column(String(20), nullable=False, default='sent')
-    snapshot_b64 = Column(Text, nullable=True)
+    snapshot_url = Column(String(512), nullable=True)
     extras = Column(JSON, nullable=True)
 
 

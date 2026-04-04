@@ -126,11 +126,8 @@
   /* ── Show detail in right panel ── */
   async function showDetail(alert, idx) {
     let snap = '';
-    if (alert.has_snapshot && alert.alert_id) {
-      const snapData = await fetchJSON(`${CONFIG.alertUrl}/alert/${alert.alert_id}/snapshot`);
-      if (snapData && snapData.snapshot_b64) {
-        snap = `<img src="data:image/jpeg;base64,${snapData.snapshot_b64}" alt="Event snapshot" style="width:100%;border-radius:6px;margin-bottom:16px"/>`;
-      }
+    if (alert.snapshot_url) {
+      snap = `<img src="${alert.snapshot_url}" alt="Event snapshot" style="width:100%;border-radius:6px;margin-bottom:16px"/>`;
     }
     const desc = describeAlert(alert);
     document.getElementById('detail-body').innerHTML = `
