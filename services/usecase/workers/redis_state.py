@@ -65,26 +65,6 @@ def get_state(key: str) -> dict:
         return {}
 
 
-def get_snapshot(camera_id: str) -> str | None:
-    """Retrieve the latest snapshot_b64 stored for a camera."""
-    try:
-        return _client.get(_full_key(f"snapshot:{camera_id}"))
-    except redis.RedisError as exc:
-        logger.warning("[redis_state] get_snapshot failed for camera=%s: %s", camera_id, exc)
-        return None
-
-
-def set_snapshot(camera_id: str, snapshot_b64: str | None, ttl_seconds: int = 60) -> None:
-    """Store the latest snapshot_b64 for a camera separately from task payloads.
-    Workers fetch it via get_snapshot() instead of carrying the large blob in RabbitMQ messages."""
-    if not snapshot_b64:
-        return
-    try:
-        _client.setex(_full_key(f"snapshot:{camera_id}"), ttl_seconds, snapshot_b64)
-    except redis.RedisError as exc:
-        logger.warning("[redis_state] set_snapshot failed for camera=%s: %s", camera_id, exc)
-
-
 def set_state(key: str, value: dict, ttl_seconds: int = 3600) -> None:
     """
     Persist *value* as JSON under *key* with an expiry of *ttl_seconds*.

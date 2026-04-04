@@ -1,8 +1,9 @@
 """
 Vehicle Detail Extraction Rule
 ================================
-Decodes snapshot_b64, crops the car bbox, and sends the crop to the
-Gemini Vision API to extract license plate number and car model.
+Downloads the frame from S3 via snapshot_url, crops the car bbox, and
+sends the crop to the Gemini Vision API to extract license plate number
+and car model.
 
 Gemini is called ONCE per unique car. A car is identified by a stable
 spatial key (camera + bbox snapped to a 50px grid). Once extracted,
@@ -29,6 +30,7 @@ from typing import Any, ClassVar, Dict, List
 
 import cv2
 import numpy as np
+import requests
 
 from usecase.rules.base import BaseUsecaseRule
 from workers.redis_state import get_state, set_state
@@ -56,13 +58,15 @@ def _car_key(camera_id: str, bbox: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
-def _decode_image(snapshot_b64: str):
+def _download_image(snapshot_url: str):
+    """Download a frame from an S3 URL and decode it into a numpy BGR array."""
     try:
-        data = base64.b64decode(snapshot_b64)
-        arr = np.frombuffer(data, dtype=np.uint8)
+        response = requests.get(snapshot_url, timeout=10)
+        response.raise_for_status()
+        arr = np.frombuffer(response.content, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
-        logger.error("[VEHICLE] Failed to decode snapshot: %s", exc)
+        logger.error("[VEHICLE] Failed to download snapshot from %s: %s", snapshot_url, exc)
         return None
 
 
@@ -145,9 +149,9 @@ class VehicleExtractionRule(BaseUsecaseRule):
             if d.get("class_name") == "car"
         ]
 
-        snapshot_b64 = detection_output.get("snapshot_b64")
-        print(f"[VEHICLE] camera={camera_id} | cars_detected={len(cars)} | snapshot={'yes' if snapshot_b64 else 'no'}")
-        image = _decode_image(snapshot_b64) if snapshot_b64 else None
+        snapshot_url = detection_output.get("snapshot_url")
+        print(f"[VEHICLE] camera={camera_id} | cars_detected={len(cars)} | snapshot={'yes' if snapshot_url else 'no'}")
+        image = _download_image(snapshot_url) if snapshot_url else None
         vehicle_details: List[dict] = []
 
         # --- Load state from Redis ---

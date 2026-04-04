@@ -35,7 +35,7 @@ class BaseUsecaseRule(ABC):
         Evaluate the usecase rule against detection output.
 
         Args:
-            detection_output: slim payload with detections, snapshot_b64,
+            detection_output: slim payload with detections, snapshot_url,
                               camera_id, and optionally rois.
 
         Returns:

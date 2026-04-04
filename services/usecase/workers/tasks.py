@@ -47,7 +47,7 @@ def evaluate_usecase_task(
         #persist to DB inside the worker(not in the API process), DB writes are I/O bound. Doing them in the worker means the API returns immediately without waiting for DB. worker handle persistence.
         _persist_result(camera_id, result)
 
-        result_dict = result.model_dump(exclude={"snapshot_b64"}) #return as dict (celery stores this as redis json; snapshot excluded to avoid oversized payloads)
+        result_dict = result.model_dump()  # snapshot_url is a short string, safe to include in Celery result
         logger.info(
             f'[Task] Completed | camera{camera_id} | usecase={usecase_id}| triggered{result.triggered}'
         )

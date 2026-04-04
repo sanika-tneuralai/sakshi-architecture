@@ -129,7 +129,7 @@ def _safe_default_result(usecase_id:str, task_id: str) -> UsecaseResult:
         matched_count=0,
         matched_objects=[],
         detection_id=None,
-        snapshot_b64=None)
+        snapshot_url=None)
     
 def get_task_status(task_id: str) -> Dict[str, Any]:
     """
