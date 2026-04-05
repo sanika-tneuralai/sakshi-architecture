@@ -48,7 +48,10 @@ celery_app.conf.update(
 
     task_acks_late = True, # Acknowledge tasks after they have been processed, not just received. This ensures that if a worker crashes while processing a task, the task will be re-queued and not lost.
 
-    task_ignore_result = False # Don't store results for tasks that raised exceptions, we handle errors explicitly in the task itself.
+    task_ignore_result = False, # Don't store results for tasks that raised exceptions, we handle errors explicitly in the task itself.
+
+    broker_pool_limit = 20,
+    redis_max_connections = 20,
 
 )
 
