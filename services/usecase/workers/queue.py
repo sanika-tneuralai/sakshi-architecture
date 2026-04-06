@@ -4,6 +4,7 @@ This is the bridge between the FastAPI layer and the celery/rabbitmq layer.
 
 import asyncio
 import logging
+import threading
 from typing import Dict, Any, List, Optional
 
 from celery.result import AsyncResult
@@ -15,6 +16,11 @@ from usecase.schemas import UsecaseResult
 logger = logging.getLogger(__name__)
 
 TAKE_RESULT_TIMEOUT = int(30)
+
+# redis-py connections are not thread-safe. asyncio.gather runs concurrent
+# handle.get() calls on multiple threads, causing interleaved reads and
+# Protocol Errors. This lock serializes Redis reads to prevent that.
+_redis_read_lock = threading.Lock()
 
 def submit_usecase_tasks(
         camera_id: str,
@@ -84,11 +90,11 @@ async def await_usecase_results(
     # Each task waits independently- a slow task doesn't delay others
     async def collect_one(usecase_id: str, handle:AsyncResult) -> UsecaseResult:
         try:
-            result_dict = await asyncio.to_thread(
-                handle.get,
-                timeout=timeout,
-                propagate=False,
-            )
+            def get_with_lock():
+                with _redis_read_lock:
+                    return handle.get(timeout=timeout, propagate=False)
+
+            result_dict = await asyncio.to_thread(get_with_lock)
 
             if isinstance(result_dict,Exception):
                 logger.error(f'[Queue] Task for usecase_id={usecase_id} failed with exception: {result_dict}')
