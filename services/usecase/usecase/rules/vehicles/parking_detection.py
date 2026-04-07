@@ -32,8 +32,8 @@ from workers.redis_state import get_state, set_state
 
 logger = logging.getLogger(__name__)
 
-ENTRY_FRAMES = 3  # consecutive frames car must be present to confirm entry
-EXIT_FRAMES = 3   # consecutive frames car must be absent to confirm exit
+ENTRY_FRAMES = 3   # consecutive frames car must be present to confirm entry
+EXIT_FRAMES = 15   # consecutive frames car must be absent to confirm exit (~15s at 1fps)
 
 
 def _now() -> str:
@@ -82,7 +82,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
         state = _init_state(state, list(rois.keys()))
 
         # --- Reconstruct CentroidTracker from saved state ---
-        tracker = CentroidTracker(max_disappeared=15, max_distance=100)
+        tracker = CentroidTracker(max_disappeared=20, max_distance=100)
         if state["tracker"]:
             tracker.from_dict(state["tracker"])
 
