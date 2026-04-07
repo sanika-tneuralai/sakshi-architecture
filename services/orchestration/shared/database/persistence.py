@@ -11,7 +11,7 @@ Usage:
     usecases = get_camera_usecases("cam_01")
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 from shared.database.connection import SessionLocal
@@ -322,6 +322,31 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 .first()
             )
 
+            # Issue #11: Redis restart guard — before creating a new session,
+            # check if this slot had a session closed within the last 5 minutes.
+            # A Redis restart resets tracker state, causing parking_intime to re-fire
+            # for a car that is still physically parked. Re-opening the recent session
+            # prevents a duplicate row for the same physical visit.
+            if session is None and in_time is not None:
+                restart_window = datetime.now(timezone.utc) - timedelta(minutes=5)
+                recent = (
+                    db.query(ChargingSession)
+                    .filter(
+                        ChargingSession.camera_id == camera_id,
+                        ChargingSession.slot_id == slot_id,
+                        ChargingSession.updated_at >= restart_window,
+                    )
+                    .order_by(ChargingSession.session_id.desc())
+                    .first()
+                )
+                if recent and recent.session_status in ("active", "charging", "completed", "incomplete"):
+                    session = recent
+                    session.session_status = "active" if session.plug_time is None else "charging"
+                    _persistence_logger.info(
+                        f"[DB] Re-opened recent session session_id={session.session_id} "
+                        f"slot={slot_id} after likely Redis restart for camera {camera_id}"
+                    )
+
             # Create a new session only when in_time is present
             if session is None:
                 if in_time is None:
@@ -583,3 +608,52 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
         db.close()
 
     return written
+
+
+# Issue #8: Stale session timeout
+SESSION_STALE_HOURS = 4
+
+
+def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
+    """
+    Close any ChargingSession that has been open (active or charging) for longer
+    than stale_hours without receiving an out_time.
+
+    This handles cameras going offline, model permanently losing a car, or service
+    crashes that prevent parking_outtime from ever firing — without this, sessions
+    stay open forever and block future cars at the same slot from getting a fresh session.
+
+    Sessions closed here are marked 'incomplete' since there was no clean plug_out/out_time.
+
+    Called periodically by the orchestration pipeline (e.g. every 60 iterations).
+    Returns the number of sessions closed.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+    db = SessionLocal()
+    closed = 0
+    try:
+        stale = (
+            db.query(ChargingSession)
+            .filter(
+                ChargingSession.session_status.in_(("active", "charging")),
+                ChargingSession.created_at <= cutoff,
+            )
+            .all()
+        )
+        for session in stale:
+            session.session_status = "incomplete"
+            closed += 1
+            _persistence_logger.warning(
+                f"[DB] Closed stale session session_id={session.session_id} "
+                f"slot={session.slot_id} camera={session.camera_id} "
+                f"created_at={session.created_at} (stale > {stale_hours}h)"
+            )
+        if closed:
+            db.commit()
+        _persistence_logger.info(f"[DB] Stale session sweep: closed {closed} session(s)")
+    except Exception as e:
+        db.rollback()
+        _persistence_logger.warning(f"[DB] Failed to close stale sessions: {e}")
+    finally:
+        db.close()
+    return closed

@@ -48,7 +48,7 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results
+from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results, close_stale_sessions
 from shared.database.connection import SessionLocal
 
 # Configure logging
@@ -567,6 +567,16 @@ class PipelineManager:
                     logger.info(f"[{camera_id}] DEBUG: Alerts persisted to DB | count={alerts_written}")
                 except Exception as e:
                     logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
+
+                # STEP 3.7: Periodically close stale open sessions (Issue #8)
+                # Every 60 iterations (~1 min at 1fps) sweep for sessions open > 4h.
+                if iteration % 60 == 0:
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, close_stale_sessions
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{camera_id}] Stale session sweep failed (non-critical): {str(e)}")
 
                 # STEP 4: Send dashboard alerts for parking_compliance and safety_monitoring only
                 _DASHBOARD_USECASES = {"parking_compliance", "safety_monitoring"}
