@@ -41,15 +41,29 @@ celery_app.conf.update(
 
     result_expires = 3600, # How long to keep results in Redis (in seconds)
 
-    # One dedicated queue per usecase type — each consumed by a single worker
+    # One dedicated queue per usecase — each consumed by a dedicated worker
     # (concurrency=1). This guarantees that frames for the same usecase are
     # processed in order, preventing the frame-ordering race condition where
     # Frame N+1 reads stale Redis state written by Frame N.
     task_queues = (
+        # Vehicle usecases
         Queue('usecase_queue_parking_detection'),
         Queue('usecase_queue_gun_detection'),
         Queue('usecase_queue_vehicle_extraction'),
         Queue('usecase_queue_parking_compliance'),
+        # Safety usecases
+        Queue('usecase_queue_safety_monitoring'),
+        # Store usecases
+        Queue('usecase_queue_people_counter'),
+        Queue('usecase_queue_heatmap'),
+        Queue('usecase_queue_phone_detection'),
+        Queue('usecase_queue_smoking_detection'),
+        Queue('usecase_queue_mopping_detection'),
+        Queue('usecase_queue_cash_detection'),
+        Queue('usecase_queue_bag_detection'),
+        Queue('usecase_queue_dress_code'),
+        Queue('usecase_queue_restricted_area'),
+        Queue('usecase_queue_staff_detector'),
     ),
 
     worker_prefetch_multiplier = 1, # How many tasks a worker prefetches before processing, 1 means a worker only takes ONE task at a time, processes it fully,then takes the next.
