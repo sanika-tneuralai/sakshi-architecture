@@ -29,14 +29,19 @@ services:
       timeout: 5s
       retries: 5
     
-  worker:
+  # One worker per usecase queue, concurrency=1 each.
+  # This guarantees frames are processed in submission order per usecase,
+  # preventing the stale Redis state race condition (Issue #6).
+  # All 4 workers run in parallel — cross-usecase parallelism is preserved.
+
+  worker-parking-detection:
     build: .
     command: >
       celery -A workers.celery_app worker
       --loglevel=info
-      --concurrency=4
-      --queues=usecase_queue
-      --hostname=worker@%h
+      --concurrency=1
+      --queues=usecase_queue_parking_detection
+      --hostname=worker-parking-detection@%h
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
@@ -52,7 +57,78 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    #scale with: docker compose up --scale worker=4
+
+  worker-gun-detection:
+    build: .
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info
+      --concurrency=1
+      --queues=usecase_queue_gun_detection
+      --hostname=worker-gun-detection@%h
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-vehicle-extraction:
+    build: .
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info
+      --concurrency=1
+      --queues=usecase_queue_vehicle_extraction
+      --hostname=worker-vehicle-extraction@%h
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-parking-compliance:
+    build: .
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info
+      --concurrency=1
+      --queues=usecase_queue_parking_compliance
+      --hostname=worker-parking-compliance@%h
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   flower:
     build: .
@@ -65,7 +141,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      worker:
+      worker-parking-detection:
         condition: service_started
 
   usecase:
