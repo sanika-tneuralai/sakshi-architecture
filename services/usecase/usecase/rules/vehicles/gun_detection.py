@@ -176,6 +176,7 @@ class GunDetectionRule(BaseUsecaseRule):
                         metadata={
                             "gun_name":     gun_name,
                             "roi":          roi_name,
+                            "slot_id":      roi_name,
                             "car_track":    track_id,
                             "car_identity": identity,
                             "bbox":         cs["gun_bbox"],
@@ -202,6 +203,7 @@ class GunDetectionRule(BaseUsecaseRule):
                             metadata={
                                 "gun_name":     cs["gun_name"] or gun_name,
                                 "roi":          roi_name,
+                                "slot_id":      roi_name,
                                 "car_track":    track_id,
                                 "car_identity": identity,
                                 "plugin_time":  cs["plugin_time"],

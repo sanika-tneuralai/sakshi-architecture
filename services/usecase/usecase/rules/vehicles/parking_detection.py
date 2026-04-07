@@ -115,7 +115,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         camera_id=camera_id,
                         timestamp=_now(),
                         track_id=",".join(occupant_ids),
-                        metadata={"roi": roi_name, "count": len(occupant_ids)},
+                        metadata={"roi": roi_name, "slot_id": roi_name, "count": len(occupant_ids)},
                     )
                     events.append(evt)
                     publish_sync("violation_events", evt)
@@ -135,7 +135,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             camera_id=camera_id,
                             timestamp=intime,
                             track_id=tid,
-                            metadata={"roi": roi_name},
+                            metadata={"roi": roi_name, "slot_id": roi_name},
                         )
                         events.append(evt)
                         publish_sync("parking_events", evt)
@@ -163,6 +163,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         track_id=tid,
                         metadata={
                             "roi": roi_name,
+                            "slot_id": roi_name,
                             "intime": intime,
                             "outtime": outtime,
                         },
