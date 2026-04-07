@@ -108,6 +108,7 @@ class Alert(Base):
 
     alert_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
+    slot_id = Column(String(100), nullable=True, index=True)
     usecase_name = Column(String(100), nullable=False)
     alert_type = Column(String(100), nullable=False)
     message = Column(String(500), nullable=True)
@@ -238,6 +239,7 @@ class ChargingSession(Base):
 
     session_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
+    slot_id = Column(String(100), nullable=True, index=True)
     track_id = Column(String(50), nullable=True, index=True)
     gun_number = Column(String(100), nullable=True)
     car_number = Column(String(100), nullable=True)

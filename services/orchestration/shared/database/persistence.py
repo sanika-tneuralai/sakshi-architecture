@@ -164,16 +164,17 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     Find or create an active ChargingSession for camera_id and update it with
     data extracted from the current pipeline iteration's usecase results.
 
-    Events are sourced from three usecases:
-      - parking_detection : provides in_time / out_time via extras, grouped by track_id
-      - gun_detection      : provides gun_number, plug_time, plug_out_time via extras
-      - vehicle_extraction : provides car_number, car_model via extras
+    Session identity is (camera_id, slot_id) where slot_id = ROI name.
+    This is a physical, stable identifier that never resets, unlike track_id
+    which changes on tracker reset or Redis TTL expiry.
 
-    Session lookup priority:
-      1. Match on camera_id + track_id (stable per-car identity)
-      2. Match on camera_id + gun_number (when gun_detection fired)
-      3. Match on camera_id + car_number (when vehicle_extraction fired)
-      4. Most-recent open session for camera_id (only when no track_id)
+    Events are sourced from three usecases:
+      - parking_detection : provides in_time / out_time, grouped by slot_id
+      - gun_detection      : provides gun_number, plug_time, plug_out_time, grouped by slot_id
+      - vehicle_extraction : provides car_number, car_model per track_id (enrichment only)
+
+    Session lookup: (camera_id, slot_id) on open sessions — single stable key.
+    car_number and car_model are enrichment fields, never used for session lookup.
 
     Session status transitions:
       - 'active'     : in_time set, no plug_time yet
@@ -183,6 +184,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
 
     A session is considered "open" when session_status is 'active' or 'charging'.
     Once out_time is written the status is finalised and the session is closed.
+    A subsequent car arriving at the same slot creates a new session row.
     """
     def _parse_dt(value) -> datetime | None:
         if value is None:
@@ -195,15 +197,14 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             return None
 
     # ------------------------------------------------------------------ #
-    # 1. Extract events from usecase results                               #
+    # 1. Extract events from usecase results, grouped by slot_id           #
     # ------------------------------------------------------------------ #
-    # parking events grouped by track_id: {track_id: {"in_time": ts, "out_time": ts}}
-    parking_events_by_track: dict = {}
-    plug_time_raw = None
-    plug_out_time_raw = None
-    gun_number = None
-    car_number = None
-    car_model = None
+    # {slot_id: {"in_time": ts, "out_time": ts, "track_id": str}}
+    parking_by_slot: dict = {}
+    # {slot_id: {"plug_time": ts, "plug_out_time": ts, "gun_number": str, "track_id": str}}
+    gun_by_slot: dict = {}
+    # {track_id: {"car_number": str, "car_model": str}} — enrichment only, never identity
+    vehicle_by_track: dict = {}
 
     for result in usecase_results:
         usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
@@ -218,152 +219,134 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
-                tid = evt.get("track_id", "unknown")
-                if etype not in ("parking_intime", "parking_outtime"):
+                meta = evt.get("metadata", {})
+                slot_id = meta.get("slot_id") or meta.get("roi")
+                tid = evt.get("track_id")
+                if etype not in ("parking_intime", "parking_outtime") or not slot_id:
                     continue
-                if tid not in parking_events_by_track:
-                    parking_events_by_track[tid] = {"in_time": None, "out_time": None}
-                if etype == "parking_intime" and parking_events_by_track[tid]["in_time"] is None:
-                    parking_events_by_track[tid]["in_time"] = ts
-                elif etype == "parking_outtime" and parking_events_by_track[tid]["out_time"] is None:
-                    parking_events_by_track[tid]["out_time"] = ts
+                if slot_id not in parking_by_slot:
+                    parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None}
+                if etype == "parking_intime" and parking_by_slot[slot_id]["in_time"] is None:
+                    parking_by_slot[slot_id]["in_time"] = ts
+                    parking_by_slot[slot_id]["track_id"] = parking_by_slot[slot_id]["track_id"] or tid
+                elif etype == "parking_outtime" and parking_by_slot[slot_id]["out_time"] is None:
+                    parking_by_slot[slot_id]["out_time"] = ts
+                    parking_by_slot[slot_id]["track_id"] = parking_by_slot[slot_id]["track_id"] or tid
 
         elif usecase_id == "gun_detection":
             for evt in extras.get("events", result.get("events", [])):
                 etype = evt.get("event_type")
                 ts = evt.get("timestamp")
                 meta = evt.get("metadata", {})
-                if etype == "gun_plugin" and plug_time_raw is None:
-                    plug_time_raw = ts
-                    gun_number = gun_number or meta.get("gun_name")
-                elif etype == "gun_plugout" and plug_out_time_raw is None:
-                    plug_out_time_raw = ts
-                    gun_number = gun_number or meta.get("gun_name")
+                slot_id = meta.get("slot_id") or meta.get("roi")
+                tid = evt.get("track_id")
+                if not slot_id:
+                    continue
+                if slot_id not in gun_by_slot:
+                    gun_by_slot[slot_id] = {"plug_time": None, "plug_out_time": None, "gun_number": None, "track_id": None}
+                if etype == "gun_plugin" and gun_by_slot[slot_id]["plug_time"] is None:
+                    gun_by_slot[slot_id]["plug_time"] = ts
+                    gun_by_slot[slot_id]["gun_number"] = gun_by_slot[slot_id]["gun_number"] or meta.get("gun_name")
+                    gun_by_slot[slot_id]["track_id"] = gun_by_slot[slot_id]["track_id"] or tid
+                elif etype == "gun_plugout" and gun_by_slot[slot_id]["plug_out_time"] is None:
+                    gun_by_slot[slot_id]["plug_out_time"] = ts
+                    gun_by_slot[slot_id]["gun_number"] = gun_by_slot[slot_id]["gun_number"] or meta.get("gun_name")
+                    gun_by_slot[slot_id]["track_id"] = gun_by_slot[slot_id]["track_id"] or tid
 
         elif usecase_id == "vehicle_extraction":
-            details = extras.get("vehicle_details", result.get("vehicle_details", []))
-            if details:
-                readable = next(
-                    (d for d in details if d.get("car_number") not in (None, "unreadable")),
-                    None,
-                )
-                if readable:
-                    car_number = car_number or readable.get("car_number")
-                    car_model = car_model or readable.get("car_model")
-                elif not car_model:
-                    first = details[0]
-                    if first.get("car_model") not in (None, "unknown"):
-                        car_model = first.get("car_model")
-
-    plug_time = _parse_dt(plug_time_raw)
-    plug_out_time = _parse_dt(plug_out_time_raw)
+            for d in extras.get("vehicle_details", result.get("vehicle_details", [])):
+                tid = d.get("track_id")
+                if not tid:
+                    continue
+                vehicle_by_track[tid] = {
+                    "car_number": d.get("car_number"),
+                    "car_model": d.get("car_model"),
+                }
 
     # ------------------------------------------------------------------ #
-    # 2. Upsert one session per tracked car                                #
-    # If no parking events fired this frame (gun/vehicle data only),       #
-    # fall back to a single upsert with no track_id.                       #
+    # 2. Upsert one session per slot_id seen this frame                    #
     # ------------------------------------------------------------------ #
-    if not parking_events_by_track:
-        parking_events_by_track = {"__no_track__": {"in_time": None, "out_time": None}}
+    all_slots = set(parking_by_slot.keys()) | set(gun_by_slot.keys())
+    if not all_slots:
+        return  # nothing actionable this frame
 
-    for track_id, times in parking_events_by_track.items():
-        in_time = _parse_dt(times["in_time"])
-        out_time = _parse_dt(times["out_time"])
-        effective_track_id = None if track_id == "__no_track__" else track_id
+    for slot_id in all_slots:
+        p = parking_by_slot.get(slot_id, {})
+        g = gun_by_slot.get(slot_id, {})
+
+        in_time = _parse_dt(p.get("in_time"))
+        out_time = _parse_dt(p.get("out_time"))
+        plug_time = _parse_dt(g.get("plug_time"))
+        plug_out_time = _parse_dt(g.get("plug_out_time"))
+        gun_number = g.get("gun_number")
+        track_id = p.get("track_id") or g.get("track_id")
+
+        # Enrich from vehicle_extraction using the track_id seen in this slot
+        car_number = None
+        car_model = None
+        if track_id and track_id in vehicle_by_track:
+            vd = vehicle_by_track[track_id]
+            cn = vd.get("car_number")
+            cm = vd.get("car_model")
+            if cn not in (None, "unreadable", "unknown"):
+                car_number = cn
+            if cm not in (None, "unknown"):
+                car_model = cm
 
         _persistence_logger.info(
-            f"[DB][{camera_id}] upsert track={effective_track_id} "
-            f"in_time={times['in_time']} out_time={times['out_time']} "
-            f"plug_time={plug_time_raw} plug_out_time={plug_out_time_raw} "
+            f"[DB][{camera_id}] upsert slot={slot_id} track={track_id} "
+            f"in_time={p.get('in_time')} out_time={p.get('out_time')} "
+            f"plug_time={g.get('plug_time')} plug_out_time={g.get('plug_out_time')} "
             f"gun={gun_number} car={car_number}"
         )
 
         if not any([in_time, out_time, plug_time, plug_out_time, gun_number, car_number, car_model]):
             _persistence_logger.info(
-                f"[DB][{camera_id}] Nothing actionable for track={effective_track_id} — skipping"
+                f"[DB][{camera_id}] Nothing actionable for slot={slot_id} — skipping"
             )
             continue
 
         db = SessionLocal()
         try:
             open_statuses = ("active", "charging")
-            session: ChargingSession | None = None
 
-            # Priority 1: match by track_id
-            if effective_track_id:
-                session = (
-                    db.query(ChargingSession)
-                    .filter(
-                        ChargingSession.camera_id == camera_id,
-                        ChargingSession.track_id == effective_track_id,
-                        ChargingSession.session_status.in_(open_statuses),
-                    )
-                    .order_by(ChargingSession.session_id.desc())
-                    .first()
+            # Primary lookup: (camera_id, slot_id) on open sessions only
+            session: ChargingSession | None = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.slot_id == slot_id,
+                    ChargingSession.session_status.in_(open_statuses),
                 )
+                .order_by(ChargingSession.session_id.desc())
+                .first()
+            )
 
-            # Priority 2: match by gun_number
-            if session is None and gun_number:
-                session = (
-                    db.query(ChargingSession)
-                    .filter(
-                        ChargingSession.camera_id == camera_id,
-                        ChargingSession.gun_number == gun_number,
-                        ChargingSession.session_status.in_(open_statuses),
-                    )
-                    .order_by(ChargingSession.session_id.desc())
-                    .first()
-                )
-
-            # Priority 3: match by car_number
-            if session is None and car_number:
-                session = (
-                    db.query(ChargingSession)
-                    .filter(
-                        ChargingSession.camera_id == camera_id,
-                        ChargingSession.car_number == car_number,
-                        ChargingSession.session_status.in_(open_statuses),
-                    )
-                    .order_by(ChargingSession.session_id.desc())
-                    .first()
-                )
-
-            # Priority 4: most-recent open session (only when no track_id to avoid cross-car collision)
-            if session is None and effective_track_id is None:
-                session = (
-                    db.query(ChargingSession)
-                    .filter(
-                        ChargingSession.camera_id == camera_id,
-                        ChargingSession.session_status.in_(open_statuses),
-                    )
-                    .order_by(ChargingSession.session_id.desc())
-                    .first()
-                )
-
-            # Create a new session only when in_time is present.
+            # Create a new session only when in_time is present
             if session is None:
                 if in_time is None:
                     _persistence_logger.debug(
-                        f"[DB] Skipping new session for camera {camera_id} track={effective_track_id} — no in_time yet"
+                        f"[DB] Skipping new session for camera {camera_id} slot={slot_id} — no in_time yet"
                     )
                     continue
                 session = ChargingSession(
                     camera_id=camera_id,
-                    track_id=effective_track_id,
+                    slot_id=slot_id,
+                    track_id=track_id,
                     session_status="active",
                 )
                 db.add(session)
                 db.flush()
                 _persistence_logger.info(
                     f"[DB] Created new ChargingSession session_id={session.session_id} "
-                    f"track={effective_track_id} for camera {camera_id}"
+                    f"slot={slot_id} track={track_id} for camera {camera_id}"
                 )
 
             # ------------------------------------------------------------ #
             # 3. Apply updates                                               #
             # ------------------------------------------------------------ #
-            if effective_track_id and session.track_id is None:
-                session.track_id = effective_track_id
+            if track_id and session.track_id is None:
+                session.track_id = track_id
             if gun_number and session.gun_number is None:
                 session.gun_number = gun_number
             if car_number and session.car_number is None:
@@ -391,16 +374,16 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
 
             db.commit()
             _persistence_logger.info(
-                f"[DB] ChargingSession session_id={session.session_id} track={session.track_id} "
-                f"status={session.session_status} | in_time={session.in_time} "
-                f"plug_time={session.plug_time} out_time={session.out_time} "
+                f"[DB] ChargingSession session_id={session.session_id} slot={session.slot_id} "
+                f"track={session.track_id} status={session.session_status} | "
+                f"in_time={session.in_time} plug_time={session.plug_time} out_time={session.out_time} "
                 f"car={session.car_number} gun={session.gun_number} camera={camera_id}"
             )
 
         except Exception as e:
             db.rollback()
             _persistence_logger.warning(
-                f"[DB] Failed to upsert ChargingSession for camera {camera_id} track={effective_track_id}: {e}"
+                f"[DB] Failed to upsert ChargingSession for camera {camera_id} slot={slot_id}: {e}"
             )
             raise
         finally:
@@ -418,6 +401,12 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
     Called by the orchestration pipeline after every usecase evaluation so the
     dashboard can display alerts for parking_detection, gun_detection,
     parking_compliance, safety_monitoring, and any other triggered rule.
+
+    Deduplication for event-driven usecases (parking_detection, gun_detection):
+      - One alert per (camera_id, slot_id, usecase_name) per event type.
+      - parking_intime and parking_outtime each produce at most one alert per slot.
+      - gun_plugin and gun_plugout each produce at most one alert per slot.
+      - Checks the DB before inserting — skips if an identical alert already exists.
 
     Special handling for parking_detection:
       - parking_intime / parking_outtime events → persisted as parking_detection alerts
@@ -460,19 +449,41 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 session_events = [e for e in events if e.get("event_type") in ("parking_intime", "parking_outtime")]
                 violation_events = [e for e in events if e.get("event_type") == "multiple_cars_in_roi"]
 
-                # Persist session events as parking_detection alert
-                if session_events:
+                # One alert per (camera_id, slot_id, event_type)
+                for evt in session_events:
+                    slot_id = evt.get("metadata", {}).get("slot_id") or evt.get("metadata", {}).get("roi")
+                    event_type = evt.get("event_type", "")
+                    alert_type = f"parking_{event_type}"
+
+                    # Deduplicate: skip if this slot already has this alert type
+                    if slot_id:
+                        exists = (
+                            db.query(Alert.alert_id)
+                            .filter(
+                                Alert.camera_id == camera_id,
+                                Alert.slot_id == slot_id,
+                                Alert.usecase_name == "parking_detection",
+                                Alert.alert_type == alert_type,
+                            )
+                            .first()
+                        )
+                        if exists:
+                            _persistence_logger.debug(
+                                f"[DB][{camera_id}] Skipping duplicate alert slot={slot_id} type={alert_type}"
+                            )
+                            continue
+
                     matched_count = result.get("matched_count", 0)
-                    event_types = list({e.get("event_type", "") for e in session_events})
-                    message = f"[parking_detection] {matched_count} object(s) detected | events: {', '.join(event_types)}"
+                    message = f"[parking_detection] {matched_count} object(s) detected | event: {event_type}"
                     alert = Alert(
                         camera_id=camera_id,
+                        slot_id=slot_id,
                         usecase_name="parking_detection",
-                        alert_type="parking_detection_triggered",
+                        alert_type=alert_type,
                         message=message,
                         status="sent",
                         snapshot_url=snapshot_url,
-                        extras={"events": session_events},
+                        extras={"events": [evt]},
                     )
                     db.add(alert)
                     written += 1
@@ -480,17 +491,60 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                 # Persist each multiple_cars_in_roi as a parking_compliance violation
                 for evt in violation_events:
                     meta = evt.get("metadata", {})
+                    slot_id = meta.get("slot_id") or meta.get("roi")
                     roi = meta.get("roi", "unknown")
                     count = meta.get("count", 2)
                     message = f"[parking_compliance] {count} cars detected in {roi}"
                     alert = Alert(
                         camera_id=camera_id,
+                        slot_id=slot_id,
                         usecase_name="parking_compliance",
                         alert_type="multiple_cars_in_roi",
                         message=message,
                         status="sent",
                         snapshot_url=snapshot_url,
                         extras={"violations": [evt]},
+                    )
+                    db.add(alert)
+                    written += 1
+
+                continue  # handled above — skip the generic path below
+
+            # ── gun_detection: one alert per (slot_id, event_type) ────────────
+            if usecase_id == "gun_detection":
+                for evt in extras.get("events", []):
+                    slot_id = evt.get("metadata", {}).get("slot_id") or evt.get("metadata", {}).get("roi")
+                    event_type = evt.get("event_type", "")
+                    alert_type = event_type  # gun_plugin / gun_plugout
+
+                    if slot_id:
+                        exists = (
+                            db.query(Alert.alert_id)
+                            .filter(
+                                Alert.camera_id == camera_id,
+                                Alert.slot_id == slot_id,
+                                Alert.usecase_name == "gun_detection",
+                                Alert.alert_type == alert_type,
+                            )
+                            .first()
+                        )
+                        if exists:
+                            _persistence_logger.debug(
+                                f"[DB][{camera_id}] Skipping duplicate alert slot={slot_id} type={alert_type}"
+                            )
+                            continue
+
+                    meta = evt.get("metadata", {})
+                    message = f"[gun_detection] {event_type} | gun={meta.get('gun_name')} slot={slot_id}"
+                    alert = Alert(
+                        camera_id=camera_id,
+                        slot_id=slot_id,
+                        usecase_name="gun_detection",
+                        alert_type=alert_type,
+                        message=message,
+                        status="sent",
+                        snapshot_url=snapshot_url,
+                        extras={"events": [evt]},
                     )
                     db.add(alert)
                     written += 1
@@ -509,6 +563,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
 
             alert = Alert(
                 camera_id=camera_id,
+                slot_id=None,
                 usecase_name=usecase_id,
                 alert_type=f"{usecase_id}_triggered",
                 message=message,
