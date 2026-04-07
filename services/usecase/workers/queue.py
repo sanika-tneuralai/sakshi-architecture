@@ -51,13 +51,18 @@ def submit_usecase_tasks(
     slim_payload = build_slim_payload(detection_output)
     task_handles: Dict[str, AsyncResult] = {}
     for usecase_id in usecases:
-        #.delay() is shorthand for .apply_async()
-        # It serializes the args to JSON, publishes to rabbitmq,returns immediately
-        # The actual work happens in a worker process, not here
-        handle = evaluate_usecase_task.delay(
-            usecase_id=usecase_id,
-            slim_payload=slim_payload,
-            camera_id=camera_id,
+        # Route to a dedicated per-usecase queue so each usecase's frames are
+        # processed in order by a single worker (concurrency=1 per queue).
+        # This prevents the frame N+1 / stale Redis state race condition where
+        # a faster worker picks up Frame N+1 before Frame N finishes writing state.
+        queue_name = f"usecase_queue_{usecase_id}"
+        handle = evaluate_usecase_task.apply_async(
+            kwargs={
+                "usecase_id": usecase_id,
+                "slim_payload": slim_payload,
+                "camera_id": camera_id,
+            },
+            queue=queue_name,
         )
         task_handles[usecase_id] = handle
         logger.debug(

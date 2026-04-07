@@ -8,6 +8,7 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 from celery import Celery
+from kombu import Queue
 
 
 # Broker is RabbitMQ
@@ -40,9 +41,16 @@ celery_app.conf.update(
 
     result_expires = 3600, # How long to keep results in Redis (in seconds)
 
-    task_routes = {
-        'workers.tasks.evaluate_usecase_task': {'queue': 'usecase_queue'},
-    }, # Route specific tasks to specific queues (optional, but good for scaling and organization)
+    # One dedicated queue per usecase type — each consumed by a single worker
+    # (concurrency=1). This guarantees that frames for the same usecase are
+    # processed in order, preventing the frame-ordering race condition where
+    # Frame N+1 reads stale Redis state written by Frame N.
+    task_queues = (
+        Queue('usecase_queue_parking_detection'),
+        Queue('usecase_queue_gun_detection'),
+        Queue('usecase_queue_vehicle_extraction'),
+        Queue('usecase_queue_parking_compliance'),
+    ),
 
     worker_prefetch_multiplier = 1, # How many tasks a worker prefetches before processing, 1 means a worker only takes ONE task at a time, processes it fully,then takes the next.
 

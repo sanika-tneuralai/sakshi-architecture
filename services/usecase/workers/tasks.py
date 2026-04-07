@@ -8,9 +8,8 @@ from usecase.schemas import UsecaseResult
 logger = logging.getLogger(__name__)
 
 @celery_app.task(name="workers.tasks.evaluate_usecase_task",
-                 max_retries=3, #max retries =3
-                 default_retry_delay=2, #wait 2 seconds after first retry
-                 queue="usecase_queue", #which queue to publish to(defined in celery_app.py)
+                 max_retries=3,
+                 default_retry_delay=2,
                  soft_time_limit=60,
                  time_limit=90,
                  )
