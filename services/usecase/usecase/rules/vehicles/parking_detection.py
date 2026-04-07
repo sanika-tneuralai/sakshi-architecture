@@ -67,6 +67,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
         camera_id = detection_output.get("camera_id", "unknown")
+        task_id = detection_output.get("_task_id")  # injected by Celery task for idempotency
         rois = detection_output.get("rois")
         if not rois:
             logger.error("[PARKING] 'rois' missing from payload for camera '%s'", camera_id)
@@ -118,7 +119,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         metadata={"roi": roi_name, "slot_id": roi_name, "count": len(occupant_ids)},
                     )
                     events.append(evt)
-                    publish_sync("violation_events", evt)
+                    publish_sync("violation_events", evt, task_id=task_id)
 
                 # Process every car in this ROI independently
                 for tid in occupant_ids:
@@ -138,7 +139,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             metadata={"roi": roi_name, "slot_id": roi_name},
                         )
                         events.append(evt)
-                        publish_sync("parking_events", evt)
+                        publish_sync("parking_events", evt, task_id=task_id)
                         logger.info(
                             "[PARKING] Intime confirmed: camera=%s roi=%s track=%s",
                             camera_id, roi_name, tid,

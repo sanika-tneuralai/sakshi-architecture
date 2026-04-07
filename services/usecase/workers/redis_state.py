@@ -65,12 +65,16 @@ def get_state(key: str) -> dict:
         return {}
 
 
-def set_state(key: str, value: dict, ttl_seconds: int = 3600) -> None:
+def set_state(key: str, value: dict, ttl_seconds: int = 43200) -> None:
     """
     Persist *value* as JSON under *key* with an expiry of *ttl_seconds*.
 
-    The default TTL of 1 hour ensures that state for offline cameras is
-    automatically evicted from Redis without manual cleanup.
+    Default TTL is 12 hours (43200 s). This covers EV charging sessions that
+    run through a full working shift. The previous 1-hour default caused
+    tracker state to expire mid-session, resetting track_ids and creating
+    duplicate sessions for cars still physically parked.
+
+    State for offline cameras is still evicted automatically after 12 hours.
 
     Silently skips (logs a warning) on any Redis or serialization error.
     """

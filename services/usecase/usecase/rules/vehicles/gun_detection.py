@@ -89,6 +89,7 @@ class GunDetectionRule(BaseUsecaseRule):
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
         camera_id = detection_output.get("camera_id", "unknown")
+        task_id   = detection_output.get("_task_id")  # injected by Celery task for idempotency
         rois      = detection_output.get("rois", {})
         all_dets  = detection_output.get("detections", [])
 
@@ -184,7 +185,7 @@ class GunDetectionRule(BaseUsecaseRule):
                         },
                     )
                     events.append(evt)
-                    publish_sync("gun_events", evt)
+                    publish_sync("gun_events", evt, task_id=task_id)
                     logger.info("[GUN] Plugin: camera=%s roi=%s car=%s gun=%s", camera_id, roi_name, identity, gun_name)
 
             else:
@@ -211,7 +212,7 @@ class GunDetectionRule(BaseUsecaseRule):
                             },
                         )
                         events.append(evt)
-                        publish_sync("gun_events", evt)
+                        publish_sync("gun_events", evt, task_id=task_id)
                         logger.info("[GUN] Plugout: camera=%s roi=%s car=%s gun=%s", camera_id, roi_name, identity, gun_name)
                         slots[k] = _init_slot()  # re-arm for next cycle
 
