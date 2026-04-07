@@ -124,7 +124,27 @@ def evaluate_all_usecases(
             try:
                 result = evaluate_single_usecase(usecase_id=usecase_id, slim_payload=slim, camera_id=camera_id)
                 results.append(result)
+                _persist_result_direct(camera_id, result)
             except Exception as e:
                 logger.error(f"[ENGINE] Failed to evaluate usecase '{usecase_id}' for camera '{camera_id}' with error: {e}")
                 continue
         return results
+
+
+def _persist_result_direct(camera_id: str, result: "UsecaseResult") -> None:
+    """Persist result to DB in direct (non-queue) mode. Mirrors tasks._persist_result."""
+    try:
+        from shared.database.connection import SessionLocal
+        if SessionLocal is None:
+            logger.debug(f"[ENGINE] DATABASE_URL not configured — skipping DB persistence for {camera_id}/{result.usecase_id}")
+            return
+        from shared.database.persistence import persist_usecase_result
+        persist_usecase_result(
+            camera_id=camera_id,
+            usecase_name=result.usecase_id,
+            triggered=result.triggered,
+            detection_id=result.detection_id,
+        )
+        logger.debug(f"[ENGINE] persisted result for {camera_id}/{result.usecase_id}")
+    except Exception as e:
+        logger.error(f"[ENGINE] DB persist failed for {camera_id}/{result.usecase_id}: {e}")

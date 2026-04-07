@@ -32,6 +32,7 @@ import boto3
 import cv2
 import numpy as np
 
+from shared.common.roi import which_rois
 from usecase.rules.base import BaseUsecaseRule
 from workers.redis_state import get_state, set_state
 
@@ -162,6 +163,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
         camera_id = detection_output.get("camera_id", "unknown")
+        rois = detection_output.get("rois") or {}
         cars = [
             d for d in detection_output.get("detections", [])
             if d.get("class_name") == "car"
@@ -214,8 +216,14 @@ class VehicleExtractionRule(BaseUsecaseRule):
                     key, car_number, car_model,
                 )
 
+            # Resolve which slot this car is in so the orchestrator can match
+            # vehicle details to a ChargingSession by slot_id instead of track_id.
+            matched_rois = which_rois(bbox, rois) if rois else []
+            slot_id = matched_rois[0] if matched_rois else None
+
             vehicle_details.append({
                 "track_id": car.get("track_id") or key,
+                "slot_id": slot_id,
                 "car_number": car_number,
                 "car_model": car_model,
                 "confidence": car.get("confidence", 0.0),
