@@ -203,7 +203,9 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     parking_by_slot: dict = {}
     # {slot_id: {"plug_time": ts, "plug_out_time": ts, "gun_number": str, "track_id": str}}
     gun_by_slot: dict = {}
-    # {track_id: {"car_number": str, "car_model": str}} — enrichment only, never identity
+    # {slot_id: {"car_number": str, "car_model": str}} — primary enrichment key (from vehicle_extraction slot_id)
+    vehicle_by_slot: dict = {}
+    # {track_id: {"car_number": str, "car_model": str}} — fallback enrichment key
     vehicle_by_track: dict = {}
 
     for result in usecase_results:
@@ -256,12 +258,19 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         elif usecase_id == "vehicle_extraction":
             for d in extras.get("vehicle_details", result.get("vehicle_details", [])):
                 tid = d.get("track_id")
-                if not tid:
-                    continue
-                vehicle_by_track[tid] = {
+                sid = d.get("slot_id")
+                entry = {
                     "car_number": d.get("car_number"),
                     "car_model": d.get("car_model"),
                 }
+                # Index by slot_id (primary) and track_id (fallback) so the
+                # upsert loop can always find enrichment data regardless of
+                # whether the trackers in parking_detection and vehicle_extraction
+                # assigned the same track_id to the car.
+                if sid:
+                    vehicle_by_slot[sid] = entry
+                if tid:
+                    vehicle_by_track[tid] = entry
 
     # ------------------------------------------------------------------ #
     # 2. Upsert one session per slot_id seen this frame                    #
@@ -281,11 +290,12 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         gun_number = g.get("gun_number")
         track_id = p.get("track_id") or g.get("track_id")
 
-        # Enrich from vehicle_extraction using the track_id seen in this slot
+        # Enrich from vehicle_extraction: slot_id match is reliable (same spatial key);
+        # track_id is a fallback for when vehicle_extraction predates the slot_id field.
         car_number = None
         car_model = None
-        if track_id and track_id in vehicle_by_track:
-            vd = vehicle_by_track[track_id]
+        vd = vehicle_by_slot.get(slot_id) or (vehicle_by_track.get(track_id) if track_id else None)
+        if vd:
             cn = vd.get("car_number")
             cm = vd.get("car_model")
             if cn not in (None, "unreadable", "unknown"):
