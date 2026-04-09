@@ -193,24 +193,29 @@ class HailoDetector(BaseDetector):
         orig_h, orig_w = original_shape[:2]
 
         key = "goec_v2/yolov8_nms_postprocess"
-        # Shape: (1, num_classes, 5, max_proposals) — remove batch dim
-        data = raw_output[key][0]  # (num_classes, 5, max_proposals)
+        # Hailo NMS output: list of per-class detection arrays
+        # raw_output[key] is a list (batch), [0] gives one list per class
+        # Each class entry is an ndarray of shape (N, 5): [y1, x1, y2, x2, score]
+        data = raw_output[key][0]  # list of length num_classes
 
         detections: List[Detection] = []
 
-        for cls_id in range(data.shape[0]):
+        for cls_id, cls_dets in enumerate(data):
             if classes is not None and cls_id not in classes:
                 continue
 
-            cls_dets = data[cls_id]  # (5, max_proposals)
+            if cls_dets is None or len(cls_dets) == 0:
+                continue
 
-            for i in range(cls_dets.shape[1]):
-                y1_n, x1_n, y2_n, x2_n, score = cls_dets[:, i]
+            import numpy as np
+            cls_dets = np.array(cls_dets)  # ensure ndarray (N, 5)
+
+            for det in cls_dets:
+                y1_n, x1_n, y2_n, x2_n, score = det
                 score = float(score)
 
                 if score < confidence_threshold:
                     continue
-                # Skip zero-padded empty slots
                 if y1_n == 0.0 and x1_n == 0.0 and y2_n == 0.0 and x2_n == 0.0:
                     continue
 
