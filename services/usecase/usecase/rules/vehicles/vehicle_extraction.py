@@ -244,15 +244,20 @@ class VehicleExtractionRule(BaseUsecaseRule):
                         car_model = extracted["car_model"]
                         logger.info("[VEHICLE] Gemini extraction result: plate=%s model=%s", car_number, car_model)
 
-                cache[key] = {
-                    "car_number": car_number,
-                    "car_model": car_model,
-                    "absent_frames": 0,
-                }
-                logger.info(
-                    "[VEHICLE] New car extracted: key=%s plate=%s model=%s",
-                    key, car_number, car_model,
-                )
+                # Only cache if Gemini succeeded — skip caching on failure so we retry next frame
+                gemini_failed = (car_number == "unreadable" and car_model == "unknown")
+                if not gemini_failed:
+                    cache[key] = {
+                        "car_number": car_number,
+                        "car_model": car_model,
+                        "absent_frames": 0,
+                    }
+                    logger.info(
+                        "[VEHICLE] New car extracted and cached: key=%s plate=%s model=%s",
+                        key, car_number, car_model,
+                    )
+                else:
+                    logger.warning("[VEHICLE] Gemini returned unreadable/unknown — skipping cache, will retry next frame")
 
             # Resolve which slot this car is in so the orchestrator can match
             # vehicle details to a ChargingSession by slot_id instead of track_id.
