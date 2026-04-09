@@ -74,6 +74,12 @@ def _download_image(snapshot_url: str):
         host = snapshot_url.split("//")[1].split(".s3.")[0]
         bucket = host
 
+        logger.info("[VEHICLE] Downloading S3 image: bucket=%s key=%s", bucket, key)
+        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+        logger.info("[VEHICLE] AWS credentials present: access_key=%s secret=%s",
+                    "yes" if aws_key else "NO",
+                    "yes" if os.getenv("AWS_SECRET_ACCESS_KEY") else "NO")
+
         s3 = boto3.client(
             "s3",
             region_name=os.getenv("AWS_REGION", "ap-south-1"),
@@ -82,8 +88,14 @@ def _download_image(snapshot_url: str):
         )
         response = s3.get_object(Bucket=bucket, Key=key)
         data = response["Body"].read()
+        logger.info("[VEHICLE] S3 download OK: %d bytes", len(data))
         arr = np.frombuffer(data, dtype=np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            logger.error("[VEHICLE] cv2.imdecode returned None — image data may be corrupt")
+        else:
+            logger.info("[VEHICLE] Image decoded: shape=%s", img.shape)
+        return img
     except Exception as exc:
         logger.error("[VEHICLE] Failed to download snapshot from %s: %s", snapshot_url, exc)
         return None
@@ -114,12 +126,16 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
 
+    logger.info("[VEHICLE] Gemini API key present (len=%d), model=%s", len(GEMINI_API_KEY), GEMINI_MODEL)
+    logger.info("[VEHICLE] Crop shape before Gemini call: %s", crop.shape)
+
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=GEMINI_API_KEY)
         image_b64 = _crop_to_b64(crop)
+        logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
 
         prompt = (
             "You are a vehicle recognition assistant. "
@@ -131,6 +147,7 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
             "Return only valid JSON, no explanation."
         )
 
+        logger.info("[VEHICLE] Sending request to Gemini...")
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
@@ -139,6 +156,7 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
             ],
         )
         text = response.text.strip()
+        logger.info("[VEHICLE] Gemini raw response: %s", text)
 
         # Strip markdown code fences if Gemini wraps the JSON
         if text.startswith("```"):
@@ -146,15 +164,17 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
             if text.startswith("json"):
                 text = text[4:]
             text = text.strip()
+            logger.info("[VEHICLE] Gemini response after stripping fences: %s", text)
 
         result = json.loads(text)
+        logger.info("[VEHICLE] Gemini parsed result: %s", result)
         return {
             "car_number": str(result.get("car_number", "unreadable")),
             "car_model": str(result.get("car_model", "unknown")),
         }
 
     except Exception as exc:
-        logger.warning("[VEHICLE] Gemini extraction failed: %s", exc)
+        logger.warning("[VEHICLE] Gemini extraction failed: %s", exc, exc_info=True)
         return {"car_number": "unreadable", "car_model": "unknown"}
 
 
@@ -171,7 +191,9 @@ class VehicleExtractionRule(BaseUsecaseRule):
 
         snapshot_url = detection_output.get("snapshot_url")
         print(f"[VEHICLE] camera={camera_id} | cars_detected={len(cars)} | snapshot={'yes' if snapshot_url else 'no'}")
+        logger.info("[VEHICLE] snapshot_url=%s", snapshot_url)
         image = _download_image(snapshot_url) if snapshot_url else None
+        logger.info("[VEHICLE] image download result: %s", "OK" if image is not None else "FAILED/None")
         vehicle_details: List[dict] = []
 
         # --- Load state from Redis ---
@@ -198,13 +220,20 @@ class VehicleExtractionRule(BaseUsecaseRule):
             else:
                 # New car — call Gemini once
                 print(f"[VEHICLE] new car detected: key={key} | calling Gemini")
+                logger.info("[VEHICLE] bbox for new car: %s", bbox)
                 car_number, car_model = "unreadable", "unknown"
-                if image is not None:
+                if image is None:
+                    logger.warning("[VEHICLE] Skipping Gemini — image is None (download failed or no snapshot_url)")
+                else:
                     crop = _crop_bbox(image, bbox)
-                    if crop is not None and crop.size > 0:
+                    if crop is None or crop.size == 0:
+                        logger.warning("[VEHICLE] Skipping Gemini — crop is empty for bbox=%s image_shape=%s", bbox, image.shape)
+                    else:
+                        logger.info("[VEHICLE] Crop OK: shape=%s | calling Gemini", crop.shape)
                         extracted = _query_gemini(crop)
                         car_number = extracted["car_number"]
                         car_model = extracted["car_model"]
+                        logger.info("[VEHICLE] Gemini extraction result: plate=%s model=%s", car_number, car_model)
 
                 cache[key] = {
                     "car_number": car_number,
