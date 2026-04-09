@@ -53,8 +53,8 @@ def _car_key(camera_id: str, bbox: dict) -> str:
     """
     raw = (
         f"{camera_id}_"
-        f"{int(bbox.get('x1', 0) // 50)}_"
-        f"{int(bbox.get('y1', 0) // 50)}"
+        f"{int(bbox.get('x1', 0) // 200)}_"
+        f"{int(bbox.get('y1', 0) // 200)}"
     )
     return hashlib.md5(raw.encode()).hexdigest()[:8]
 
@@ -101,12 +101,21 @@ def _download_image(snapshot_url: str):
         return None
 
 
+DETECTION_W = int(os.getenv("DETECTION_WIDTH", "1920"))
+DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
+
+
 def _crop_bbox(image: np.ndarray, bbox: dict):
     h, w = image.shape[:2]
-    x1 = max(0, int(bbox.get("x1", 0)))
-    y1 = max(0, int(bbox.get("y1", 0)))
-    x2 = min(w, int(bbox.get("x2", w)))
-    y2 = min(h, int(bbox.get("y2", h)))
+    # Scale bbox from detection resolution down to the saved image resolution
+    sx = w / DETECTION_W
+    sy = h / DETECTION_H
+    x1 = max(0, int(bbox.get("x1", 0) * sx))
+    y1 = max(0, int(bbox.get("y1", 0) * sy))
+    x2 = min(w, int(bbox.get("x2", w) * sx))
+    y2 = min(h, int(bbox.get("y2", h) * sy))
+    logger.info("[VEHICLE] Scaled bbox: x1=%d y1=%d x2=%d y2=%d (image=%dx%d detection=%dx%d)",
+                x1, y1, x2, y2, w, h, DETECTION_W, DETECTION_H)
     if x2 <= x1 or y2 <= y1:
         return None
     return image[y1:y2, x1:x2]
