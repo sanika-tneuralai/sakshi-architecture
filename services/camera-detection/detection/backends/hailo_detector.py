@@ -239,13 +239,16 @@ class HailoDetector(BaseDetector):
             x2 = cx + ltrb[:, 2] * stride
             y2 = cy + ltrb[:, 3] * stride
 
-            print(f"[HAILO DEBUG] scale stride={stride} | ltrb sample: {ltrb[:3].tolist()} | cls raw sample: {cls[:3].tolist()}")
+            print(f"[HAILO DEBUG] scale stride={stride} | ltrb sample: {ltrb[:3].tolist()} | cls raw sample: {cls[:3].tolist()} | cls max: {cls.max():.4f} | cls min: {cls.min():.4f}")
 
-            # Sigmoid scores
-            cls_scores = 1.0 / (1.0 + np.exp(-cls))       # (N, num_classes)
+            # Sigmoid scores (numerically stable)
+            cls_scores = np.where(cls >= 0,
+                                  1.0 / (1.0 + np.exp(-cls)),
+                                  np.exp(cls) / (1.0 + np.exp(cls)))
             best_cls = cls_scores.argmax(axis=1)            # (N,)
             best_score = cls_scores[np.arange(N), best_cls] # (N,)
 
+            print(f"[HAILO DEBUG] stride={stride} | best_score max={best_score.max():.4f} | above threshold: {(best_score >= confidence_threshold).sum()}")
             # Filter by confidence threshold
             mask = best_score >= confidence_threshold
             if classes is not None:
