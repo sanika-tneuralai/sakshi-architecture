@@ -184,70 +184,134 @@ class HailoDetector(BaseDetector):
         classes: Optional[List[int]],
     ) -> List[Detection]:
         """
-        Decode raw Hailo output tensors into Detection objects.
+        Decode raw Hailo YOLOv8 output tensors into Detection objects.
 
-        Hailo YOLO models output a flat tensor per detection head with layout:
-          [batch, num_anchors, 5 + num_classes]
-        where columns are: [cx, cy, w, h, obj_conf, cls0_prob, cls1_prob, …]
+        This HEF outputs 6 raw tensors — 2 per detection scale, no NMS baked in:
+          conv41: (1, 80, 80, 64) — P3 regression (DFL, reg_max=16)
+          conv42: (1, 80, 80,  4) — P3 classification (4 classes)
+          conv52: (1, 40, 40, 64) — P4 regression
+          conv53: (1, 40, 40,  4) — P4 classification
+          conv62: (1, 20, 20, 64) — P5 regression
+          conv63: (1, 20, 20,  4) — P5 classification
 
-        Coordinates are normalised to [0, 1] relative to the model input size.
+        Steps: DFL decode → xyxy boxes → sigmoid scores → threshold → NMS
         """
         orig_h, orig_w = original_shape[:2]
 
-        # Hailo YOLOv8 NMS postprocess output is a ragged structure:
-        #   raw_output[key] is a list of shape (1, num_classes) where
-        #   each element raw_output[key][0][cls_id] is a numpy array of
-        #   shape (num_detections, 5): [y1, x1, y2, x2, score] normalised 0-1.
-        print(f"[HAILO DEBUG] raw_output keys: {list(raw_output.keys())}")
+        # Fixed head pairs: (regression_key, classification_key)
+        head_pairs = [
+            ("goec_v2/conv41", "goec_v2/conv42"),  # P3 80x80 stride=8
+            ("goec_v2/conv52", "goec_v2/conv53"),  # P4 40x40 stride=16
+            ("goec_v2/conv62", "goec_v2/conv63"),  # P5 20x20 stride=32
+        ]
+        strides = [8, 16, 32]
+        reg_max = 16  # 64 / 4 coords = 16 bins
+
+        all_boxes, all_scores, all_cls_ids = [], [], []
+
+        for (reg_key, cls_key), stride in zip(head_pairs, strides):
+            # Shape: (1, H, W, C) — remove batch dim
+            reg = raw_output[reg_key][0]  # (H, W, 64)
+            cls = raw_output[cls_key][0]  # (H, W, 4)
+
+            grid_h, grid_w = reg.shape[0], reg.shape[1]
+            N = grid_h * grid_w
+
+            reg = reg.reshape(N, 4, reg_max)   # (N, 4, 16)
+            cls = cls.reshape(N, -1)            # (N, 4)
+
+            # DFL decode: softmax over 16 bins → weighted sum → ltrb distances
+            reg = reg - reg.max(axis=2, keepdims=True)
+            exp = np.exp(reg)
+            softmax = exp / exp.sum(axis=2, keepdims=True)
+            bins = np.arange(reg_max, dtype=np.float32)
+            ltrb = (softmax * bins).sum(axis=2)  # (N, 4): left, top, right, bottom
+
+            # Build anchor grid (cell centre coords in pixels)
+            ys, xs = np.meshgrid(np.arange(grid_h), np.arange(grid_w), indexing="ij")
+            cx = (xs.ravel() + 0.5) * stride   # (N,)
+            cy = (ys.ravel() + 0.5) * stride   # (N,)
+
+            # Convert ltrb → xyxy pixel coords
+            x1 = cx - ltrb[:, 0] * stride
+            y1 = cy - ltrb[:, 1] * stride
+            x2 = cx + ltrb[:, 2] * stride
+            y2 = cy + ltrb[:, 3] * stride
+
+            # Sigmoid scores
+            cls_scores = 1.0 / (1.0 + np.exp(-cls))       # (N, num_classes)
+            best_cls = cls_scores.argmax(axis=1)            # (N,)
+            best_score = cls_scores[np.arange(N), best_cls] # (N,)
+
+            # Filter by confidence threshold
+            mask = best_score >= confidence_threshold
+            if classes is not None:
+                mask &= np.isin(best_cls, classes)
+
+            if mask.any():
+                all_boxes.append(np.stack([x1, y1, x2, y2], axis=1)[mask])
+                all_scores.append(best_score[mask])
+                all_cls_ids.append(best_cls[mask])
+
+        if not all_boxes:
+            return []
+
+        boxes = np.concatenate(all_boxes)
+        scores = np.concatenate(all_scores)
+        cls_ids = np.concatenate(all_cls_ids)
+
+        print(f"[HAILO DEBUG] pre-NMS: {len(boxes)} detections")
+
+        # Scale boxes from model input space to original image space
+        sx = orig_w / self.input_width
+        sy = orig_h / self.input_height
 
         detections: List[Detection] = []
+        for idx in self._nms(boxes, scores, cls_ids, iou_threshold):
+            x1, y1, x2, y2 = boxes[idx]
+            cls_id = int(cls_ids[idx])
+            detections.append(
+                Detection(
+                    class_id=cls_id,
+                    class_name=self.class_names[cls_id] if cls_id < len(self.class_names) else str(cls_id),
+                    confidence=round(float(scores[idx]), 6),
+                    bbox=BoundingBox(
+                        x1=float(x1 * sx),
+                        y1=float(y1 * sy),
+                        x2=float(x2 * sx),
+                        y2=float(y2 * sy),
+                    ),
+                )
+            )
 
-        for key, value in raw_output.items():
-            print(f"[HAILO DEBUG] key={key}, type={type(value)}, len={len(value) if hasattr(value, '__len__') else 'n/a'}")
-
-            # value is (1, num_classes) ragged — index batch dim first
-            batch = value[0]  # shape: (num_classes,) list of arrays
-            num_classes = len(batch)
-            print(f"[HAILO DEBUG] num_classes={num_classes}")
-
-            for cls_id in range(num_classes):
-                class_dets = np.array(batch[cls_id])  # (num_detections, 5)
-                print(f"[HAILO DEBUG] cls_id={cls_id}, dets shape={class_dets.shape}")
-
-                if class_dets.size == 0 or class_dets.ndim < 2:
-                    continue
-
-                for row in class_dets:
-                    # row: [y1, x1, y2, x2, score]  normalised 0-1
-                    y1_n, x1_n, y2_n, x2_n, score = row[0], row[1], row[2], row[3], row[4]
-                    score = float(score)
-
-                    if score < confidence_threshold:
-                        continue
-                    if classes is not None and cls_id not in classes:
-                        continue
-
-                    cls_name = (
-                        self.class_names[cls_id]
-                        if cls_id < len(self.class_names)
-                        else str(cls_id)
-                    )
-                    detections.append(
-                        Detection(
-                            class_id=cls_id,
-                            class_name=cls_name,
-                            confidence=score,
-                            bbox=BoundingBox(
-                                x1=float(x1_n * orig_w),
-                                y1=float(y1_n * orig_h),
-                                x2=float(x2_n * orig_w),
-                                y2=float(y2_n * orig_h),
-                            ),
-                        )
-                    )
-
-        print(f"[HAILO DEBUG] total detections after postprocess: {len(detections)}")
+        print(f"[HAILO DEBUG] post-NMS: {len(detections)} detections")
         return detections
+
+    @staticmethod
+    def _nms(boxes: np.ndarray, scores: np.ndarray, cls_ids: np.ndarray, iou_threshold: float) -> List[int]:
+        """Per-class greedy NMS. Returns list of kept indices."""
+        kept = []
+        for cls_id in np.unique(cls_ids):
+            idx = np.where(cls_ids == cls_id)[0]
+            b = boxes[idx]
+            s = scores[idx]
+            order = s.argsort()[::-1]
+            while len(order):
+                i = order[0]
+                kept.append(idx[i])
+                if len(order) == 1:
+                    break
+                rest = order[1:]
+                xx1 = np.maximum(b[i, 0], b[rest, 0])
+                yy1 = np.maximum(b[i, 1], b[rest, 1])
+                xx2 = np.minimum(b[i, 2], b[rest, 2])
+                yy2 = np.minimum(b[i, 3], b[rest, 3])
+                inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+                area_i = (b[i, 2] - b[i, 0]) * (b[i, 3] - b[i, 1])
+                area_r = (b[rest, 2] - b[rest, 0]) * (b[rest, 3] - b[rest, 1])
+                iou = inter / (area_i + area_r - inter + 1e-6)
+                order = rest[iou < iou_threshold]
+        return kept
 
     @staticmethod
     def _load_labels(labels_path: Optional[str]) -> List[str]:
