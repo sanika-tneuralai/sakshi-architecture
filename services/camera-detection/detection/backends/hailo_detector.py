@@ -232,11 +232,14 @@ class HailoDetector(BaseDetector):
             cx = (xs.ravel() + 0.5) * stride   # (N,)
             cy = (ys.ravel() + 0.5) * stride   # (N,)
 
-            # Convert ltrb → xyxy pixel coords
+            # Convert ltrb (grid cell units) → xyxy pixel coords
+            # cx/cy are already in pixels; ltrb is in grid units so multiply by stride
             x1 = cx - ltrb[:, 0] * stride
             y1 = cy - ltrb[:, 1] * stride
             x2 = cx + ltrb[:, 2] * stride
             y2 = cy + ltrb[:, 3] * stride
+
+            print(f"[HAILO DEBUG] scale stride={stride} | ltrb sample: {ltrb[:3].tolist()} | cls raw sample: {cls[:3].tolist()}")
 
             # Sigmoid scores
             cls_scores = 1.0 / (1.0 + np.exp(-cls))       # (N, num_classes)
