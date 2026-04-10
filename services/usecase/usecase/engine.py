@@ -125,6 +125,23 @@ def evaluate_all_usecases(
                 result = evaluate_single_usecase(usecase_id=usecase_id, slim_payload=slim, camera_id=camera_id)
                 results.append(result)
                 _persist_result_direct(camera_id, result)
+
+                # After parking_detection runs, backfill its track_ids into slim["detections"]
+                # so vehicle_extraction (which runs later) sees the same track_id per car.
+                # Matched by exact bbox coords — stable within a single frame.
+                if usecase_id == "parking_detection":
+                    tracked_by_bbox = {
+                        (obj.get("bbox", {}).get("x1"), obj.get("bbox", {}).get("y1"),
+                         obj.get("bbox", {}).get("x2"), obj.get("bbox", {}).get("y2")): obj.get("track_id")
+                        for obj in result.matched_objects
+                        if obj.get("track_id") and obj.get("bbox")
+                    }
+                    for det in slim["detections"]:
+                        b = det.get("bbox", {})
+                        key = (b.get("x1"), b.get("y1"), b.get("x2"), b.get("y2"))
+                        if key in tracked_by_bbox:
+                            det["track_id"] = tracked_by_bbox[key]
+
             except Exception as e:
                 logger.error(f"[ENGINE] Failed to evaluate usecase '{usecase_id}' for camera '{camera_id}' with error: {e}")
                 continue
