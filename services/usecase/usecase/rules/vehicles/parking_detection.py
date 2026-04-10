@@ -33,7 +33,9 @@ from workers.redis_state import get_state, set_state
 logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3   # consecutive frames car must be present to confirm entry
-EXIT_FRAMES = 15   # consecutive frames car must be absent to confirm exit (~15s at 1fps)
+EXIT_FRAMES = 25   # consecutive frames car must be absent to confirm exit (~25s at 1fps)
+                   # must be > CentroidTracker.max_disappeared (20) so a brief detection gap
+                   # doesn't fire a false outtime before the tracker drops the car
 
 
 def _now() -> str:
