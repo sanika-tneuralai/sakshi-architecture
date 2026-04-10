@@ -72,6 +72,7 @@ def get_camera_usecases(camera_id: str) -> List[str]:
                 CameraUsecase.camera_id == camera_id,
                 CameraUsecase.enabled == True,  # noqa: E712
             )
+            .order_by(CameraUsecase.id)
             .all()
         )
         return [row.usecase_id for row in rows]
