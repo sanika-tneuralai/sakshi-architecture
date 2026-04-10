@@ -149,10 +149,11 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         prompt = (
             "You are a vehicle recognition assistant. "
             "Look at this image of a vehicle and return ONLY a JSON object with two keys:\n"
-            '  "car_number": the license plate number as a string (e.g. "MH12AB1234"), '
-            'or "unreadable" if not visible.\n'
-            '  "car_model": the make and model of the vehicle (e.g. "Toyota Innova"), '
-            'or "unknown" if not identifiable.\n'
+            '  "car_number": the license plate number exactly as it appears in the image (e.g. "MH12AB1234"). '
+            'If the plate is not clearly visible, partially obscured, blurry, or you are not 100% certain, '
+            'you MUST return "unreadable". Do NOT guess or infer — only return a plate you can directly read.\n'
+            '  "car_model": the make and model of the vehicle (e.g. "Toyota Innova"). '
+            'If you cannot clearly identify it, return "unknown". Do NOT guess.\n'
             "Return only valid JSON, no explanation."
         )
 
