@@ -126,9 +126,10 @@ def evaluate_all_usecases(
                 results.append(result)
                 _persist_result_direct(camera_id, result)
 
-                # After parking_detection runs, backfill its track_ids into slim["detections"]
-                # so vehicle_extraction (which runs later) sees the same track_id per car.
-                # Matched by exact bbox coords — stable within a single frame.
+                # After parking_detection runs:
+                # 1. Backfill track_ids into slim["detections"] (existing behaviour).
+                # 2. Inject slim["tracked_cars"] so gun_detection and vehicle_extraction
+                #    read the canonical tracked list without running their own trackers.
                 if usecase_id == "parking_detection":
                     tracked_by_bbox = {
                         (obj.get("bbox", {}).get("x1"), obj.get("bbox", {}).get("y1"),
@@ -141,6 +142,8 @@ def evaluate_all_usecases(
                         key = (b.get("x1"), b.get("y1"), b.get("x2"), b.get("y2"))
                         if key in tracked_by_bbox:
                             det["track_id"] = tracked_by_bbox[key]
+                    # Canonical tracked car list for downstream rules
+                    slim["tracked_cars"] = result.matched_objects
 
             except Exception as e:
                 logger.error(f"[ENGINE] Failed to evaluate usecase '{usecase_id}' for camera '{camera_id}' with error: {e}")

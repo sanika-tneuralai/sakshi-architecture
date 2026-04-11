@@ -1,28 +1,30 @@
 """
 Vehicle Detail Extraction Rule
 ================================
-Downloads the frame from S3 via snapshot_url, crops the car bbox, and
-sends the crop to the Gemini Vision API to extract license plate number
-and car model.
+Downloads the frame snapshot from S3, crops the car bbox, and calls the
+Gemini Vision API to extract license plate number and car model.
 
-Gemini is called ONCE per unique car. A car is identified by a stable
-spatial key (camera + bbox snapped to a 50px grid). Once extracted,
-the result is cached in Redis. When the car leaves (bbox disappears
-for EVICT_FRAMES consecutive frames) the cache entry is cleared so a
-new car parking in the same spot gets extracted fresh.
+Design (locked):
+- Extraction is slot-anchored — Gemini is called AT MOST ONCE per car
+  lifecycle. "Once per lifecycle" is enforced via slot.extracted in the shared
+  slot state (``slot:{camera_id}:{slot_id}``).
+- The spatial-key / 200px-grid cache is removed. The slot lifecycle is the
+  cache boundary: extraction attempts stop as soon as slot.extracted=True and
+  restart only when the slot resets (car exits, reset_slot_state is called).
+- Retry schedule (frame-based, using slot.frame_counter):
+    Attempt 1: immediately when slot becomes occupied (backoff_until = frame + 10)
+    Attempt 2: frame_counter >= backoff_until (backoff_until = frame + 20)
+    Attempt 3: frame_counter >= backoff_until (backoff_until = frame + 9999)
+  After attempt 3: extracted=True, fields stay null — no further calls.
+- Success condition: at least one of car_number / car_model is not
+  "unreadable" / "unknown". Partial success counts.
+- Blind-spot case: after 3 failures (~30 frames / ~30 s), extraction stops
+  permanently for this car. Session records null plate/model.
 
-Per-camera state is persisted in Redis so that Celery workers (separate
-processes) share state across frames. The Redis key per camera is:
-    ``vehicle_cache:<camera_id>``
-
-Requires:
-    GEMINI_API_KEY env variable set to your Google AI Studio key.
-
-If Gemini is unavailable or the key is missing, both fields fall back
-to "unreadable" / "unknown".
+Per-camera tracker state continues to come from parking_detection via
+``detection_output["tracked_cars"]``.
 """
 import base64
-import hashlib
 import json
 import logging
 import os
@@ -34,56 +36,44 @@ import numpy as np
 
 from shared.common.roi import which_rois
 from usecase.rules.base import BaseUsecaseRule
-from workers.redis_state import get_state, set_state
+from workers.redis_state import get_slot_state, set_slot_state
 
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # free-tier model
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Number of consecutive frames a car must be absent before its cache is cleared
-EVICT_FRAMES = 5
+# Backoff increments (in frames) after each failed attempt
+_BACKOFF = [10, 20, 9999]
+
+DETECTION_W = int(os.getenv("DETECTION_WIDTH",  "1920"))
+DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
 
 
-def _car_key(camera_id: str, bbox: dict) -> str:
-    """
-    Stable identity key for a car detection.
-    Snaps bbox to a 50px grid so minor jitter across frames doesn't
-    create duplicate keys for the same parked car.
-    """
-    raw = (
-        f"{camera_id}_"
-        f"{int(bbox.get('x1', 0) // 200)}_"
-        f"{int(bbox.get('y1', 0) // 200)}"
-    )
-    return hashlib.md5(raw.encode()).hexdigest()[:8]
-
+# ---------------------------------------------------------------------------
+# Image utilities (unchanged from previous version)
+# ---------------------------------------------------------------------------
 
 def _download_image(snapshot_url: str):
-    """
-    Download a frame from a private S3 URL using boto3 (authenticated).
-    URL format: https://<bucket>.s3.<region>.amazonaws.com/<key>
-    """
+    """Download a frame from a private S3 URL using boto3 (authenticated)."""
     try:
-        # Parse bucket and key from the URL
-        # e.g. https://sakshi-vehicle-detection-frames.s3.ap-south-1.amazonaws.com/frames/cam/123.jpg
         url_path = snapshot_url.split(".amazonaws.com/", 1)
         if len(url_path) != 2:
             raise ValueError(f"Unrecognised S3 URL format: {snapshot_url}")
-        key = url_path[1]
-        host = snapshot_url.split("//")[1].split(".s3.")[0]
-        bucket = host
+        key    = url_path[1]
+        bucket = snapshot_url.split("//")[1].split(".s3.")[0]
 
         logger.info("[VEHICLE] Downloading S3 image: bucket=%s key=%s", bucket, key)
         aws_key = os.getenv("AWS_ACCESS_KEY_ID")
-        logger.info("[VEHICLE] AWS credentials present: access_key=%s secret=%s",
-                    "yes" if aws_key else "NO",
-                    "yes" if os.getenv("AWS_SECRET_ACCESS_KEY") else "NO")
-
+        logger.info(
+            "[VEHICLE] AWS credentials present: access_key=%s secret=%s",
+            "yes" if aws_key else "NO",
+            "yes" if os.getenv("AWS_SECRET_ACCESS_KEY") else "NO",
+        )
         s3 = boto3.client(
             "s3",
             region_name=os.getenv("AWS_REGION", "ap-south-1"),
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_access_key_id=aws_key,
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         )
         response = s3.get_object(Bucket=bucket, Key=key)
@@ -101,21 +91,18 @@ def _download_image(snapshot_url: str):
         return None
 
 
-DETECTION_W = int(os.getenv("DETECTION_WIDTH", "1920"))
-DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
-
-
 def _crop_bbox(image: np.ndarray, bbox: dict):
     h, w = image.shape[:2]
-    # Scale bbox from detection resolution down to the saved image resolution
     sx = w / DETECTION_W
     sy = h / DETECTION_H
     x1 = max(0, int(bbox.get("x1", 0) * sx))
     y1 = max(0, int(bbox.get("y1", 0) * sy))
     x2 = min(w, int(bbox.get("x2", w) * sx))
     y2 = min(h, int(bbox.get("y2", h) * sy))
-    logger.info("[VEHICLE] Scaled bbox: x1=%d y1=%d x2=%d y2=%d (image=%dx%d detection=%dx%d)",
-                x1, y1, x2, y2, w, h, DETECTION_W, DETECTION_H)
+    logger.info(
+        "[VEHICLE] Scaled bbox: x1=%d y1=%d x2=%d y2=%d (image=%dx%d detection=%dx%d)",
+        x1, y1, x2, y2, w, h, DETECTION_W, DETECTION_H,
+    )
     if x2 <= x1 or y2 <= y1:
         return None
     return image[y1:y2, x1:x2]
@@ -127,10 +114,7 @@ def _crop_to_b64(crop: np.ndarray) -> str:
 
 
 def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
-    """
-    Send the cropped car image to Gemini and extract car_number and car_model.
-    Falls back to defaults on any error.
-    """
+    """Send cropped car image to Gemini. Returns car_number + car_model."""
     if not GEMINI_API_KEY:
         logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
@@ -142,8 +126,8 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        image_b64 = _crop_to_b64(crop)
+        client     = genai.Client(api_key=GEMINI_API_KEY)
+        image_b64  = _crop_to_b64(crop)
         logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
 
         prompt = (
@@ -168,7 +152,6 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         text = response.text.strip()
         logger.info("[VEHICLE] Gemini raw response: %s", text)
 
-        # Strip markdown code fences if Gemini wraps the JSON
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -180,7 +163,7 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         logger.info("[VEHICLE] Gemini parsed result: %s", result)
         return {
             "car_number": str(result.get("car_number", "unreadable")),
-            "car_model": str(result.get("car_model", "unknown")),
+            "car_model":  str(result.get("car_model",  "unknown")),
         }
 
     except Exception as exc:
@@ -188,109 +171,144 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         return {"car_number": "unreadable", "car_model": "unknown"}
 
 
+# ---------------------------------------------------------------------------
+# Rule
+# ---------------------------------------------------------------------------
+
 class VehicleExtractionRule(BaseUsecaseRule):
     USECASE_ID: ClassVar[str] = "vehicle_extraction"
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
-        camera_id = detection_output.get("camera_id", "unknown")
-        rois = detection_output.get("rois") or {}
-        cars = [
+        camera_id    = detection_output.get("camera_id", "unknown")
+        rois         = detection_output.get("rois") or {}
+        snapshot_url = detection_output.get("snapshot_url")
+
+        # Tracked cars from parking_detection (injected into slim payload by engine)
+        tracked_cars = detection_output.get("tracked_cars") or [
             d for d in detection_output.get("detections", [])
             if d.get("class_name") == "car"
         ]
 
-        snapshot_url = detection_output.get("snapshot_url")
-        print(f"[VEHICLE] camera={camera_id} | cars_detected={len(cars)} | snapshot={'yes' if snapshot_url else 'no'}")
+        print(f"[VEHICLE] camera={camera_id} | tracked_cars={len(tracked_cars)} | snapshot={'yes' if snapshot_url else 'no'}")
         logger.info("[VEHICLE] snapshot_url=%s", snapshot_url)
-        image = _download_image(snapshot_url) if snapshot_url else None
-        logger.info("[VEHICLE] image download result: %s", "OK" if image is not None else "FAILED/None")
+
+        if not tracked_cars:
+            print("[VEHICLE] no cars — skipping")
+            return {"triggered": False, "matched_objects": [], "vehicle_details": []}
+
+        # Download frame once for all cars (lazy — only if needed below)
+        image      = None
+        image_tried = False
+
         vehicle_details: List[dict] = []
 
-        # --- Load state from Redis ---
-        # cache: { spatial_key: {car_number, car_model, absent_frames} }
-        redis_key = f"vehicle_cache:{camera_id}"
-        cache: Dict[str, dict] = get_state(redis_key)
+        for car in tracked_cars:
+            bbox     = car.get("bbox", {})
+            track_id = car.get("track_id")
 
-        # --- Run existing logic (unchanged) ---
-        # Track which keys are seen this frame to evict gone cars
-        seen_keys = set()
+            # Resolve slot_id for this car
+            matched_rois = which_rois(bbox, rois) if rois else []
+            slot_id      = matched_rois[0] if matched_rois else None
 
-        for car in cars:
-            bbox = car.get("bbox", {})
-            key = _car_key(camera_id, bbox)
-            seen_keys.add(key)
+            if not slot_id:
+                # Car not in any defined ROI — skip
+                continue
 
-            if key in cache:
-                # Already extracted — return cached result, skip Gemini
-                cached = cache[key]
-                cached["absent_frames"] = 0
-                print(f"[VEHICLE] cache hit: key={key} plate={cached['car_number']} model={cached['car_model']}")
-                car_number = cached["car_number"]
-                car_model = cached["car_model"]
-            else:
-                # New car — call Gemini once
-                print(f"[VEHICLE] new car detected: key={key} | calling Gemini")
-                logger.info("[VEHICLE] bbox for new car: %s", bbox)
+            slot = get_slot_state(camera_id, slot_id)
+
+            # ── Trigger check ─────────────────────────────────────────────
+            # Conditions from design (all must be true to call Gemini):
+            #   1. slot is occupied
+            #   2. not yet extracted
+            #   3. attempts < 3
+            #   4. frame_counter >= backoff_until
+            should_extract = (
+                slot["occupied"]
+                and not slot["extracted"]
+                and slot["extraction_attempts"] < 3
+                and slot["frame_counter"] >= slot["extraction_backoff_until"]
+            )
+
+            if should_extract:
+                attempt_number = slot["extraction_attempts"] + 1
+                print(f"[VEHICLE] slot={slot_id} attempt={attempt_number} | calling Gemini")
+
+                # Set backoff before the call so a crash/exception still counts the attempt
+                backoff_increment = _BACKOFF[slot["extraction_attempts"]]  # 10, 20, or 9999
+                slot["extraction_attempts"]     += 1
+                slot["extraction_backoff_until"] = slot["frame_counter"] + backoff_increment
+
                 car_number, car_model = "unreadable", "unknown"
-                if image is None:
-                    logger.warning("[VEHICLE] Skipping Gemini — image is None (download failed or no snapshot_url)")
-                else:
+
+                # Download image lazily — only on first extraction attempt this frame
+                if not image_tried:
+                    image      = _download_image(snapshot_url) if snapshot_url else None
+                    image_tried = True
+                    logger.info("[VEHICLE] image download result: %s", "OK" if image is not None else "FAILED/None")
+
+                if image is not None:
                     crop = _crop_bbox(image, bbox)
                     if crop is None or crop.size == 0:
-                        logger.warning("[VEHICLE] Skipping Gemini — crop is empty for bbox=%s image_shape=%s", bbox, image.shape)
+                        logger.warning(
+                            "[VEHICLE] Skipping Gemini — crop is empty for bbox=%s image_shape=%s",
+                            bbox, image.shape,
+                        )
                     else:
                         logger.info("[VEHICLE] Crop OK: shape=%s | calling Gemini", crop.shape)
-                        extracted = _query_gemini(crop)
+                        extracted  = _query_gemini(crop)
                         car_number = extracted["car_number"]
-                        car_model = extracted["car_model"]
-                        logger.info("[VEHICLE] Gemini extraction result: plate=%s model=%s", car_number, car_model)
+                        car_model  = extracted["car_model"]
+                        logger.info(
+                            "[VEHICLE] Gemini result: plate=%s model=%s", car_number, car_model
+                        )
+                else:
+                    logger.warning("[VEHICLE] Skipping Gemini — image is None")
 
-                # Only cache if Gemini succeeded — skip caching on failure so we retry next frame
-                gemini_failed = (car_number == "unreadable" and car_model == "unknown")
-                if not gemini_failed:
-                    cache[key] = {
-                        "car_number": car_number,
-                        "car_model": car_model,
-                        "absent_frames": 0,
-                    }
+                # Success: at least one field is not the fallback value
+                success = not (car_number == "unreadable" and car_model == "unknown")
+
+                if success:
+                    slot["extracted"]   = True
+                    slot["car_number"]  = car_number
+                    slot["car_model"]   = car_model
                     logger.info(
-                        "[VEHICLE] New car extracted and cached: key=%s plate=%s model=%s",
-                        key, car_number, car_model,
+                        "[VEHICLE] Extraction success: slot=%s plate=%s model=%s",
+                        slot_id, car_number, car_model,
+                    )
+                elif slot["extraction_attempts"] >= 3:
+                    # 3 failures — stop permanently for this lifecycle
+                    slot["extracted"] = True
+                    logger.warning(
+                        "[VEHICLE] 3 attempts exhausted for slot=%s — marking extracted, fields null",
+                        slot_id,
                     )
                 else:
-                    logger.warning("[VEHICLE] Gemini returned unreadable/unknown — skipping cache, will retry next frame")
+                    logger.warning(
+                        "[VEHICLE] Attempt %d failed for slot=%s — will retry at frame %d",
+                        attempt_number, slot_id, slot["extraction_backoff_until"],
+                    )
 
-            # Resolve which slot this car is in so the orchestrator can match
-            # vehicle details to a ChargingSession by slot_id instead of track_id.
-            matched_rois = which_rois(bbox, rois) if rois else []
-            slot_id = matched_rois[0] if matched_rois else None
+                set_slot_state(camera_id, slot_id, slot)
 
+            # Always include in vehicle_details using whatever is stored in slot
+            # (may be null on first attempt; will be populated after success)
             vehicle_details.append({
-                "track_id": car.get("track_id") or key,
-                "slot_id": slot_id,
-                "car_number": car_number,
-                "car_model": car_model,
+                "track_id":  track_id,
+                "slot_id":   slot_id,
+                "car_number": slot["car_number"],
+                "car_model":  slot["car_model"],
                 "confidence": car.get("confidence", 0.0),
             })
 
-        # Increment absent counter for cars not seen this frame
-        for key in list(cache.keys()):
-            if key not in seen_keys:
-                cache[key]["absent_frames"] += 1
-                if cache[key]["absent_frames"] >= EVICT_FRAMES:
-                    logger.info("[VEHICLE] Car left, clearing cache for key=%s", key)
-                    del cache[key]
-
-        # --- Save updated state back to Redis ---
-        set_state(redis_key, cache)
-
-        if not cars:
-            print(f"[VEHICLE] no cars — skipping")
+        if not vehicle_details:
             return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
-        print(f"[VEHICLE] result: triggered=True | vehicles={[(v['car_number'], v['car_model']) for v in vehicle_details]}")
+        print(
+            f"[VEHICLE] result: triggered=True | vehicles="
+            f"{[(v['slot_id'], v['car_number'], v['car_model']) for v in vehicle_details]}"
+        )
         return {
-            "triggered": True,
-            "matched_objects": cars,
+            "triggered":      True,
+            "matched_objects": tracked_cars,
             "vehicle_details": vehicle_details,
         }

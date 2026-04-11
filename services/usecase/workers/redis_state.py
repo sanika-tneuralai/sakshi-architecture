@@ -87,3 +87,79 @@ def set_state(key: str, value: dict, ttl_seconds: int = 43200) -> None:
         logger.warning(
             "[redis_state] Failed to serialize state for key=%s: %s", key, exc
         )
+
+
+# ---------------------------------------------------------------------------
+# Slot state — one Redis key per (camera_id, slot_id)
+# Key format: slot:{camera_id}:{slot_id}
+# ---------------------------------------------------------------------------
+
+def _default_slot_state() -> dict:
+    """
+    Canonical default for a slot state object.
+    Every field matches the locked design exactly.
+    """
+    return {
+        # Parking
+        "occupied": False,
+        "in_time": None,          # ISO str, set once on parking_intime
+        "track_id": None,         # informational only
+        "car_absent_frames": 0,   # consecutive frames without car in slot
+
+        # Vehicle extraction
+        "extracted": False,                # True once Gemini succeeds OR attempts exhausted
+        "extraction_attempts": 0,          # 0..3
+        "extraction_backoff_until": 0,     # frame_counter value — do not retry before this
+        "car_number": None,
+        "car_model": None,
+
+        # Gun
+        "gun_present_frames": 0,  # consecutive frames with gun in slot
+        "gun_absent_frames": 0,   # consecutive frames without gun (post-plugin only)
+        "plugin_logged": False,
+        "plugout_logged": False,
+        "plug_time": None,        # ISO str, set once on gun_plugin
+        "plug_out_time": None,    # ISO str, set once on gun_plugout
+        "gun_name": None,
+
+        # Monotonically increasing frame counter — survives restarts via Redis
+        "frame_counter": 0,
+    }
+
+
+def get_slot_state(camera_id: str, slot_id: str) -> dict:
+    """
+    Return the slot state for (camera_id, slot_id).
+    Merges any missing fields from _default_slot_state() so callers always
+    receive a complete object even after schema additions.
+    """
+    key = f"slot:{camera_id}:{slot_id}"
+    stored = get_state(key)
+    if not stored:
+        return _default_slot_state()
+    # Forward-compatible: fill in any fields added after the key was first written
+    defaults = _default_slot_state()
+    for field, default_value in defaults.items():
+        stored.setdefault(field, default_value)
+    return stored
+
+
+def set_slot_state(camera_id: str, slot_id: str, slot: dict, ttl_seconds: int = 43200) -> None:
+    """
+    Persist the slot state for (camera_id, slot_id).
+    TTL matches the standard 12-hour session window.
+    """
+    key = f"slot:{camera_id}:{slot_id}"
+    set_state(key, slot, ttl_seconds=ttl_seconds)
+
+
+def reset_slot_state(camera_id: str, slot_id: str) -> None:
+    """
+    Reset a slot to default state (called on parking_outtime / confirmed car exit).
+    Preserves frame_counter so backoff arithmetic stays monotonic across car lifecycles.
+    """
+    key = f"slot:{camera_id}:{slot_id}"
+    current = get_state(key)
+    fresh = _default_slot_state()
+    fresh["frame_counter"] = current.get("frame_counter", 0)
+    set_state(key, fresh)
