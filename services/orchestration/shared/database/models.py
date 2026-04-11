@@ -10,13 +10,12 @@ Models:
     - UsecaseResult: Use case evaluation results
     - Alert: Alert records
     - AnalyticsDaily: Daily aggregated analytics
+    - ROIConfig: Per-camera ROI polygon definitions
+    - CameraUsecase: Per-camera enabled usecase configuration
+    - ChargingSession: EV charging session lifecycle records
 
 Usage:
-    # Import all models
-    from shared.database.models import Camera, Detection, UsecaseResult, Alert, AnalyticsDaily
-    
-    # Or import specific models needed by your service
-    from shared.database.models import Camera, Detection
+    from shared.database.models import Camera, ChargingSession
 """
 from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, Date, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.sql import func
@@ -24,15 +23,6 @@ from shared.database.connection import Base
 
 
 class Camera(Base):
-    """
-    Camera model for storing camera configuration and metadata.
-
-    Attributes:
-        camera_id (str): Unique camera identifier (primary key)
-        name (str): Human-readable camera name
-        location (str): Camera location description
-        created_at (datetime): Timestamp when camera was added
-    """
     __tablename__ = "camera"
 
     camera_id = Column(String(255), primary_key=True)
@@ -42,20 +32,8 @@ class Camera(Base):
 
 
 class Detection(Base):
-    """
-    Detection model for storing object detection results.
-    
-    Attributes:
-        detection_id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        timestamp (datetime): When detection occurred
-        object_type (str): Type of detected object (e.g., 'person', 'vehicle')
-        confidence (float): Detection confidence score (0.0 to 1.0)
-        inside_roi (bool): Whether object is inside region of interest
-        screenshot_path (str): Optional path to detection screenshot
-    """
     __tablename__ = "detections"
-    
+
     detection_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
@@ -66,19 +44,8 @@ class Detection(Base):
 
 
 class UsecaseResult(Base):
-    """
-    UsecaseResult model for storing use case evaluation results.
-    
-    Attributes:
-        result_id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        usecase_name (str): Name of the evaluated use case
-        detection_id (int): Optional foreign key to detections table
-        triggered (bool): Whether the use case was triggered
-        timestamp (datetime): When evaluation occurred
-    """
     __tablename__ = "usecase_results"
-    
+
     result_id = Column(Integer, primary_key=True, autoincrement=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
     usecase_name = Column(String(100), nullable=False)
@@ -89,20 +56,10 @@ class UsecaseResult(Base):
 
 class Alert(Base):
     """
-    Alert model for storing alert records.
+    Alert records for triggered usecases.
 
-    Attributes:
-        alert_id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        usecase_name (str): Name of the use case that triggered alert
-        alert_type (str): Type of alert (e.g., 'parking_detection_triggered')
-        message (str): Human-readable alert message
-        timestamp (datetime): When alert was triggered
-        status (str): Alert status ('sent' or 'failed')
-        detection_id (int): Optional foreign key to detections table
-        screenshot_path (str): Optional path to alert screenshot
-        snapshot_url (str): S3 HTTPS URL of the frame captured at alert time
-        extras (dict): Rule-specific data (events, violations, vehicle_details, etc.)
+    slot_id is populated for parking_detection and gun_detection alerts
+    (deduplication key). It is NULL for all other usecase alerts.
     """
     __tablename__ = "alerts"
 
@@ -119,29 +76,15 @@ class Alert(Base):
 
 
 class AnalyticsDaily(Base):
-    """
-    AnalyticsDaily model for storing daily aggregated analytics.
-    
-    Attributes:
-        id (int): Auto-incrementing primary key
-        date (date): Date of the analytics record
-        camera_id (str): Foreign key to cameras table
-        total_detections (int): Total number of detections for the day
-        roi_violations (int): Number of ROI violations for the day
-        alerts_sent (int): Number of alerts sent for the day
-    
-    Constraints:
-        Unique constraint on (date, camera_id) combination
-    """
     __tablename__ = "analytics_daily"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     date = Column(Date, nullable=False, index=True)
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
     total_detections = Column(Integer, nullable=False, default=0)
     roi_violations = Column(Integer, nullable=False, default=0)
     alerts_sent = Column(Integer, nullable=False, default=0)
-    
+
     __table_args__ = (
         UniqueConstraint('date', 'camera_id', name='uix_date_camera'),
     )
@@ -149,24 +92,10 @@ class AnalyticsDaily(Base):
 
 class ROIConfig(Base):
     """
-    ROIConfig model for storing per-camera region-of-interest definitions.
+    Per-camera ROI polygon definitions.
 
-    Each row defines one ROI polygon for a camera. The orchestration layer
-    fetches these at runtime and forwards them to the usecase service so that
-    rules such as parking_detection, restricted_area, and people_counter can
-    evaluate detections against the correct geometry.
-
-    Attributes:
-        id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        roi_id (str): Logical identifier used by rules (e.g. "roi_1")
-        roi_type (str): Rule-domain tag (e.g. "parking_zone", "restricted_zone",
-                        "counting_zone", "safety_zone")
-        points (list): JSON array of [x, y] coordinate pairs defining the polygon
-        label (str): Human-readable name shown in dashboards / logs
-        roi_metadata (dict): Rule-specific configuration stored as JSON
-                             e.g. {"max_occupancy": 5} for people_counter
-                                  {"allowed_hours": "08:00-20:00"} for parking_compliance
+    Each row defines one ROI polygon. The orchestration layer fetches these
+    at pipeline runtime and forwards them to the usecase service.
     """
     __tablename__ = "roi_configs"
 
@@ -174,7 +103,7 @@ class ROIConfig(Base):
     camera_id = Column(String(255), ForeignKey("camera.camera_id"), nullable=False, index=True)
     roi_id = Column(String(100), nullable=False)
     roi_type = Column(String(100), nullable=False)
-    points = Column(JSON, nullable=False)           # [[x1,y1], [x2,y2], ...]
+    points = Column(JSON, nullable=False)       # [[x1,y1], [x2,y2], ...]
     label = Column(String(255), nullable=True)
     roi_metadata = Column(JSON, nullable=True, default=dict)
 
@@ -185,20 +114,7 @@ class ROIConfig(Base):
 
 class CameraUsecase(Base):
     """
-    CameraUsecase model for storing which usecases are enabled per camera
-    and any per-usecase configuration overrides.
-
-    The orchestration layer queries this table to build the `usecases` list
-    that is sent to the usecase evaluation service, replacing the hard-coded
-    default list in CameraConfig.
-
-    Attributes:
-        id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        usecase_id (str): Usecase rule identifier (e.g. "parking_detection")
-        enabled (bool): Whether this usecase should run for this camera
-        config (dict): Per-usecase JSON config overrides
-                       e.g. {"confidence_threshold": 0.6, "max_occupancy": 10}
+    Per-camera enabled usecase list with per-usecase config overrides.
     """
     __tablename__ = "camera_usecases"
 
@@ -215,25 +131,26 @@ class CameraUsecase(Base):
 
 class ChargingSession(Base):
     """
-    ChargingSession model for storing EV charging session records.
+    EV charging session lifecycle record.
 
-    Captures the full lifecycle of a vehicle at an EV charging station,
-    assembled from parking_detection, vehicle_extraction, and gun_detection
+    Assembled from parking_detection, vehicle_extraction, and gun_detection
     usecase results during the orchestration pipeline.
 
-    Attributes:
-        session_id (int): Auto-incrementing primary key
-        camera_id (str): Foreign key to cameras table
-        gun_number (str): Charging gun identifier (e.g. "Gun 1", "Gun 2")
-        car_number (str): Vehicle license plate number (from vehicle_extraction)
-        car_model (str): Vehicle make/model (from vehicle_extraction)
-        in_time (datetime): When the car entered the parking ROI
-        plug_time (datetime): When the charging gun was plugged in
-        plug_out_time (datetime): When the charging gun was plugged out
-        out_time (datetime): When the car exited the parking ROI
-        session_status (str): 'active', 'charging', 'completed', 'incomplete'
-        created_at (datetime): Record creation timestamp
-        updated_at (datetime): Record last-update timestamp
+    Session identity: UNIQUE(camera_id, slot_id, in_time).
+      - camera_id + slot_id identify the physical charging bay.
+      - in_time is the confirmed entry timestamp (millisecond precision).
+      - Together they are guaranteed unique per physical visit.
+    The unique constraint is enforced at the DB level so any duplicate insert
+    (e.g. from a Redis-lost cold-start edge case) silently does nothing.
+
+    Status transitions:
+      active     — in_time set, no plug_time yet
+      charging   — plug_time set, out_time not yet set
+      completed  — plug_out_time AND out_time both set
+      incomplete — out_time set but no plug_time
+
+    All fields except (camera_id, slot_id, session_status) are written once
+    (first-write-wins). The upsert logic never overwrites a non-null field.
     """
     __tablename__ = "charging_sessions"
 
@@ -251,3 +168,10 @@ class ChargingSession(Base):
     session_status = Column(String(50), nullable=False, default='active')
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        # Unique session identity: one row per physical car visit per slot.
+        # Prevents duplicate sessions from Redis-lost cold starts.
+        # in_time has millisecond precision — collision probability is zero.
+        UniqueConstraint('camera_id', 'slot_id', 'in_time', name='uix_session_identity'),
+    )

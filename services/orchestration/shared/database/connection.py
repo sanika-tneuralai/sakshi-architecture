@@ -38,15 +38,15 @@ Base = declarative_base()
 def get_db():
     """
     Get database session.
-    
+
     Usage:
         from shared.database.connection import get_db
-        
+
         # In FastAPI:
         @app.get("/items")
         def read_items(db: Session = Depends(get_db)):
             return db.query(Item).all()
-    
+
     Yields:
         Session: SQLAlchemy database session
     """
@@ -60,34 +60,25 @@ def get_db():
 def init_db():
     """
     Initialize database tables.
-    
-    This will create all tables defined in the models.
+
+    Creates all tables defined in the models (checkfirst=True skips existing tables).
     Should be called once during application startup.
-    
-    Usage:
-        from shared.database.connection import init_db
-        
-        if __name__ == "__main__":
-            init_db()
-    
+
     Raises:
         Exception: If database connection or table creation fails
     """
-    # Import models to register them with Base.metadata
     from shared.database.models import (
         Camera, Detection, UsecaseResult, Alert, AnalyticsDaily,
-        ROIConfig, CameraUsecase,
+        ROIConfig, CameraUsecase, ChargingSession,
     )
-    
+
     print(f"[DATABASE] Initializing database...")
     print(f"[DATABASE] Database URL: {DATABASE_URL.split('@')[-1]}")  # Hide credentials
-    
+
     try:
-        # Create all tables (checkfirst=True skips tables that already exist)
         Base.metadata.create_all(bind=engine, checkfirst=True)
         print(f"[DATABASE] Tables created successfully")
-        
-        # Test connection
+
         with engine.connect() as conn:
             print(f"[DATABASE] Connection test successful")
     except Exception as e:
@@ -98,13 +89,14 @@ def init_db():
 def test_connection():
     """
     Test database connection.
-    
+
     Returns:
         bool: True if connection successful, False otherwise
     """
     try:
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            from sqlalchemy import text
+            conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
         print(f"[DATABASE] Connection test failed: {str(e)}")

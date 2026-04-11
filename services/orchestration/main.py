@@ -480,9 +480,9 @@ class PipelineManager:
         """
         camera_id = config.camera_id
         stats = self.stats[camera_id]
-        
+
         logger.info(f"[{camera_id}] Pipeline worker started | poll_interval={config.poll_interval}s")
-        
+
         while not stop_event.is_set():
             iteration_start = datetime.now()
             
