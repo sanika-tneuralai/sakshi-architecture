@@ -1457,9 +1457,15 @@ async def dashboard_station(
                 .first()
             )
 
-            # Treat as empty if the session has no car_number — vehicle_extraction
-            # never ran, meaning the car was never properly confirmed in the slot.
-            if session is None or session.car_number is None:
+            # Treat as empty if the session started on a previous calendar day —
+            # it was never closed (missed exit) and is a ghost from a prior shift.
+            if session is None:
+                slots_out[slot_id] = {"status": "empty"}
+                continue
+
+            session_date = session.in_time.date() if session.in_time else None
+            today = now.date()
+            if session_date is not None and session_date < today:
                 slots_out[slot_id] = {"status": "empty"}
                 continue
 
