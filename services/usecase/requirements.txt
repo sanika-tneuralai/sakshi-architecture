@@ -22,8 +22,9 @@ redis>=5.0.0         # Result backend client
 # Monitoring
 flower>=2.0.0        # Celery dashboard (optional, for development)
 
-# Gemini Vision API
+# LLM Vision APIs (Gemini and OpenAI — provider selected via env vars)
 google-genai>=1.0.0
+openai>=1.30.0
 
 # Computer vision
 opencv-python-headless>=4.8.0

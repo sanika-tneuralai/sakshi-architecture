@@ -1,11 +1,15 @@
 """
 Vehicle Detail Extraction Rule
 ================================
-Downloads the frame snapshot from S3, crops the car bbox, and calls the
-Gemini Vision API to extract license plate number and car model.
+Downloads the frame snapshot from S3, crops the car bbox, and calls an
+LLM Vision API (OpenAI or Gemini) to extract license plate number and car model.
+
+Provider selection (env-driven):
+- If OPENAI_API_KEY is set → uses OpenAI (gpt-4o by default, override with OPENAI_MODEL)
+- Otherwise falls back to Gemini (gemini-2.5-flash by default, override with GEMINI_MODEL)
 
 Design (locked):
-- Extraction is slot-anchored — Gemini is called AT MOST ONCE per car
+- Extraction is slot-anchored — the LLM is called AT MOST ONCE per car
   lifecycle. "Once per lifecycle" is enforced via slot.extracted in the shared
   slot state (``slot:{camera_id}:{slot_id}``).
 - The spatial-key / 200px-grid cache is removed. The slot lifecycle is the
@@ -42,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # Backoff increments (in frames) after each failed attempt
 _BACKOFF = [10, 20, 9999]
@@ -187,6 +194,85 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         return {"car_number": "unreadable", "car_model": "unknown"}
 
 
+def _query_openai(crop: np.ndarray) -> Dict[str, str]:
+    """Send cropped car image to OpenAI vision. Returns car_number + car_model."""
+    if not OPENAI_API_KEY:
+        logger.warning("[VEHICLE] OPENAI_API_KEY not set — skipping OpenAI extraction")
+        return {"car_number": "unreadable", "car_model": "unknown"}
+
+    logger.info("[VEHICLE] OpenAI API key present (len=%d), model=%s", len(OPENAI_API_KEY), OPENAI_MODEL)
+    logger.info("[VEHICLE] Crop shape before OpenAI call: %s", crop.shape)
+
+    try:
+        from openai import OpenAI
+
+        client    = OpenAI(api_key=OPENAI_API_KEY)
+        image_b64 = _crop_to_b64(crop)
+        logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
+
+        prompt = (
+            "You are a vehicle recognition system. Analyse this image.\n\n"
+            "RULES — follow exactly, violations cause system errors:\n"
+            '1. "car_number": Copy the license plate characters EXACTLY as printed on the plate. '
+            "Every character must be directly visible and legible in the image. "
+            'If ANY character is unclear, obscured, blurry, cut off, or you have ANY doubt, '
+            'return the exact string "unreadable". NEVER guess, infer, autocomplete, or construct '
+            "a plausible-looking plate — return only what you can literally read pixel-by-pixel.\n"
+            '2. "car_model": State the make and model only if you are highly confident (e.g. "Toyota Innova"). '
+            'If the model is unclear or you are guessing, return the exact string "unknown".\n\n'
+            "Return ONLY a JSON object with exactly two keys: car_number and car_model. No explanation, no markdown."
+        )
+
+        logger.info("[VEHICLE] Sending request to OpenAI...")
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}", "detail": "high"},
+                        },
+                    ],
+                }
+            ],
+        )
+
+        text = response.choices[0].message.content.strip()
+        logger.info("[VEHICLE] OpenAI raw response: %s", text)
+
+        result     = json.loads(text)
+        car_number = str(result.get("car_number", "unreadable")).strip()
+        car_model  = str(result.get("car_model",  "unknown")).strip()
+
+        # Reject suspiciously short plates (real plates have ≥4 chars)
+        if car_number != "unreadable" and len(car_number.replace(" ", "")) < 4:
+            logger.warning(
+                "[VEHICLE] Plate '%s' rejected — too short to be real, marking unreadable", car_number
+            )
+            car_number = "unreadable"
+
+        logger.info("[VEHICLE] OpenAI parsed result: car_number=%s car_model=%s", car_number, car_model)
+        return {"car_number": car_number, "car_model": car_model}
+
+    except Exception as exc:
+        logger.warning("[VEHICLE] OpenAI extraction failed: %s", exc, exc_info=True)
+        return {"car_number": "unreadable", "car_model": "unknown"}
+
+
+def _query_llm(crop: np.ndarray) -> Dict[str, str]:
+    """Dispatch to OpenAI if OPENAI_API_KEY is set, otherwise fall back to Gemini."""
+    if OPENAI_API_KEY:
+        logger.info("[VEHICLE] LLM provider: OpenAI (model=%s)", OPENAI_MODEL)
+        return _query_openai(crop)
+    logger.info("[VEHICLE] LLM provider: Gemini (model=%s)", GEMINI_MODEL)
+    return _query_gemini(crop)
+
+
 # ---------------------------------------------------------------------------
 # Rule
 # ---------------------------------------------------------------------------
@@ -247,7 +333,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
 
             if should_extract:
                 attempt_number = slot["extraction_attempts"] + 1
-                print(f"[VEHICLE] slot={slot_id} attempt={attempt_number} | calling Gemini")
+                print(f"[VEHICLE] slot={slot_id} attempt={attempt_number} | calling LLM")
 
                 # Set backoff before the call so a crash/exception still counts the attempt
                 backoff_increment = _BACKOFF[slot["extraction_attempts"]]  # 10, 20, or 9999
@@ -270,12 +356,12 @@ class VehicleExtractionRule(BaseUsecaseRule):
                             bbox, image.shape,
                         )
                     else:
-                        logger.info("[VEHICLE] Crop OK: shape=%s | calling Gemini", crop.shape)
-                        extracted  = _query_gemini(crop)
+                        logger.info("[VEHICLE] Crop OK: shape=%s | calling LLM", crop.shape)
+                        extracted  = _query_llm(crop)
                         car_number = extracted["car_number"]
                         car_model  = extracted["car_model"]
                         logger.info(
-                            "[VEHICLE] Gemini result: plate=%s model=%s", car_number, car_model
+                            "[VEHICLE] LLM result: plate=%s model=%s", car_number, car_model
                         )
                 else:
                     logger.warning("[VEHICLE] Skipping Gemini — image is None")
