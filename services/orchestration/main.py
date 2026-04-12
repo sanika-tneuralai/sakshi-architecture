@@ -1445,27 +1445,22 @@ async def dashboard_station(
         violation_cutoff = now - timedelta(seconds=30)
 
         for slot_id in SLOTS:
-            # Most-recent open session (no out_time yet) for this slot
+            # Only consider genuinely live sessions: no out_time AND status is
+            # active or charging. incomplete means the stale-cleanup job already
+            # declared the session abandoned — the slot is physically empty.
             session = (
                 db.query(ChargingSession)
                 .filter(
                     ChargingSession.camera_id == camera_id,
                     ChargingSession.slot_id == slot_id,
                     ChargingSession.out_time.is_(None),
+                    ChargingSession.session_status.in_(("active", "charging")),
                 )
                 .order_by(ChargingSession.created_at.desc())
                 .first()
             )
 
-            # Treat as empty if the session started on a previous calendar day —
-            # it was never closed (missed exit) and is a ghost from a prior shift.
             if session is None:
-                slots_out[slot_id] = {"status": "empty"}
-                continue
-
-            session_date = session.in_time.date() if session.in_time else None
-            today = now.date()
-            if session_date is not None and session_date < today:
                 slots_out[slot_id] = {"status": "empty"}
                 continue
 

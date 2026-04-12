@@ -324,13 +324,24 @@ function deduplicateViolations(violations) {
 }
 
 /* ── Field row ── */
-function Field({ label, value, className }) {
+// nullLabel: what to show when value is absent
+//   'pending'  → "Detecting..."  (data expected but not yet arrived)
+//   'na'       → "Not yet"       (event hasn't happened yet, e.g. plug-in)
+//   'none'     → "None"          (confirmed no value, e.g. no violation)
+//   default    → "--"
+function Field({ label, value, className, nullLabel }) {
   const v = display(value);
+  let nullText = '--';
+  if (v === null) {
+    if (nullLabel === 'pending') nullText = 'Detecting…';
+    else if (nullLabel === 'na')  nullText = 'Not yet';
+    else if (nullLabel === 'none') nullText = 'None';
+  }
   return (
     <div className="field-row">
       <span className="field-label">{label}</span>
       <span className={`field-value${v === null ? ' null' : ''}${className ? ' ' + className : ''}`}>
-        {v !== null ? v : '--'}
+        {v !== null ? v : nullText}
       </span>
     </div>
   );
@@ -348,7 +359,6 @@ function SlotCard({ slotId, data }) {
     return '';
   };
 
-  const carNumber = data?.car_number || (data?.violation ? 'Unidentified' : null);
   const violationDisplay = data?.violation ? violationLabel(data.violation) : null;
 
   return (
@@ -358,15 +368,15 @@ function SlotCard({ slotId, data }) {
         <Field label="Status" value="EMPTY" className="status-empty" />
       ) : (
         <>
-          <Field label="Car Number"    value={carNumber} />
-          <Field label="Car Model"     value={data.car_model} />
+          <Field label="Car Number"    value={data.car_number}          nullLabel="pending" />
+          <Field label="Car Model"     value={data.car_model}           nullLabel="pending" />
           <Field label="Car In Time"   value={fmtTime(data.car_intime)} />
-          <Field label="Car Out Time"  value={fmtTime(data.car_outtime)} />
-          <Field label="Gun Number"    value={data.gun_number} />
-          <Field label="Plug In Time"  value={fmtTime(data.gun_plugin_time)} />
-          <Field label="Plug Out Time" value={fmtTime(data.gun_plugout_time)} />
+          <Field label="Car Out Time"  value={fmtTime(data.car_outtime)} nullLabel="na" />
+          <Field label="Gun Number"    value={data.gun_number}           nullLabel="na" />
+          <Field label="Plug In Time"  value={fmtTime(data.gun_plugin_time)}  nullLabel="na" />
+          <Field label="Plug Out Time" value={fmtTime(data.gun_plugout_time)} nullLabel="na" />
           <Field label="Status"        value={data.status ? data.status.toUpperCase() : null} className={statusCls()} />
-          <Field label="Violation"     value={violationDisplay || 'NONE'} className={violationDisplay ? 'violation-value' : ''} />
+          <Field label="Violation"     value={violationDisplay} nullLabel="none" className={violationDisplay ? 'violation-value' : ''} />
         </>
       )}
     </div>
