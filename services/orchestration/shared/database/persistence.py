@@ -457,6 +457,30 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
 
                 continue
 
+            # ── parking_compliance: one alert per (slot_id, event_type) ──
+            if usecase_id == "parking_compliance":
+                for viol in extras.get("violations", []):
+                    meta       = viol.get("metadata", {})
+                    slot_id    = meta.get("slot_id") or meta.get("roi")
+                    event_type = viol.get("event_type", "")  # e.g. unauthorized_parking, wrong_parking
+
+                    if not event_type:
+                        continue
+
+                    db.add(Alert(
+                        camera_id    = camera_id,
+                        slot_id      = slot_id,
+                        usecase_name = "parking_compliance",
+                        alert_type   = event_type,
+                        message      = f"[parking_compliance] {event_type} | slot={slot_id}",
+                        status       = "sent",
+                        snapshot_url = snapshot_url,
+                        extras       = {"violations": [viol]},
+                    ))
+                    written += 1
+
+                continue
+
             # ── gun_detection: one alert per (slot_id, event_type) ────────
             if usecase_id == "gun_detection":
                 for evt in extras.get("events", []):
