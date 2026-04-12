@@ -45,7 +45,7 @@
 
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 12px;
       margin-bottom: 32px;
     }
@@ -123,10 +123,13 @@
       font-weight: bold;
       letter-spacing: 0.04em;
     }
-    .badge-charging  { background: #e3f2fd; color: #0277bd; }
-    .badge-active    { background: #e8f5e9; color: #2e7d32; }
-    .badge-completed { background: #f5f5f5; color: #888; }
-    .badge-incomplete{ background: #fff3e0; color: #e65100; }
+    .badge-charging           { background: #e3f2fd; color: #0277bd; }
+    .badge-active             { background: #e8f5e9; color: #2e7d32; }
+    .badge-completed          { background: #f5f5f5; color: #888; }
+    .badge-incomplete         { background: #fff3e0; color: #e65100; }
+    .badge-unauthorized       { background: #fce4ec; color: #b71c1c; }
+    .badge-wrong              { background: #fff3e0; color: #bf360c; }
+    .badge-multiple           { background: #f3e5f5; color: #6a1b9a; }
 
     .empty-row td {
       text-align: center;
@@ -204,11 +207,12 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const BASE      = 'http://13.201.133.171:8000';
-const STATION_URL  = `${BASE}/dashboard/station?camera_id=camera_01&station_id=station_01`;
-const SESSIONS_URL = `${BASE}/dashboard/sessions?camera_id=camera_01&limit=50`;
-const POLL_MS   = 2000;
-const SLOTS     = ['ROI_1', 'ROI_2'];
+const BASE            = 'http://13.201.133.171:8000';
+const STATION_URL     = `${BASE}/dashboard/station?camera_id=camera_01&station_id=station_01`;
+const SESSIONS_URL    = `${BASE}/dashboard/sessions?camera_id=camera_01&limit=50`;
+const COMPLIANCE_URL  = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=50`;
+const POLL_MS         = 2000;
+const SLOTS           = ['ROI_1', 'ROI_2'];
 
 /* ── helpers ── */
 function display(v) {
@@ -339,28 +343,75 @@ function SessionsTable({ sessions }) {
   );
 }
 
+/* ── Violation type badge ── */
+function violationBadge(vtype) {
+  if (!vtype) return <span className="td-null">--</span>;
+  const map = {
+    unauthorized_parking:  ['badge-unauthorized', 'Unauthorized Parking'],
+    wrong_parking:         ['badge-wrong',        'Double Slot Parking'],
+    multiple_cars_in_roi:  ['badge-multiple',     'Multiple Cars in Slot'],
+  };
+  const [cls, label] = map[vtype] || ['', vtype];
+  return <span className={`badge ${cls}`}>{label}</span>;
+}
+
+/* ── Compliance violations table ── */
+function ComplianceTable({ violations }) {
+  const cols = ['Station', 'Car Model', 'Violation Type', 'Duration'];
+
+  if (!violations.length) {
+    return (
+      <table>
+        <thead><tr>{cols.map(c => <th key={c}>{c}</th>)}</tr></thead>
+        <tbody><tr className="empty-row"><td colSpan={cols.length}>No violations found</td></tr></tbody>
+      </table>
+    );
+  }
+
+  return (
+    <table>
+      <thead><tr>{cols.map(c => <th key={c}>{c}</th>)}</tr></thead>
+      <tbody>
+        {violations.map(v => (
+          <tr key={v.alert_id}>
+            <td>{v.station || 'Station 1'}</td>
+            <td>{display(v.car_model) || <span className="td-null">--</span>}</td>
+            <td>{violationBadge(v.violation_type)}</td>
+            <td>{display(v.duration) || <span className="td-null">--</span>}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 /* ── App ── */
 function App() {
   const [stationData,  setStationData]  = React.useState(null);
   const [sessions,     setSessions]     = React.useState([]);
+  const [violations,   setViolations]   = React.useState([]);
   const [lastUpdated,  setLastUpdated]  = React.useState(null);
   const [error,        setError]        = React.useState(null);
 
   React.useEffect(() => {
     async function poll() {
       try {
-        const [stRes, seRes] = await Promise.all([
+        const [stRes, seRes, coRes] = await Promise.all([
           fetch(STATION_URL),
           fetch(SESSIONS_URL),
+          fetch(COMPLIANCE_URL),
         ]);
         if (!stRes.ok) throw new Error(`Station API: HTTP ${stRes.status}`);
         if (!seRes.ok) throw new Error(`Sessions API: HTTP ${seRes.status}`);
+        if (!coRes.ok) throw new Error(`Compliance API: HTTP ${coRes.status}`);
 
         const st = await stRes.json();
         const se = await seRes.json();
+        const co = await coRes.json();
 
         setStationData(st);
         setSessions(se.sessions || []);
+        setViolations(co.violations || []);
         setLastUpdated(new Date().toLocaleTimeString());
         setError(null);
       } catch (e) {
@@ -380,6 +431,7 @@ function App() {
   const activeCount    = sessions.filter(s => ['charging', 'active'].includes((s.session_status || '').toLowerCase())).length;
   const idleSlots      = SLOTS.filter(id => !slots[id] || slots[id].status === 'empty').length;
   const totalSessions  = sessions.length;
+  const violationCount = violations.length;
 
   return (
     <>
@@ -411,12 +463,23 @@ function App() {
           <div className="stat-value">{totalSessions}</div>
           <div className="stat-sub">All time</div>
         </div>
+        <div className="stat-box">
+          <div className="stat-label">Violations</div>
+          <div className="stat-value" style={{color: violationCount > 0 ? '#b71c1c' : '#111'}}>{violationCount}</div>
+          <div className="stat-sub">Parking compliance</div>
+        </div>
       </div>
 
       {/* ── Charging Sessions Table ── */}
       <div className="section-label" style={{marginBottom: '10px'}}>Charging Sessions</div>
       <div className="sessions-wrap">
         <SessionsTable sessions={sessions} />
+      </div>
+
+      {/* ── Parking Compliance Violations ── */}
+      <div className="section-label" style={{marginBottom: '10px'}}>Parking Compliance Violations</div>
+      <div className="sessions-wrap">
+        <ComplianceTable violations={violations} />
       </div>
 
       {/* ── Live Slot Status ── */}

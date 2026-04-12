@@ -1498,6 +1498,121 @@ async def dashboard_station(
         db.close()
 
 
+@app.get("/dashboard/compliance-violations", tags=["dashboard"])
+async def dashboard_compliance_violations(
+    camera_id: str = "camera_01",
+    station_id: str = "station_01",
+    limit: int = 100,
+):
+    """
+    Parking compliance violations shaped for the station monitor dashboard.
+
+    Returns violations with: station, car_model, violation_type, duration.
+
+    Violation types:
+      - unauthorized_parking  — car centroid outside all ROIs
+      - wrong_parking         — car centroid inside more than one ROI simultaneously
+      - multiple_cars_in_roi  — more than one car in the same ROI
+
+    car_model is joined from the most-recent ChargingSession that shares
+    the same camera_id and was active around the violation timestamp.
+
+    Response:
+    {
+      "violations": [
+        {
+          "alert_id": 1,
+          "station": "station_01",
+          "car_model": "Tata Tiago EV",
+          "violation_type": "wrong_parking",
+          "timestamp": "2026-04-12T10:30:00",
+          "duration": "5m 12s"      # time since violation, null if unknown
+        }
+      ],
+      "total": 1
+    }
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import Alert, ChargingSession
+        from datetime import datetime, timezone
+
+        rows = (
+            db.query(Alert)
+            .filter(Alert.camera_id == camera_id)
+            .filter(Alert.usecase_name == "parking_compliance")
+            .order_by(Alert.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+
+        def elapsed(ts):
+            if not ts:
+                return None
+            try:
+                now = datetime.now(timezone.utc)
+                if ts.tzinfo is None:
+                    from datetime import timezone as tz
+                    ts = ts.replace(tzinfo=tz.utc)
+                secs = int((now - ts).total_seconds())
+                if secs < 0:
+                    return None
+                h = secs // 3600
+                m = (secs % 3600) // 60
+                s = secs % 60
+                if h > 0:
+                    return f"{h}h {m}m"
+                if m > 0:
+                    return f"{m}m {s}s"
+                return f"{s}s"
+            except Exception:
+                return None
+
+        def resolve_violation_type(row):
+            """Extract the specific violation type from alert_type or extras."""
+            atype = row.alert_type or ""
+            # Stored directly (multiple_cars_in_roi, unauthorized_parking, wrong_parking)
+            if atype in ("multiple_cars_in_roi", "unauthorized_parking", "wrong_parking"):
+                return atype
+            # Generic path: inspect extras.violations[].event_type
+            extras = row.extras or {}
+            for v in extras.get("violations", []):
+                et = v.get("event_type", "")
+                if et in ("unauthorized_parking", "wrong_parking", "multiple_cars_in_roi"):
+                    return et
+            return atype or "unknown"
+
+        def resolve_car_model(row):
+            """Find car_model from the most-recent session near this violation time."""
+            session = (
+                db.query(ChargingSession.car_model)
+                .filter(ChargingSession.camera_id == camera_id)
+                .filter(ChargingSession.car_model.isnot(None))
+                .order_by(ChargingSession.created_at.desc())
+                .first()
+            )
+            return session.car_model if session else None
+
+        violations = []
+        for row in rows:
+            violations.append({
+                "alert_id":      row.alert_id,
+                "station":       station_id,
+                "car_model":     resolve_car_model(row),
+                "violation_type": resolve_violation_type(row),
+                "timestamp":     row.timestamp.isoformat() if row.timestamp else None,
+                "duration":      elapsed(row.timestamp),
+            })
+
+        return {"violations": violations, "total": len(violations)}
+
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] /dashboard/compliance-violations failed: {e}")
+        return {"violations": [], "total": 0}
+    finally:
+        db.close()
+
+
 @app.get("/health", tags=["health"])
 async def health_check():
     """
