@@ -34,7 +34,7 @@
       margin-bottom: 28px;
     }
 
-    /* ── Network Overview ── */
+    /* ── Section label ── */
     .section-label {
       font-size: 11px;
       color: #888;
@@ -43,6 +43,7 @@
       margin-bottom: 10px;
     }
 
+    /* ── Network Overview ── */
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -131,6 +132,22 @@
     .badge-wrong              { background: #fff3e0; color: #bf360c; }
     .badge-multiple           { background: #f3e5f5; color: #6a1b9a; }
 
+    .count-pill {
+      display: inline-block;
+      background: #eee;
+      color: #555;
+      font-size: 10px;
+      font-weight: bold;
+      padding: 1px 6px;
+      border-radius: 10px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .duration-warn {
+      color: #e65100;
+    }
+
     .empty-row td {
       text-align: center;
       color: #bbb;
@@ -196,10 +213,29 @@
       margin-bottom: 20px;
     }
 
+    /* ── Last updated + live dot ── */
     .last-updated {
       font-size: 11px;
       color: #aaa;
       margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #4caf50;
+      display: inline-block;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%   { opacity: 1; }
+      50%  { opacity: 0.3; }
+      100% { opacity: 1; }
     }
   </style>
 </head>
@@ -214,6 +250,26 @@ const COMPLIANCE_URL  = `${BASE}/dashboard/compliance-violations?camera_id=camer
 const POLL_MS         = 2000;
 const SLOTS           = ['ROI_1', 'ROI_2'];
 
+/* ── Violation label map (covers all known backend keys) ── */
+const VIOLATION_MAP = {
+  unauthorized_parking:        ['badge-unauthorized', 'Unauthorized Parking'],
+  wrong_parking:               ['badge-wrong',        'Double Slot Parking'],
+  multiple_cars_in_roi:        ['badge-multiple',     'Multiple Cars in Slot'],
+  parking_compliance_triggered:['badge-unauthorized', 'Unauthorized Parking'],
+};
+
+function violationLabel(vtype) {
+  if (!vtype) return null;
+  const entry = VIOLATION_MAP[vtype];
+  return entry ? entry[1] : vtype;
+}
+
+function violationBadgeClass(vtype) {
+  if (!vtype) return '';
+  const entry = VIOLATION_MAP[vtype];
+  return entry ? entry[0] : '';
+}
+
 /* ── helpers ── */
 function display(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -225,12 +281,15 @@ function fmtTime(iso) {
   try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
 }
 
-function duration(inIso, outIso) {
+function durationSecs(inIso, outIso) {
   const start = inIso ? new Date(inIso) : null;
   const end   = outIso ? new Date(outIso) : new Date();
   if (!start || isNaN(start)) return null;
-  const secs = Math.floor((end - start) / 1000);
-  if (secs < 0) return null;
+  return Math.floor((end - start) / 1000);
+}
+
+function fmtDuration(secs) {
+  if (secs === null || secs < 0) return null;
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = secs % 60;
@@ -248,6 +307,20 @@ function statusBadge(status) {
     incomplete: 'badge-incomplete',
   }[status.toLowerCase()] || '';
   return <span className={`badge ${cls}`}>{status.toUpperCase()}</span>;
+}
+
+/* ── Deduplicate violations: group by car_number + violation_type ── */
+function deduplicateViolations(violations) {
+  const groups = new Map();
+  for (const v of violations) {
+    const key = `${v.car_number || ''}__${v.violation_type || ''}`;
+    if (!groups.has(key)) {
+      groups.set(key, { ...v, count: 1 });
+    } else {
+      groups.get(key).count += 1;
+    }
+  }
+  return Array.from(groups.values());
 }
 
 /* ── Field row ── */
@@ -275,6 +348,9 @@ function SlotCard({ slotId, data }) {
     return '';
   };
 
+  const carNumber = data?.car_number || (data?.violation ? 'Unidentified' : null);
+  const violationDisplay = data?.violation ? violationLabel(data.violation) : null;
+
   return (
     <div className="slot-box">
       <div className="slot-name">{slotId}</div>
@@ -282,15 +358,15 @@ function SlotCard({ slotId, data }) {
         <Field label="Status" value="EMPTY" className="status-empty" />
       ) : (
         <>
-          <Field label="Car Number"    value={data.car_number} />
+          <Field label="Car Number"    value={carNumber} />
           <Field label="Car Model"     value={data.car_model} />
-          <Field label="Car In Time"   value={data.car_intime} />
-          <Field label="Car Out Time"  value={data.car_outtime} />
+          <Field label="Car In Time"   value={fmtTime(data.car_intime)} />
+          <Field label="Car Out Time"  value={fmtTime(data.car_outtime)} />
           <Field label="Gun Number"    value={data.gun_number} />
-          <Field label="Plug In Time"  value={data.gun_plugin_time} />
-          <Field label="Plug Out Time" value={data.gun_plugout_time} />
+          <Field label="Plug In Time"  value={fmtTime(data.gun_plugin_time)} />
+          <Field label="Plug Out Time" value={fmtTime(data.gun_plugout_time)} />
           <Field label="Status"        value={data.status ? data.status.toUpperCase() : null} className={statusCls()} />
-          <Field label="Violation"     value={data.violation || 'NONE'} className={data.violation ? 'violation-value' : ''} />
+          <Field label="Violation"     value={violationDisplay || 'NONE'} className={violationDisplay ? 'violation-value' : ''} />
         </>
       )}
     </div>
@@ -299,6 +375,8 @@ function SlotCard({ slotId, data }) {
 
 /* ── Sessions table ── */
 function SessionsTable({ sessions }) {
+  const ANOMALY_HOURS = 24;
+
   if (!sessions.length) {
     return (
       <table>
@@ -328,38 +406,45 @@ function SessionsTable({ sessions }) {
         </tr>
       </thead>
       <tbody>
-        {sessions.map(s => (
-          <tr key={s.session_id}>
-            <td>#{s.session_id}</td>
-            <td>Station 1</td>
-            <td>{display(s.car_model) || <span className="td-null">--</span>}</td>
-            <td>Kochi</td>
-            <td>{duration(s.in_time, s.out_time) || <span className="td-null">--</span>}</td>
-            <td>{statusBadge(s.session_status)}</td>
-          </tr>
-        ))}
+        {sessions.map(s => {
+          const secs = durationSecs(s.in_time, s.out_time);
+          const durStr = fmtDuration(secs);
+          const isAnomaly = secs !== null && secs > ANOMALY_HOURS * 3600;
+          return (
+            <tr key={s.session_id}>
+              <td>#{s.session_id}</td>
+              <td>Station 1</td>
+              <td>{display(s.car_model) || <span className="td-null">--</span>}</td>
+              <td>Kochi</td>
+              <td>
+                {durStr
+                  ? <span className={isAnomaly ? 'duration-warn' : ''}>{durStr}{isAnomaly ? ' !' : ''}</span>
+                  : <span className="td-null">--</span>
+                }
+              </td>
+              <td>{statusBadge(s.session_status)}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
 }
 
 /* ── Violation type badge ── */
-function violationBadge(vtype) {
+function ViolationBadge({ vtype }) {
   if (!vtype) return <span className="td-null">--</span>;
-  const map = {
-    unauthorized_parking:  ['badge-unauthorized', 'Unauthorized Parking'],
-    wrong_parking:         ['badge-wrong',        'Double Slot Parking'],
-    multiple_cars_in_roi:  ['badge-multiple',     'Multiple Cars in Slot'],
-  };
-  const [cls, label] = map[vtype] || ['', vtype];
+  const cls   = violationBadgeClass(vtype);
+  const label = violationLabel(vtype);
   return <span className={`badge ${cls}`}>{label}</span>;
 }
 
 /* ── Compliance violations table ── */
 function ComplianceTable({ violations }) {
-  const cols = ['Station', 'Car Number', 'Car Model', 'Violation Type', 'Duration'];
+  const cols = ['Station', 'Car Number', 'Car Model', 'Violation Type', 'Duration', 'Count'];
+  const deduped = deduplicateViolations(violations);
 
-  if (!violations.length) {
+  if (!deduped.length) {
     return (
       <table>
         <thead><tr>{cols.map(c => <th key={c}>{c}</th>)}</tr></thead>
@@ -372,13 +457,18 @@ function ComplianceTable({ violations }) {
     <table>
       <thead><tr>{cols.map(c => <th key={c}>{c}</th>)}</tr></thead>
       <tbody>
-        {violations.map(v => (
-          <tr key={v.alert_id}>
+        {deduped.map((v, i) => (
+          <tr key={i}>
             <td>{v.station || 'Station 1'}</td>
             <td>{display(v.car_number) || <span className="td-null">--</span>}</td>
             <td>{display(v.car_model) || <span className="td-null">--</span>}</td>
-            <td>{violationBadge(v.violation_type)}</td>
+            <td><ViolationBadge vtype={v.violation_type} /></td>
             <td>{display(v.duration) || <span className="td-null">--</span>}</td>
+            <td>
+              {v.count > 1
+                ? <span className="count-pill">×{v.count}</span>
+                : <span className="td-null">1</span>}
+            </td>
           </tr>
         ))}
       </tbody>
@@ -427,18 +517,19 @@ function App() {
 
   const slots = stationData?.slots || {};
 
-  /* Network overview stats */
+  /* Network overview stats — derived from slot data, not session list */
   const totalStations  = 1;
   const activeCount    = sessions.filter(s => ['charging', 'active'].includes((s.session_status || '').toLowerCase())).length;
-  const idleSlots      = SLOTS.length - activeCount;
-  const totalSessions  = sessions.length;
-  const violationCount = violations.length;
+  const slotStatuses   = SLOTS.map(id => (slots[id]?.status || 'empty').toLowerCase());
+  const idleSlots      = slotStatuses.filter(s => s === 'empty').length;
 
   return (
     <>
       <div className="page-title">EV Charging Monitor</div>
       <div className="last-updated">
-        {lastUpdated ? `Last updated: ${lastUpdated}` : 'Connecting…'}
+        {lastUpdated
+          ? <><span className="live-dot" /><span>Last updated: {lastUpdated}</span></>
+          : 'Connecting…'}
       </div>
 
       {error && <div className="error-box">Error: {error}</div>}
