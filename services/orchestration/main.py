@@ -1582,26 +1582,54 @@ async def dashboard_compliance_violations(
                     return et
             return atype or "unknown"
 
-        def resolve_car_model(row):
-            """Find car_model from the most-recent session near this violation time."""
+        def extract_track_id(row):
+            """Pull track_id from the alert extras (violations or events list)."""
+            extras = row.extras or {}
+            for v in extras.get("violations", []):
+                tid = v.get("track_id")
+                if tid:
+                    return str(tid)
+            for e in extras.get("events", []):
+                tid = e.get("track_id")
+                if tid:
+                    return str(tid)
+            return None
+
+        def resolve_session_fields(row):
+            """Return (car_number, car_model) by joining ChargingSession on track_id."""
+            track_id = extract_track_id(row)
+            q = db.query(ChargingSession.car_number, ChargingSession.car_model).filter(
+                ChargingSession.camera_id == camera_id
+            )
+            if track_id:
+                session = (
+                    q.filter(ChargingSession.track_id == track_id)
+                    .order_by(ChargingSession.created_at.desc())
+                    .first()
+                )
+                if session:
+                    return session.car_number, session.car_model
+            # Fallback: most-recent session with any car data
             session = (
-                db.query(ChargingSession.car_model)
-                .filter(ChargingSession.camera_id == camera_id)
-                .filter(ChargingSession.car_model.isnot(None))
+                q.filter(ChargingSession.car_number.isnot(None))
                 .order_by(ChargingSession.created_at.desc())
                 .first()
             )
-            return session.car_model if session else None
+            if session:
+                return session.car_number, session.car_model
+            return None, None
 
         violations = []
         for row in rows:
+            car_number, car_model = resolve_session_fields(row)
             violations.append({
-                "alert_id":      row.alert_id,
-                "station":       station_id,
-                "car_model":     resolve_car_model(row),
+                "alert_id":       row.alert_id,
+                "station":        station_id,
+                "car_number":     car_number,
+                "car_model":      car_model,
                 "violation_type": resolve_violation_type(row),
-                "timestamp":     row.timestamp.isoformat() if row.timestamp else None,
-                "duration":      elapsed(row.timestamp),
+                "timestamp":      row.timestamp.isoformat() if row.timestamp else None,
+                "duration":       elapsed(row.timestamp),
             })
 
         return {"violations": violations, "total": len(violations)}

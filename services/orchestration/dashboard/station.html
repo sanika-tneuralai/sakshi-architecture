@@ -45,7 +45,7 @@
 
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 12px;
       margin-bottom: 32px;
     }
@@ -357,7 +357,7 @@ function violationBadge(vtype) {
 
 /* ── Compliance violations table ── */
 function ComplianceTable({ violations }) {
-  const cols = ['Station', 'Car Model', 'Violation Type', 'Duration'];
+  const cols = ['Station', 'Car Number', 'Car Model', 'Violation Type', 'Duration'];
 
   if (!violations.length) {
     return (
@@ -375,6 +375,7 @@ function ComplianceTable({ violations }) {
         {violations.map(v => (
           <tr key={v.alert_id}>
             <td>{v.station || 'Station 1'}</td>
+            <td>{display(v.car_number) || <span className="td-null">--</span>}</td>
             <td>{display(v.car_model) || <span className="td-null">--</span>}</td>
             <td>{violationBadge(v.violation_type)}</td>
             <td>{display(v.duration) || <span className="td-null">--</span>}</td>
@@ -429,7 +430,7 @@ function App() {
   /* Network overview stats */
   const totalStations  = 1;
   const activeCount    = sessions.filter(s => ['charging', 'active'].includes((s.session_status || '').toLowerCase())).length;
-  const idleSlots      = SLOTS.filter(id => !slots[id] || slots[id].status === 'empty').length;
+  const idleSlots      = SLOTS.length - activeCount;
   const totalSessions  = sessions.length;
   const violationCount = violations.length;
 
@@ -458,16 +459,16 @@ function App() {
           <div className="stat-label">Idle Slots</div>
           <div className="stat-value">{idleSlots}</div>
         </div>
-        <div className="stat-box">
-          <div className="stat-label">Total Sessions</div>
-          <div className="stat-value">{totalSessions}</div>
-          <div className="stat-sub">All time</div>
-        </div>
-        <div className="stat-box">
-          <div className="stat-label">Violations</div>
-          <div className="stat-value" style={{color: violationCount > 0 ? '#b71c1c' : '#111'}}>{violationCount}</div>
-          <div className="stat-sub">Parking compliance</div>
-        </div>
+      </div>
+
+      {/* ── Live Slot Status ── */}
+      <div className="section-label" style={{marginBottom: '10px'}}>
+        Live Slot Status — {stationData?.station_id || 'station_01'}
+      </div>
+      <div className="slots-grid" style={{marginBottom: '32px'}}>
+        {SLOTS.map(slotId => (
+          <SlotCard key={slotId} slotId={slotId} data={slots[slotId]} />
+        ))}
       </div>
 
       {/* ── Charging Sessions Table ── */}
@@ -480,16 +481,6 @@ function App() {
       <div className="section-label" style={{marginBottom: '10px'}}>Parking Compliance Violations</div>
       <div className="sessions-wrap">
         <ComplianceTable violations={violations} />
-      </div>
-
-      {/* ── Live Slot Status ── */}
-      <div className="section-label" style={{marginBottom: '10px'}}>
-        Live Slot Status — {stationData?.station_id || 'station_01'}
-      </div>
-      <div className="slots-grid">
-        {SLOTS.map(slotId => (
-          <SlotCard key={slotId} slotId={slotId} data={slots[slotId]} />
-        ))}
       </div>
     </>
   );
