@@ -126,20 +126,31 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         from google import genai
         from google.genai import types
 
-        client     = genai.Client(api_key=GEMINI_API_KEY)
-        image_b64  = _crop_to_b64(crop)
+        client    = genai.Client(api_key=GEMINI_API_KEY)
+        image_b64 = _crop_to_b64(crop)
         logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
 
         prompt = (
-            "You are a vehicle recognition assistant. "
-            "Look at this image of a vehicle and return ONLY a JSON object with two keys:\n"
-            '  "car_number": the license plate number exactly as it appears in the image (e.g. "MH12AB1234"). '
-            'If the plate is not clearly visible, partially obscured, blurry, or you are not 100% certain, '
-            'you MUST return "unreadable". Do NOT guess or infer — only return a plate you can directly read.\n'
-            '  "car_model": the make and model of the vehicle (e.g. "Toyota Innova"). '
-            'If you cannot clearly identify it, return "unknown". Do NOT guess.\n'
-            "Return only valid JSON, no explanation."
+            "You are a vehicle recognition system. Analyse this image.\n\n"
+            "RULES — follow exactly, violations cause system errors:\n"
+            '1. "car_number": Copy the license plate characters EXACTLY as printed on the plate. '
+            "Every character must be directly visible and legible in the image. "
+            'If ANY character is unclear, obscured, blurry, cut off, or you have ANY doubt, '
+            'return the exact string "unreadable". NEVER guess, infer, autocomplete, or construct '
+            "a plausible-looking plate — return only what you can literally read pixel-by-pixel.\n"
+            '2. "car_model": State the make and model only if you are highly confident (e.g. "Toyota Innova"). '
+            'If the model is unclear or you are guessing, return the exact string "unknown".\n\n'
+            "Return ONLY a JSON object with these two keys. No explanation, no markdown."
         )
+
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "car_number": {"type": "string"},
+                "car_model":  {"type": "string"},
+            },
+            "required": ["car_number", "car_model"],
+        }
 
         logger.info("[VEHICLE] Sending request to Gemini...")
         response = client.models.generate_content(
@@ -148,23 +159,28 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
                 types.Part.from_text(text=prompt),
                 types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"),
             ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+                temperature=0.0,
+            ),
         )
         text = response.text.strip()
         logger.info("[VEHICLE] Gemini raw response: %s", text)
 
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-            logger.info("[VEHICLE] Gemini response after stripping fences: %s", text)
-
         result = json.loads(text)
-        logger.info("[VEHICLE] Gemini parsed result: %s", result)
-        return {
-            "car_number": str(result.get("car_number", "unreadable")),
-            "car_model":  str(result.get("car_model",  "unknown")),
-        }
+        car_number = str(result.get("car_number", "unreadable")).strip()
+        car_model  = str(result.get("car_model",  "unknown")).strip()
+
+        # Reject suspiciously short plates (real plates have ≥4 chars)
+        if car_number != "unreadable" and len(car_number.replace(" ", "")) < 4:
+            logger.warning(
+                "[VEHICLE] Plate '%s' rejected — too short to be real, marking unreadable", car_number
+            )
+            car_number = "unreadable"
+
+        logger.info("[VEHICLE] Gemini parsed result: car_number=%s car_model=%s", car_number, car_model)
+        return {"car_number": car_number, "car_model": car_model}
 
     except Exception as exc:
         logger.warning("[VEHICLE] Gemini extraction failed: %s", exc, exc_info=True)
