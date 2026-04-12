@@ -1403,6 +1403,101 @@ async def dashboard_safety_monitoring(
         db.close()
 
 
+@app.get("/dashboard/station", tags=["dashboard"])
+async def dashboard_station(
+    camera_id: str = "camera_01",
+    station_id: str = "station_01",
+):
+    """
+    Real-time slot-oriented station view for the EV charging station monitor.
+
+    Returns the two active slots (ROI_1, ROI_2) with the most-recent
+    open/active session for each slot, plus the latest compliance violation
+    per slot as the "violation" field.
+
+    Response shape:
+    {
+      "station_id": "station_01",
+      "slots": {
+        "ROI_1": {
+          "car_number": "KL87G345",
+          "car_model": "Tata Tiago EV",
+          "car_intime": "22:56:44",
+          "car_outtime": null,
+          "gun_number": "Gun 2",
+          "gun_plugin_time": "22:58:53",
+          "gun_plugout_time": null,
+          "status": "charging",
+          "violation": null
+        },
+        "ROI_2": { "status": "empty" }
+      }
+    }
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import ChargingSession, Alert
+
+        SLOTS = ["ROI_1", "ROI_2"]
+        slots_out = {}
+
+        for slot_id in SLOTS:
+            # Most-recent open session (no out_time yet) for this slot
+            session = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.slot_id == slot_id,
+                    ChargingSession.out_time.is_(None),
+                )
+                .order_by(ChargingSession.created_at.desc())
+                .first()
+            )
+
+            if session is None:
+                slots_out[slot_id] = {"status": "empty"}
+                continue
+
+            # Latest compliance violation for this slot (if any)
+            violation_row = (
+                db.query(Alert)
+                .filter(
+                    Alert.camera_id == camera_id,
+                    Alert.slot_id == slot_id,
+                    Alert.usecase_name == "parking_compliance",
+                )
+                .order_by(Alert.timestamp.desc())
+                .first()
+            )
+            violation = violation_row.alert_type if violation_row else None
+
+            def fmt_time(dt):
+                return dt.strftime("%H:%M:%S") if dt else None
+
+            slots_out[slot_id] = {
+                "car_number":      session.car_number,
+                "car_model":       session.car_model,
+                "car_intime":      fmt_time(session.in_time),
+                "car_outtime":     fmt_time(session.out_time),
+                "gun_number":      session.gun_number,
+                "gun_plugin_time": fmt_time(session.plug_time),
+                "gun_plugout_time": fmt_time(session.plug_out_time),
+                "status":          session.session_status or "active",
+                "violation":       violation,
+            }
+
+        return {"station_id": station_id, "slots": slots_out}
+
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] /dashboard/station failed: {e}")
+        return {
+            "station_id": station_id,
+            "slots": {"ROI_1": {"status": "empty"}, "ROI_2": {"status": "empty"}},
+        }
+    finally:
+        db.close()
+
+
 @app.get("/health", tags=["health"])
 async def health_check():
     """

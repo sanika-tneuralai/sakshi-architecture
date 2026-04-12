@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EV Station Monitor</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      background: #0d0d0d;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+
+    #root { max-width: 860px; margin: 0 auto; }
+
+    .header {
+      font-size: 20px;
+      font-weight: bold;
+      color: #ffffff;
+      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+    }
+
+    .last-updated {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 28px;
+    }
+
+    .slots-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    @media (max-width: 600px) {
+      .slots-grid { grid-template-columns: 1fr; }
+    }
+
+    .slot-box {
+      border: 1px solid #333;
+      padding: 18px 20px;
+      background: #141414;
+    }
+
+    .slot-name {
+      font-size: 15px;
+      font-weight: bold;
+      color: #fff;
+      margin-bottom: 14px;
+      border-bottom: 1px solid #2a2a2a;
+      padding-bottom: 8px;
+      letter-spacing: 0.05em;
+    }
+
+    .slot-empty {
+      color: #555;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .field-row {
+      display: flex;
+      gap: 8px;
+      font-size: 13px;
+      margin-bottom: 7px;
+      line-height: 1.4;
+    }
+
+    .field-label {
+      color: #888;
+      min-width: 130px;
+      flex-shrink: 0;
+    }
+
+    .field-value {
+      color: #e0e0e0;
+    }
+
+    .field-value.null {
+      color: #444;
+    }
+
+    .status-charging { color: #4fc3f7; font-weight: bold; }
+    .status-active   { color: #81c995; font-weight: bold; }
+    .status-completed{ color: #888; }
+    .status-idle     { color: #aaa; }
+    .status-empty    { color: #555; }
+
+    .violation-value { color: #ff7043; }
+
+    .error-box {
+      color: #ff5555;
+      font-size: 13px;
+      margin-top: 16px;
+      border: 1px solid #3a1a1a;
+      padding: 12px 16px;
+      background: #1a0d0d;
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const API_URL = 'http://13.201.133.171:8000/dashboard/station?camera_id=camera_01&station_id=station_01';
+const POLL_MS = 2000;
+const SLOTS   = ['ROI_1', 'ROI_2'];
+
+function val(v) {
+  if (v === null || v === undefined || v === '') return null;
+  return v;
+}
+
+function Field({ label, value, className }) {
+  const display = val(value);
+  return (
+    <div className="field-row">
+      <span className="field-label">{label}</span>
+      <span className={`field-value${display === null ? ' null' : ''}${className ? ' ' + className : ''}`}>
+        {display !== null ? display : '--'}
+      </span>
+    </div>
+  );
+}
+
+function statusClass(status) {
+  if (!status) return '';
+  const s = status.toLowerCase();
+  if (s === 'charging')  return 'status-charging';
+  if (s === 'active')    return 'status-active';
+  if (s === 'completed') return 'status-completed';
+  if (s === 'idle')      return 'status-idle';
+  return '';
+}
+
+function SlotCard({ slotId, data }) {
+  const isEmpty = !data || data.status === 'empty';
+
+  return (
+    <div className="slot-box">
+      <div className="slot-name">{slotId}</div>
+
+      {isEmpty ? (
+        <div className="slot-empty">
+          <Field label="Status" value="EMPTY" className="status-empty" />
+        </div>
+      ) : (
+        <>
+          <Field label="Car Number"     value={data.car_number} />
+          <Field label="Car Model"      value={data.car_model} />
+          <Field label="Car In Time"    value={data.car_intime} />
+          <Field label="Car Out Time"   value={data.car_outtime} />
+          <Field label="Gun Number"     value={data.gun_number} />
+          <Field label="Plug In Time"   value={data.gun_plugin_time} />
+          <Field label="Plug Out Time"  value={data.gun_plugout_time} />
+          <Field label="Status"         value={data.status ? data.status.toUpperCase() : null} className={statusClass(data.status)} />
+          <Field label="Violation"      value={data.violation || 'NONE'} className={data.violation ? 'violation-value' : ''} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [stationData, setStationData] = React.useState(null);
+  const [lastUpdated, setLastUpdated] = React.useState(null);
+  const [error, setError]             = React.useState(null);
+
+  React.useEffect(() => {
+    async function poll() {
+      try {
+        const res = await fetch(API_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        setStationData(json);
+        setLastUpdated(new Date().toLocaleTimeString());
+        setError(null);
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+
+    poll();
+    const id = setInterval(poll, POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  const slots = stationData?.slots || {};
+
+  return (
+    <>
+      <div className="header">Station: {stationData?.station_id || 'station_01'}</div>
+      <div className="last-updated">
+        {lastUpdated ? `Last updated: ${lastUpdated}` : 'Connecting…'}
+      </div>
+
+      {error && <div className="error-box">Error: {error}</div>}
+
+      <div className="slots-grid">
+        {SLOTS.map(slotId => (
+          <SlotCard key={slotId} slotId={slotId} data={slots[slotId]} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
