@@ -32,7 +32,7 @@ load_dotenv()
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException
@@ -1441,6 +1441,9 @@ async def dashboard_station(
         SLOTS = ["ROI_1", "ROI_2"]
         slots_out = {}
 
+        now = datetime.now(timezone.utc)
+        violation_cutoff = now - timedelta(seconds=30)
+
         for slot_id in SLOTS:
             # Most-recent open session (no out_time yet) for this slot
             session = (
@@ -1454,17 +1457,20 @@ async def dashboard_station(
                 .first()
             )
 
-            if session is None:
+            # Treat as empty if the session has no car_number — vehicle_extraction
+            # never ran, meaning the car was never properly confirmed in the slot.
+            if session is None or session.car_number is None:
                 slots_out[slot_id] = {"status": "empty"}
                 continue
 
-            # Latest compliance violation for this slot (if any)
+            # Only show a violation if it was raised within the last 30 seconds
             violation_row = (
                 db.query(Alert)
                 .filter(
                     Alert.camera_id == camera_id,
                     Alert.slot_id == slot_id,
                     Alert.usecase_name == "parking_compliance",
+                    Alert.timestamp >= violation_cutoff,
                 )
                 .order_by(Alert.timestamp.desc())
                 .first()
