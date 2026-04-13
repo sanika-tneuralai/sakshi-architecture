@@ -56,3 +56,42 @@ def which_rois(bbox: dict, rois: Dict[str, List[Tuple[int, int]]]) -> List[str]:
         for name, polygon in rois.items()
         if is_point_in_roi(cx, cy, polygon)
     ]
+
+
+def which_rois_bbox_overlap(
+    bbox: dict,
+    rois: Dict[str, List[Tuple[int, int]]],
+    overlap_threshold: float = 0.15,
+) -> List[str]:
+    """
+    Return the names of all ROIs whose polygon has significant area overlap
+    with the bounding box.  This detects double-slot parking where the car
+    straddles a boundary and the centroid falls in only one ROI.
+
+    Strategy: sample a grid of points inside the bbox and count how many
+    fall inside each ROI polygon. A ROI is considered matched when the
+    fraction of sample points inside it exceeds *overlap_threshold*.
+
+    Args:
+        bbox: dict with x1/y1/x2/y2
+        rois: mapping of roi_name -> polygon point list
+        overlap_threshold: fraction of bbox area that must overlap an ROI
+                           to count as a match (default 15 %).
+
+    Returns:
+        List of ROI names with significant overlap (may be empty).
+    """
+    x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
+    # Sample a 5×5 grid of points covering the bbox
+    steps = 5
+    xs = [x1 + (x2 - x1) * i / (steps - 1) for i in range(steps)]
+    ys = [y1 + (y2 - y1) * i / (steps - 1) for i in range(steps)]
+    sample_points = [(x, y) for x in xs for y in ys]
+    total = len(sample_points)
+
+    matched = []
+    for name, polygon in rois.items():
+        hits = sum(1 for x, y in sample_points if is_point_in_roi(x, y, polygon))
+        if hits / total >= overlap_threshold:
+            matched.append(name)
+    return matched

@@ -31,7 +31,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, List
 
-from shared.common.roi import which_rois
+from shared.common.roi import which_rois, which_rois_bbox_overlap
 from usecase.domain.vehicles.events import build_event, publish_sync
 from usecase.rules.base import BaseUsecaseRule
 from workers.redis_state import get_state, set_state
@@ -84,10 +84,21 @@ class ParkingComplianceRule(BaseUsecaseRule):
         else:
             for car in cars:
                 track_id = car.get("track_id", "unknown")
+                # Centroid-based check: which ROI the car's centre is in
                 matched_rois = which_rois(car["bbox"], rois)
-                print(f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}")
+                # Overlap-based check: detects double-slot parking where the car
+                # straddles a boundary and the centroid falls in only one ROI
+                overlap_rois = which_rois_bbox_overlap(car["bbox"], rois)
+                print(
+                    f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}"
+                    f" | overlap_rois={overlap_rois}"
+                )
 
-                if len(matched_rois) == 0:
+                # Merge: a car is considered "in" a ROI if its centroid is there
+                # OR if enough of its body overlaps it.
+                all_matched_rois = list(dict.fromkeys(matched_rois + [r for r in overlap_rois if r not in matched_rois]))
+
+                if len(all_matched_rois) == 0:
                     # ── Unauthorized parking ──────────────────────────────────
                     active_unauthorized.add(track_id)
 
@@ -133,8 +144,8 @@ class ParkingComplianceRule(BaseUsecaseRule):
                             camera_id, track_id,
                         )
 
-                elif len(matched_rois) > 1:
-                    # ── Wrong parking ─────────────────────────────────────────
+                elif len(all_matched_rois) > 1:
+                    # ── Wrong / Double-slot parking ───────────────────────────
                     evt = build_event(
                         event_type="wrong_parking",
                         camera_id=camera_id,
@@ -143,8 +154,8 @@ class ParkingComplianceRule(BaseUsecaseRule):
                         metadata={
                             "bbox": car.get("bbox"),
                             "confidence": car.get("confidence"),
-                            "overlapping_rois": matched_rois,
-                            "reason": "car centroid inside multiple ROIs simultaneously",
+                            "overlapping_rois": all_matched_rois,
+                            "reason": "car occupies multiple ROI slots (double parking)",
                         },
                     )
                     violations.append(evt)
@@ -152,7 +163,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     publish_sync("violation_events", evt)
                     logger.warning(
                         "[COMPLIANCE] Wrong parking: camera=%s track=%s rois=%s",
-                        camera_id, track_id, matched_rois,
+                        camera_id, track_id, all_matched_rois,
                     )
 
         # ── Check exit for unauthorized cars no longer visible ────────────────
