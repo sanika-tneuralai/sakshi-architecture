@@ -376,7 +376,7 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
 
     parking_detection special handling:
       - parking_intime / parking_outtime → alert usecase_name='parking_detection'
-      - multiple_cars_in_roi             → alert usecase_name='parking_compliance'
+      - multiple_cars_in_roi             → dropped (transient YOLO overlap artefact)
 
     Returns the number of alert rows written.
     """
@@ -438,22 +438,8 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
                     ))
                     written += 1
 
-                for evt in violation_events:
-                    meta    = evt.get("metadata", {})
-                    slot_id = meta.get("slot_id") or meta.get("roi")
-                    roi     = meta.get("roi", "unknown")
-                    count   = meta.get("count", 2)
-                    db.add(Alert(
-                        camera_id    = camera_id,
-                        slot_id      = slot_id,
-                        usecase_name = "parking_compliance",
-                        alert_type   = "multiple_cars_in_roi",
-                        message      = f"[parking_compliance] {count} cars detected in {roi}",
-                        status       = "sent",
-                        snapshot_url = snapshot_url,
-                        extras       = {"violations": [evt]},
-                    ))
-                    written += 1
+                # multiple_cars_in_roi is a transient YOLO overlap artefact,
+                # not a parking rule violation — drop it from the alert log.
 
                 continue
 
