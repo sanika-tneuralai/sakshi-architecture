@@ -163,7 +163,8 @@ class HailoDetector(BaseDetector):
         # Cache the single input stream name
         input_info = hef.get_input_vstream_infos()[0]
         self._input_name = input_info.name
-        print(f"[HAILO DEBUG] input stream: name={input_info.name}, shape={input_info.shape}, format={input_info.format}")
+        fmt = input_info.format
+        print(f"[HAILO DEBUG] input stream: name={input_info.name}, shape={input_info.shape}, format type={fmt.type}, format order={fmt.order}")
 
         # Discover the NMS postprocess output key dynamically
         output_infos = hef.get_output_vstream_infos()
