@@ -148,9 +148,62 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             camera_id, roi_name, tid,
                         )
                     elif slot["occupied"]:
-                        # Car still in slot — refresh track_id (informational)
-                        slot["track_id"] = tid
-                        entry_buf[roi_name].pop(tid, None)
+                        prev_tid = slot.get("track_id")
+                        if prev_tid and tid != prev_tid and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
+                            # A different track_id has been consistently present for
+                            # ENTRY_FRAMES — the previous car left without a clean exit
+                            # (e.g. compliance violation, tracker re-ID after service
+                            # restart). Fire outtime for the old car, then intime for
+                            # the new one so the session boundary is correct in the DB.
+                            swap_ts = _now()
+
+                            outtime_evt = build_event(
+                                event_type="parking_outtime",
+                                camera_id=camera_id,
+                                timestamp=swap_ts,
+                                track_id=prev_tid,
+                                metadata={
+                                    "roi":     roi_name,
+                                    "slot_id": roi_name,
+                                    "intime":  slot["in_time"],
+                                    "outtime": swap_ts,
+                                    "reason":  "car swap — new car confirmed in slot",
+                                },
+                            )
+                            events.append(outtime_evt)
+                            publish_sync("parking_events", outtime_evt, task_id=task_id)
+                            logger.warning(
+                                "[PARKING] Car swap detected: camera=%s roi=%s old=%s new=%s",
+                                camera_id, roi_name, prev_tid, tid,
+                            )
+
+                            # Reset slot state then record the new car's intime
+                            reset_slot_state(camera_id, roi_name)
+                            slot = get_slot_state(camera_id, roi_name)
+
+                            slot["occupied"]          = True
+                            slot["in_time"]           = swap_ts
+                            slot["track_id"]          = tid
+                            slot["car_absent_frames"] = 0
+                            entry_buf[roi_name].pop(tid, None)
+
+                            intime_evt = build_event(
+                                event_type="parking_intime",
+                                camera_id=camera_id,
+                                timestamp=swap_ts,
+                                track_id=tid,
+                                metadata={"roi": roi_name, "slot_id": roi_name},
+                            )
+                            events.append(intime_evt)
+                            publish_sync("parking_events", intime_evt, task_id=task_id)
+                            logger.info(
+                                "[PARKING] Intime for swapped car: camera=%s roi=%s track=%s",
+                                camera_id, roi_name, tid,
+                            )
+                        else:
+                            # Same car still in slot — refresh track_id (informational)
+                            slot["track_id"] = tid
+                            entry_buf[roi_name].pop(tid, None)
 
             else:
                 # No car in this ROI this frame
