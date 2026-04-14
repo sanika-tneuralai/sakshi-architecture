@@ -163,6 +163,27 @@ class HailoDetector(BaseDetector):
         # Cache the single input stream name
         self._input_name = hef.get_input_vstream_infos()[0].name
 
+        # Discover the NMS postprocess output key dynamically
+        output_infos = hef.get_output_vstream_infos()
+        output_names = [info.name for info in output_infos]
+        logger.info("HEF output stream names: %s", output_names)
+        print(f"✓ HEF output streams: {output_names}")
+
+        # Prefer a name containing 'nms_postprocess', fall back to single output
+        nms_keys = [n for n in output_names if "nms_postprocess" in n]
+        if nms_keys:
+            self._output_key = nms_keys[0]
+        elif len(output_names) == 1:
+            self._output_key = output_names[0]
+        else:
+            raise RuntimeError(
+                f"Cannot determine NMS postprocess output key. "
+                f"Available outputs: {output_names}. "
+                f"Expected one containing 'nms_postprocess'."
+            )
+        logger.info("Using output key: %s", self._output_key)
+        print(f"✓ HailoDetector using output key: {self._output_key}")
+
         logger.info("HEF loaded: %s", self.hef_path)
         print(f"✓ HailoDetector._load completed: {self.hef_path}")
 
@@ -186,13 +207,12 @@ class HailoDetector(BaseDetector):
         """
         Decode Hailo YOLOv8 NMS-baked output into Detection objects.
 
-        Output tensor: goec_v2/yolov8_nms_postprocess
-        Shape: (num_classes, 5, max_proposals) = (4, 5, 100)
-        Each detection row: [y1, x1, y2, x2, score] normalised 0-1.
+        Output key is auto-discovered at load time (self._output_key).
+        Shape: (num_classes, N, 5) — each row: [y1, x1, y2, x2, score] normalised 0-1.
         """
         orig_h, orig_w = original_shape[:2]
 
-        key = "goec_v2/yolov8_nms_postprocess"
+        key = self._output_key
         # Hailo NMS output: list of per-class detection arrays
         # raw_output[key] is a list (batch), [0] gives one list per class
         # Each class entry is an ndarray of shape (N, 5): [y1, x1, y2, x2, score]
