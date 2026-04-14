@@ -161,7 +161,9 @@ class HailoDetector(BaseDetector):
         )
 
         # Cache the single input stream name
-        self._input_name = hef.get_input_vstream_infos()[0].name
+        input_info = hef.get_input_vstream_infos()[0]
+        self._input_name = input_info.name
+        print(f"[HAILO DEBUG] input stream: name={input_info.name}, shape={input_info.shape}, format={input_info.format}")
 
         # Discover the NMS postprocess output key dynamically
         output_infos = hef.get_output_vstream_infos()
@@ -194,7 +196,9 @@ class HailoDetector(BaseDetector):
         """
         resized = cv2.resize(frame, (self.input_width, self.input_height))
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return rgb.astype(np.uint8)
+        result = rgb.astype(np.uint8)
+        print(f"[HAILO DEBUG] preprocess: input shape={frame.shape} dtype={frame.dtype}, output shape={result.shape} dtype={result.dtype} min={result.min()} max={result.max()}")
+        return result
 
     def _postprocess(
         self,
