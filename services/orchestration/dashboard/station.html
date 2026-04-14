@@ -271,7 +271,7 @@ function BayCard({ slotId, data }) {
 /* ── Sessions Table ── */
 function SessionsTable({ sessions }) {
   const ANOMALY_HOURS = 24;
-  const cols = ['Session', 'Car Model', 'Duration', 'Status'];
+  const cols = ['Session', 'Car Number', 'Car Model', 'Duration', 'Status'];
 
   if (!sessions.length) {
     return (
@@ -299,6 +299,9 @@ function SessionsTable({ sessions }) {
             <tr key={s.session_id} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
               <td className="px-4 py-3 font-mono text-xs text-slate-500">
                 <span className="font-semibold text-slate-700">#{s.session_id}</span>
+              </td>
+              <td className="px-4 py-3 text-slate-700 font-medium">
+                {display(s.car_number) || <span className="text-slate-300">—</span>}
               </td>
               <td className="px-4 py-3 text-slate-700 font-medium">
                 {display(s.car_model) || <span className="text-slate-300">—</span>}
