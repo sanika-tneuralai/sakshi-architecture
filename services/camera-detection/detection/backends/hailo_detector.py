@@ -216,7 +216,17 @@ class HailoDetector(BaseDetector):
         # Hailo NMS output: list of per-class detection arrays
         # raw_output[key] is a list (batch), [0] gives one list per class
         # Each class entry is an ndarray of shape (N, 5): [y1, x1, y2, x2, score]
-        data = raw_output[key][0]  # list of length num_classes
+        raw_value = raw_output[key]
+        print(f"[HAILO DEBUG] raw_output keys: {list(raw_output.keys())}")
+        print(f"[HAILO DEBUG] raw_output[key] type: {type(raw_value)}, len: {len(raw_value) if hasattr(raw_value, '__len__') else 'N/A'}")
+        data = raw_value[0]  # list of length num_classes
+        print(f"[HAILO DEBUG] data type: {type(data)}, len: {len(data) if hasattr(data, '__len__') else 'N/A'}")
+        for i, cls_dets in enumerate(data):
+            print(f"[HAILO DEBUG] class {i} ({self.class_names[i] if i < len(self.class_names) else i}): type={type(cls_dets)}, shape={getattr(cls_dets, 'shape', None)}, len={len(cls_dets) if hasattr(cls_dets, '__len__') else 'N/A'}")
+            if hasattr(cls_dets, '__len__') and len(cls_dets) > 0:
+                import numpy as np
+                arr = np.array(cls_dets)
+                print(f"[HAILO DEBUG]   raw values: {arr}")
 
         detections: List[Detection] = []
 
@@ -233,6 +243,7 @@ class HailoDetector(BaseDetector):
             for det in cls_dets:
                 y1_n, x1_n, y2_n, x2_n, score = det
                 score = float(score)
+                print(f"[HAILO DEBUG] cls={cls_id} score={score:.4f} box=[{y1_n:.3f},{x1_n:.3f},{y2_n:.3f},{x2_n:.3f}] thresh={confidence_threshold}")
 
                 if score < confidence_threshold:
                     continue
