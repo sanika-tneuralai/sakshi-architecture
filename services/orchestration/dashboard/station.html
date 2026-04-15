@@ -58,6 +58,7 @@ const SESSIONS_URL   = `${BASE}/dashboard/sessions?camera_id=camera_01&limit=10`
 const COMPLIANCE_URL = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=10`;
 const POLL_MS        = 2000;
 const SLOTS          = ['ROI_1', 'ROI_2'];
+const STATION_TZ     = 'Asia/Kolkata';
 
 /* ── Violation map ── */
 const VIOLATION_MAP = {
@@ -81,7 +82,23 @@ function fmtTime(v) {
   if (!v) return null;
   const d = new Date(v);
   if (isNaN(d)) return v;
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: STATION_TZ,
+  });
+}
+
+function fmtNowForStation() {
+  return new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: STATION_TZ,
+  });
 }
 
 function durationSecs(inIso, outIso) {
@@ -473,7 +490,7 @@ function App() {
         setStationData(st);
         setSessions(se.sessions || []);
         setViolations(co.violations || []);
-        setLastUpdated(new Date().toLocaleTimeString());
+        setLastUpdated(fmtNowForStation());
         setError(null);
       } catch (e) {
         setError(e.message);
