@@ -170,9 +170,14 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         if value is None:
             return None
         if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
             return value
         try:
-            return datetime.fromisoformat(str(value))
+            dt = datetime.fromisoformat(str(value))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except (ValueError, TypeError):
             return None
 
