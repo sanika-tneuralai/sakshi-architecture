@@ -61,7 +61,7 @@ def which_rois(bbox: dict, rois: Dict[str, List[Tuple[int, int]]]) -> List[str]:
 def which_rois_bbox_overlap(
     bbox: dict,
     rois: Dict[str, List[Tuple[int, int]]],
-    overlap_threshold: float = 0.15,
+    overlap_threshold: float = 0.40,
 ) -> List[str]:
     """
     Return the names of all ROIs whose polygon has significant area overlap

@@ -86,17 +86,20 @@ class ParkingComplianceRule(BaseUsecaseRule):
                 track_id = car.get("track_id", "unknown")
                 # Centroid-based check: which ROI the car's centre is in
                 matched_rois = which_rois(car["bbox"], rois)
-                # Overlap-based check: detects double-slot parking where the car
-                # straddles a boundary and the centroid falls in only one ROI
-                overlap_rois = which_rois_bbox_overlap(car["bbox"], rois)
+                # Overlap-based check: only used as a fallback when the centroid
+                # lands in zero ROIs (e.g. car fully outside all slots).
+                # Never used to add extra ROIs when centroid already matched one,
+                # since adjacent-slot overlap causes false double-slot alerts.
+                if len(matched_rois) == 0:
+                    overlap_rois = which_rois_bbox_overlap(car["bbox"], rois)
+                else:
+                    overlap_rois = []
                 print(
                     f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}"
                     f" | overlap_rois={overlap_rois}"
                 )
 
-                # Merge: a car is considered "in" a ROI if its centroid is there
-                # OR if enough of its body overlaps it.
-                all_matched_rois = list(dict.fromkeys(matched_rois + [r for r in overlap_rois if r not in matched_rois]))
+                all_matched_rois = list(dict.fromkeys(matched_rois + overlap_rois))
 
                 if len(all_matched_rois) == 0:
                     # ── Unauthorized parking ──────────────────────────────────
