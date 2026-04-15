@@ -52,6 +52,10 @@ OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # Backoff increments (in frames) after each failed attempt
 _BACKOFF = [10, 20, 9999]
+_MODEL_RETRY_DELAY = int(os.getenv("VEHICLE_MODEL_RETRY_DELAY_FRAMES", "45"))
+_MIN_CROP_W = int(os.getenv("VEHICLE_MIN_CROP_W", "140"))
+_MIN_CROP_H = int(os.getenv("VEHICLE_MIN_CROP_H", "90"))
+_MIN_SHARPNESS = float(os.getenv("VEHICLE_MIN_CROP_SHARPNESS", "60.0"))
 
 DETECTION_W = int(os.getenv("DETECTION_WIDTH",  "1920"))
 DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
@@ -118,6 +122,29 @@ def _crop_bbox(image: np.ndarray, bbox: dict):
 def _crop_to_b64(crop: np.ndarray) -> str:
     _, buf = cv2.imencode(".jpg", crop)
     return base64.b64encode(buf.tobytes()).decode("utf-8")
+
+
+def _is_crop_quality_ok(crop: np.ndarray) -> bool:
+    """
+    Cheap quality gate to avoid wasting LLM calls on tiny/blurry crops.
+    """
+    h, w = crop.shape[:2]
+    if w < _MIN_CROP_W or h < _MIN_CROP_H:
+        logger.info(
+            "[VEHICLE] Crop rejected by size gate: w=%d h=%d (min=%dx%d)",
+            w, h, _MIN_CROP_W, _MIN_CROP_H,
+        )
+        return False
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    if sharpness < _MIN_SHARPNESS:
+        logger.info(
+            "[VEHICLE] Crop rejected by sharpness gate: %.2f < %.2f",
+            sharpness, _MIN_SHARPNESS,
+        )
+        return False
+    return True
 
 
 def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
@@ -352,9 +379,11 @@ class VehicleExtractionRule(BaseUsecaseRule):
                     crop = _crop_bbox(image, bbox)
                     if crop is None or crop.size == 0:
                         logger.warning(
-                            "[VEHICLE] Skipping Gemini — crop is empty for bbox=%s image_shape=%s",
+                            "[VEHICLE] Skipping LLM — crop is empty for bbox=%s image_shape=%s",
                             bbox, image.shape,
                         )
+                    elif not _is_crop_quality_ok(crop):
+                        logger.info("[VEHICLE] Skipping LLM — crop quality below threshold")
                     else:
                         logger.info("[VEHICLE] Crop OK: shape=%s | calling LLM", crop.shape)
                         extracted  = _query_llm(crop)
@@ -366,17 +395,38 @@ class VehicleExtractionRule(BaseUsecaseRule):
                 else:
                     logger.warning("[VEHICLE] Skipping Gemini — image is None")
 
-                # Success: at least one field is not the fallback value
-                success = not (car_number == "unreadable" and car_model == "unknown")
+                plate_ok = car_number != "unreadable"
+                model_ok = car_model != "unknown"
+                success = plate_ok or model_ok
 
-                if success:
+                if success and model_ok:
                     slot["extracted"]   = True
                     slot["car_number"]  = car_number
                     slot["car_model"]   = car_model
                     logger.info(
-                        "[VEHICLE] Extraction success: slot=%s plate=%s model=%s",
+                        "[VEHICLE] Extraction success (full): slot=%s plate=%s model=%s",
                         slot_id, car_number, car_model,
                     )
+                elif success and plate_ok and not model_ok:
+                    # Keep low-call policy: allow only one deferred model-only retry.
+                    slot["car_number"] = car_number
+                    slot["car_model"] = slot.get("car_model")
+                    if not slot.get("model_retry_done", False):
+                        slot["model_retry_done"] = True
+                        slot["extraction_backoff_until"] = max(
+                            slot["extraction_backoff_until"],
+                            slot["frame_counter"] + _MODEL_RETRY_DELAY,
+                        )
+                        logger.info(
+                            "[VEHICLE] Plate-only extraction: scheduling one model retry at frame %d",
+                            slot["extraction_backoff_until"],
+                        )
+                    else:
+                        slot["extracted"] = True
+                        logger.info(
+                            "[VEHICLE] Plate-only extraction finalized (model retry already used) slot=%s",
+                            slot_id,
+                        )
                 elif slot["extraction_attempts"] >= 3:
                     # 3 failures — stop permanently for this lifecycle
                     slot["extracted"] = True
