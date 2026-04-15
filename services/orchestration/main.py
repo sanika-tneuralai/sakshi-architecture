@@ -1479,7 +1479,11 @@ async def dashboard_station(
             violation = violation_row.alert_type if violation_row else None
 
             def fmt_time(dt):
-                return dt.strftime("%H:%M:%S") if dt else None
+                if dt is None:
+                    return None
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.isoformat()
 
             slots_out[slot_id] = {
                 "car_number":      session.car_number,

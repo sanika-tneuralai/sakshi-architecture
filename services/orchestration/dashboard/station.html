@@ -79,8 +79,9 @@ function display(v) {
 
 function fmtTime(v) {
   if (!v) return null;
-  // already formatted HH:MM:SS from backend
-  return v;
+  const d = new Date(v);
+  if (isNaN(d)) return v;
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
 function durationSecs(inIso, outIso) {
