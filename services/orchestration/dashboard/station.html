@@ -102,11 +102,25 @@ function fmtDuration(secs) {
 }
 
 function deduplicateViolations(violations) {
+  // Group by violation_type only — car_number is often not visible for
+  // double-slot parkers (car spans both ROIs, plate not readable).
+  // Keep the entry that has the most data (car_number present preferred).
   const groups = new Map();
   for (const v of violations) {
-    const key = `${v.car_number || ''}__${v.violation_type || ''}`;
-    if (!groups.has(key)) groups.set(key, { ...v, count: 1 });
-    else groups.get(key).count += 1;
+    const key = v.violation_type || 'unknown';
+    if (!groups.has(key)) {
+      groups.set(key, { ...v, count: 1 });
+    } else {
+      const existing = groups.get(key);
+      existing.count += 1;
+      // Prefer the entry that has car_number or car_model populated
+      if (!existing.car_number && v.car_number) existing.car_number = v.car_number;
+      if (!existing.car_model  && v.car_model)  existing.car_model  = v.car_model;
+      // Keep the longest parking duration
+      if (v.duration && (!existing.duration || v.duration > existing.duration)) {
+        existing.duration = v.duration;
+      }
+    }
   }
   return Array.from(groups.values());
 }
@@ -269,10 +283,15 @@ function BayCard({ slotId, data }) {
   );
 }
 
+/* ── NA placeholder ── */
+function NA({ text }) {
+  return <span className="text-slate-400 italic text-xs">{text || 'Not visible'}</span>;
+}
+
 /* ── Sessions Table ── */
 function SessionsTable({ sessions }) {
   const ANOMALY_HOURS = 24;
-  const cols = ['Session', 'Car Number', 'Car Model', 'Duration', 'Status'];
+  const cols = ['Session', 'Slot', 'Car Number', 'Car Model', 'Car In', 'Car Out', 'Park Duration', 'Gun', 'Plug In', 'Plug Out', 'Status'];
 
   if (!sessions.length) {
     return (
@@ -281,11 +300,12 @@ function SessionsTable({ sessions }) {
   }
 
   return (
+    <div className="overflow-x-auto">
     <table className="w-full text-sm">
       <thead>
         <tr>
           {cols.map(c => (
-            <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
+            <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
               {c}
             </th>
           ))}
@@ -293,26 +313,45 @@ function SessionsTable({ sessions }) {
       </thead>
       <tbody>
         {sessions.map((s, i) => {
-          const secs     = durationSecs(s.in_time, s.out_time);
-          const durStr   = fmtDuration(secs);
-          const isAnomaly = secs !== null && secs > ANOMALY_HOURS * 3600;
+          const parkSecs  = durationSecs(s.in_time, s.out_time);
+          const parkStr   = fmtDuration(parkSecs);
+          const isAnomaly = parkSecs !== null && parkSecs > ANOMALY_HOURS * 3600;
+          const slotLabel = s.slot_id ? s.slot_id.replace('_', ' ') : null;
           return (
             <tr key={s.session_id} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
-              <td className="px-4 py-3 font-mono text-xs text-slate-500">
+              <td className="px-4 py-3 font-mono text-xs">
                 <span className="font-semibold text-slate-700">#{s.session_id}</span>
               </td>
-              <td className="px-4 py-3 text-slate-700 font-medium">
-                {display(s.car_number) || <span className="text-slate-300">—</span>}
+              <td className="px-4 py-3 text-slate-600 text-xs font-medium whitespace-nowrap">
+                {slotLabel || <NA />}
               </td>
-              <td className="px-4 py-3 text-slate-700 font-medium">
-                {display(s.car_model) || <span className="text-slate-300">—</span>}
+              <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">
+                {display(s.car_number) || <NA />}
               </td>
-              <td className="px-4 py-3">
-                {durStr ? (
-                  <span className={`font-medium ${isAnomaly ? 'text-amber-600' : 'text-slate-700'}`}>
-                    {durStr}{isAnomaly && <span className="ml-1 text-amber-500 text-xs">⚠</span>}
+              <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
+                {display(s.car_model) || <NA />}
+              </td>
+              <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
+                {fmtTime(s.in_time) || <NA text="—" />}
+              </td>
+              <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
+                {fmtTime(s.out_time) || <NA text="Active" />}
+              </td>
+              <td className="px-4 py-3 whitespace-nowrap">
+                {parkStr ? (
+                  <span className={`font-medium text-xs ${isAnomaly ? 'text-amber-600' : 'text-slate-700'}`}>
+                    {parkStr}{isAnomaly && <span className="ml-1 text-amber-500">⚠</span>}
                   </span>
-                ) : <span className="text-slate-300">—</span>}
+                ) : <NA text="—" />}
+              </td>
+              <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">
+                {display(s.gun_number) || <NA text="—" />}
+              </td>
+              <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
+                {fmtTime(s.plug_time) || <NA text="—" />}
+              </td>
+              <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
+                {fmtTime(s.plug_out_time) || <NA text="—" />}
               </td>
               <td className="px-4 py-3">
                 <StatusBadge status={s.session_status} />
@@ -322,13 +361,14 @@ function SessionsTable({ sessions }) {
         })}
       </tbody>
     </table>
+    </div>
   );
 }
 
 /* ── Compliance Table ── */
 function ComplianceTable({ violations }) {
   const deduped = deduplicateViolations(violations);
-  const cols    = ['Car Number', 'Car Model', 'Violation', 'Duration', 'Count'];
+  const cols    = ['Car Number', 'Car Model', 'Violation', 'Parking Duration', 'Count'];
 
   if (!deduped.length) {
     return (
@@ -351,16 +391,16 @@ function ComplianceTable({ violations }) {
         {deduped.map((v, i) => (
           <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
             <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700">
-              {display(v.car_number) || <span className="text-slate-300 font-normal">—</span>}
+              {display(v.car_number) || <NA />}
             </td>
             <td className="px-4 py-3 text-slate-600">
-              {display(v.car_model) || <span className="text-slate-300">—</span>}
+              {display(v.car_model) || <NA />}
             </td>
             <td className="px-4 py-3">
               <ViolationBadge vtype={v.violation_type} />
             </td>
-            <td className="px-4 py-3 text-slate-600 font-medium">
-              {display(v.duration) || <span className="text-slate-300">—</span>}
+            <td className="px-4 py-3 text-slate-600 font-medium text-xs">
+              {display(v.duration) || <NA text="—" />}
             </td>
             <td className="px-4 py-3">
               <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs font-bold">

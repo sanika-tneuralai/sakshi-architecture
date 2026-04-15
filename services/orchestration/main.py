@@ -1289,6 +1289,7 @@ async def dashboard_sessions(
             {
                 "session_id":    r.session_id,
                 "camera_id":     r.camera_id,
+                "slot_id":       r.slot_id,
                 "gun_number":    r.gun_number,
                 "car_number":    r.car_number,
                 "car_model":     r.car_model,
@@ -1557,15 +1558,17 @@ async def dashboard_compliance_violations(
             .all()
         )
 
-        def elapsed(ts):
-            if not ts:
+        def fmt_duration(in_dt, out_dt):
+            """Format parking duration from session in_time → out_time (or now if active)."""
+            if not in_dt:
                 return None
             try:
-                now = datetime.now(timezone.utc)
-                if ts.tzinfo is None:
-                    from datetime import timezone as tz
-                    ts = ts.replace(tzinfo=tz.utc)
-                secs = int((now - ts).total_seconds())
+                if in_dt.tzinfo is None:
+                    in_dt = in_dt.replace(tzinfo=timezone.utc)
+                end = out_dt if out_dt else datetime.now(timezone.utc)
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+                secs = int((end - in_dt).total_seconds())
                 if secs < 0:
                     return None
                 h = secs // 3600
@@ -1582,10 +1585,8 @@ async def dashboard_compliance_violations(
         def resolve_violation_type(row):
             """Extract the specific violation type from alert_type or extras."""
             atype = row.alert_type or ""
-            # Stored directly (multiple_cars_in_roi, unauthorized_parking, wrong_parking)
             if atype in ("multiple_cars_in_roi", "unauthorized_parking", "wrong_parking"):
                 return atype
-            # Generic path: inspect extras.violations[].event_type
             extras = row.extras or {}
             for v in extras.get("violations", []):
                 et = v.get("event_type", "")
@@ -1594,7 +1595,7 @@ async def dashboard_compliance_violations(
             return atype or "unknown"
 
         def extract_track_id(row):
-            """Pull track_id from the alert extras (violations or events list)."""
+            """Pull track_id from the alert extras."""
             extras = row.extras or {}
             for v in extras.get("violations", []):
                 tid = v.get("track_id")
@@ -1606,41 +1607,39 @@ async def dashboard_compliance_violations(
                     return str(tid)
             return None
 
-        def resolve_session_fields(row):
-            """Return (car_number, car_model) by joining ChargingSession on track_id."""
+        def resolve_session(row):
+            """Return the ChargingSession matched by track_id only (no cross-car fallback)."""
             track_id = extract_track_id(row)
-            q = db.query(ChargingSession.car_number, ChargingSession.car_model).filter(
-                ChargingSession.camera_id == camera_id
-            )
-            if track_id:
-                session = (
-                    q.filter(ChargingSession.track_id == track_id)
-                    .order_by(ChargingSession.created_at.desc())
-                    .first()
+            if not track_id:
+                return None
+            return (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.track_id  == track_id,
                 )
-                if session:
-                    return session.car_number, session.car_model
-            # Fallback: most-recent session with any car data
-            session = (
-                q.filter(ChargingSession.car_number.isnot(None))
                 .order_by(ChargingSession.created_at.desc())
                 .first()
             )
-            if session:
-                return session.car_number, session.car_model
-            return None, None
 
         violations = []
         for row in rows:
-            car_number, car_model = resolve_session_fields(row)
+            session = resolve_session(row)
+            car_number = session.car_number if session else None
+            car_model  = session.car_model  if session else None
+            duration   = fmt_duration(
+                session.in_time  if session else None,
+                session.out_time if session else None,
+            )
             violations.append({
                 "alert_id":       row.alert_id,
                 "station":        station_id,
+                "slot_id":        row.slot_id,
                 "car_number":     car_number,
                 "car_model":      car_model,
                 "violation_type": resolve_violation_type(row),
                 "timestamp":      row.timestamp.isoformat() if row.timestamp else None,
-                "duration":       elapsed(row.timestamp),
+                "duration":       duration,
             })
 
         return {"violations": violations, "total": len(violations)}
