@@ -106,12 +106,21 @@ def _crop_bbox(image: np.ndarray, bbox: dict):
     h, w = image.shape[:2]
     sx = w / DETECTION_W
     sy = h / DETECTION_H
-    x1 = max(0, int(bbox.get("x1", 0) * sx))
-    y1 = max(0, int(bbox.get("y1", 0) * sy))
-    x2 = min(w, int(bbox.get("x2", w) * sx))
-    y2 = min(h, int(bbox.get("y2", h) * sy))
+    x1 = int(bbox.get("x1", 0) * sx)
+    y1 = int(bbox.get("y1", 0) * sy)
+    x2 = int(bbox.get("x2", w) * sx)
+    y2 = int(bbox.get("y2", h) * sy)
+
+    # Add 15% padding so plate edges and model badges aren't clipped
+    pad_x = int((x2 - x1) * 0.15)
+    pad_y = int((y2 - y1) * 0.15)
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+
     logger.info(
-        "[VEHICLE] Scaled bbox: x1=%d y1=%d x2=%d y2=%d (image=%dx%d detection=%dx%d)",
+        "[VEHICLE] Scaled bbox (with 15%% padding): x1=%d y1=%d x2=%d y2=%d (image=%dx%d detection=%dx%d)",
         x1, y1, x2, y2, w, h, DETECTION_W, DETECTION_H,
     )
     if x2 <= x1 or y2 <= y1:
@@ -120,7 +129,8 @@ def _crop_bbox(image: np.ndarray, bbox: dict):
 
 
 def _crop_to_b64(crop: np.ndarray) -> str:
-    _, buf = cv2.imencode(".jpg", crop)
+    # Use high JPEG quality to preserve plate characters and model badges
+    _, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 100])
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
@@ -165,16 +175,27 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
 
         prompt = (
-            "You are a vehicle recognition system. Analyse this image.\n\n"
-            "RULES — follow exactly, violations cause system errors:\n"
-            '1. "car_number": Copy the license plate characters EXACTLY as printed on the plate. '
-            "Every character must be directly visible and legible in the image. "
-            'If ANY character is unclear, obscured, blurry, cut off, or you have ANY doubt, '
-            'return the exact string "unreadable". NEVER guess, infer, autocomplete, or construct '
-            "a plausible-looking plate — return only what you can literally read pixel-by-pixel.\n"
-            '2. "car_model": State the make and model only if you are highly confident (e.g. "Toyota Innova"). '
-            'If the model is unclear or you are guessing, return the exact string "unknown".\n\n'
-            "Return ONLY a JSON object with these two keys. No explanation, no markdown."
+            "You are a strict vehicle recognition assistant.\n"
+            "Analyze the provided vehicle image carefully and extract ONLY verifiable information.\n\n"
+
+            "Return a JSON object with EXACTLY these two keys:\n"
+            '  "car_number": string\n'
+            '  "car_model": string\n\n'
+
+            "Guardrails:\n"
+            "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
+            "- Do NOT include anything outside the JSON object.\n"
+            "- If the license plate is not clearly readable, return \"unreadable\".\n"
+            "- Do NOT guess or infer missing characters in the license plate.\n"
+            "- If the car make/model is not clearly identifiable, return \"unknown\".\n"
+            "- Do NOT hallucinate or assume brands/models.\n"
+            "- Only use visible evidence from the image.\n"
+            "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
+
+            "Example output:\n"
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
+
+            "Now analyze the image and return ONLY the JSON."
         )
 
         response_schema = {
@@ -238,16 +259,27 @@ def _query_openai(crop: np.ndarray) -> Dict[str, str]:
         logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
 
         prompt = (
-            "You are a vehicle recognition system. Analyse this image.\n\n"
-            "RULES — follow exactly, violations cause system errors:\n"
-            '1. "car_number": Copy the license plate characters EXACTLY as printed on the plate. '
-            "Every character must be directly visible and legible in the image. "
-            'If ANY character is unclear, obscured, blurry, cut off, or you have ANY doubt, '
-            'return the exact string "unreadable". NEVER guess, infer, autocomplete, or construct '
-            "a plausible-looking plate — return only what you can literally read pixel-by-pixel.\n"
-            '2. "car_model": State the make and model only if you are highly confident (e.g. "Toyota Innova"). '
-            'If the model is unclear or you are guessing, return the exact string "unknown".\n\n'
-            "Return ONLY a JSON object with exactly two keys: car_number and car_model. No explanation, no markdown."
+            "You are a strict vehicle recognition assistant.\n"
+            "Analyze the provided vehicle image carefully and extract ONLY verifiable information.\n\n"
+
+            "Return a JSON object with EXACTLY these two keys:\n"
+            '  "car_number": string\n'
+            '  "car_model": string\n\n'
+
+            "Guardrails:\n"
+            "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
+            "- Do NOT include anything outside the JSON object.\n"
+            "- If the license plate is not clearly readable, return \"unreadable\".\n"
+            "- Do NOT guess or infer missing characters in the license plate.\n"
+            "- If the car make/model is not clearly identifiable, return \"unknown\".\n"
+            "- Do NOT hallucinate or assume brands/models.\n"
+            "- Only use visible evidence from the image.\n"
+            "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
+
+            "Example output:\n"
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
+
+            "Now analyze the image and return ONLY the JSON."
         )
 
         logger.info("[VEHICLE] Sending request to OpenAI...")
@@ -382,8 +414,14 @@ class VehicleExtractionRule(BaseUsecaseRule):
                             "[VEHICLE] Skipping LLM — crop is empty for bbox=%s image_shape=%s",
                             bbox, image.shape,
                         )
+                        # Don't waste this attempt on a bad crop — roll back
+                        slot["extraction_attempts"] -= 1
+                        slot["extraction_backoff_until"] = slot["frame_counter"] + 5
                     elif not _is_crop_quality_ok(crop):
                         logger.info("[VEHICLE] Skipping LLM — crop quality below threshold")
+                        # Don't waste this attempt on a low-quality crop — roll back
+                        slot["extraction_attempts"] -= 1
+                        slot["extraction_backoff_until"] = slot["frame_counter"] + 5
                     else:
                         logger.info("[VEHICLE] Crop OK: shape=%s | calling LLM", crop.shape)
                         extracted  = _query_llm(crop)
