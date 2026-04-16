@@ -56,6 +56,7 @@ _MODEL_RETRY_DELAY = int(os.getenv("VEHICLE_MODEL_RETRY_DELAY_FRAMES", "45"))
 _MIN_CROP_W = int(os.getenv("VEHICLE_MIN_CROP_W", "140"))
 _MIN_CROP_H = int(os.getenv("VEHICLE_MIN_CROP_H", "90"))
 _MIN_SHARPNESS = float(os.getenv("VEHICLE_MIN_CROP_SHARPNESS", "60.0"))
+_MIN_CONFIDENCE = float(os.getenv("VEHICLE_MIN_CONFIDENCE", "0.35"))
 
 DETECTION_W = int(os.getenv("DETECTION_WIDTH",  "1920"))
 DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
@@ -157,26 +158,42 @@ def _is_crop_quality_ok(crop: np.ndarray) -> bool:
     return True
 
 
-def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
-    """Send cropped car image to Gemini. Returns car_number + car_model."""
+def _annotate_frame(image: np.ndarray, bbox: dict) -> np.ndarray:
+    """Draw a bright green rectangle on a copy of the frame to highlight the target car."""
+    annotated = image.copy()
+    h, w = annotated.shape[:2]
+    sx = w / DETECTION_W
+    sy = h / DETECTION_H
+    x1 = max(0, int(bbox.get("x1", 0) * sx))
+    y1 = max(0, int(bbox.get("y1", 0) * sy))
+    x2 = min(w, int(bbox.get("x2", w) * sx))
+    y2 = min(h, int(bbox.get("y2", h) * sy))
+    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 4)
+    return annotated
+
+
+def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
+    """Send full frame (with bbox highlighted) to Gemini. Returns car_number + car_model."""
     if not GEMINI_API_KEY:
         logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
 
     logger.info("[VEHICLE] Gemini API key present (len=%d), model=%s", len(GEMINI_API_KEY), GEMINI_MODEL)
-    logger.info("[VEHICLE] Crop shape before Gemini call: %s", crop.shape)
+    logger.info("[VEHICLE] Full frame shape: %s, bbox=%s", full_frame.shape, bbox)
 
     try:
         from google import genai
         from google.genai import types
 
         client    = genai.Client(api_key=GEMINI_API_KEY)
-        image_b64 = _crop_to_b64(crop)
-        logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
+        annotated = _annotate_frame(full_frame, bbox)
+        image_b64 = _crop_to_b64(annotated)
+        logger.info("[VEHICLE] Annotated frame encoded to base64: %d chars", len(image_b64))
 
         prompt = (
             "You are a strict vehicle recognition assistant.\n"
-            "Analyze the provided vehicle image carefully and extract ONLY verifiable information.\n\n"
+            "In the provided image, one vehicle is highlighted with a GREEN RECTANGLE.\n"
+            "Analyze ONLY the vehicle inside the green rectangle and extract verifiable information.\n\n"
 
             "Return a JSON object with EXACTLY these two keys:\n"
             '  "car_number": string\n'
@@ -195,7 +212,7 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
             "Example output:\n"
             '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
 
-            "Now analyze the image and return ONLY the JSON."
+            "Now analyze the highlighted vehicle and return ONLY the JSON."
         )
 
         response_schema = {
@@ -242,25 +259,27 @@ def _query_gemini(crop: np.ndarray) -> Dict[str, str]:
         return {"car_number": "unreadable", "car_model": "unknown"}
 
 
-def _query_openai(crop: np.ndarray) -> Dict[str, str]:
-    """Send cropped car image to OpenAI vision. Returns car_number + car_model."""
+def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
+    """Send full frame (with bbox highlighted) to OpenAI vision. Returns car_number + car_model."""
     if not OPENAI_API_KEY:
         logger.warning("[VEHICLE] OPENAI_API_KEY not set — skipping OpenAI extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
 
     logger.info("[VEHICLE] OpenAI API key present (len=%d), model=%s", len(OPENAI_API_KEY), OPENAI_MODEL)
-    logger.info("[VEHICLE] Crop shape before OpenAI call: %s", crop.shape)
+    logger.info("[VEHICLE] Full frame shape: %s, bbox=%s", full_frame.shape, bbox)
 
     try:
         from openai import OpenAI
 
         client    = OpenAI(api_key=OPENAI_API_KEY)
-        image_b64 = _crop_to_b64(crop)
-        logger.info("[VEHICLE] Crop encoded to base64: %d chars", len(image_b64))
+        annotated = _annotate_frame(full_frame, bbox)
+        image_b64 = _crop_to_b64(annotated)
+        logger.info("[VEHICLE] Annotated frame encoded to base64: %d chars", len(image_b64))
 
         prompt = (
             "You are a strict vehicle recognition assistant.\n"
-            "Analyze the provided vehicle image carefully and extract ONLY verifiable information.\n\n"
+            "In the provided image, one vehicle is highlighted with a GREEN RECTANGLE.\n"
+            "Analyze ONLY the vehicle inside the green rectangle and extract verifiable information.\n\n"
 
             "Return a JSON object with EXACTLY these two keys:\n"
             '  "car_number": string\n'
@@ -279,7 +298,7 @@ def _query_openai(crop: np.ndarray) -> Dict[str, str]:
             "Example output:\n"
             '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
 
-            "Now analyze the image and return ONLY the JSON."
+            "Now analyze the highlighted vehicle and return ONLY the JSON."
         )
 
         logger.info("[VEHICLE] Sending request to OpenAI...")
@@ -323,13 +342,13 @@ def _query_openai(crop: np.ndarray) -> Dict[str, str]:
         return {"car_number": "unreadable", "car_model": "unknown"}
 
 
-def _query_llm(crop: np.ndarray) -> Dict[str, str]:
+def _query_llm(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
     """Dispatch to OpenAI if OPENAI_API_KEY is set, otherwise fall back to Gemini."""
     if OPENAI_API_KEY:
         logger.info("[VEHICLE] LLM provider: OpenAI (model=%s)", OPENAI_MODEL)
-        return _query_openai(crop)
+        return _query_openai(full_frame, bbox)
     logger.info("[VEHICLE] LLM provider: Gemini (model=%s)", GEMINI_MODEL)
-    return _query_gemini(crop)
+    return _query_gemini(full_frame, bbox)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +385,15 @@ class VehicleExtractionRule(BaseUsecaseRule):
         for car in tracked_cars:
             bbox     = car.get("bbox", {})
             track_id = car.get("track_id")
+            confidence = car.get("confidence", 0.0)
+
+            # Skip low-confidence detections — they often produce hallucinated plates
+            if confidence < _MIN_CONFIDENCE:
+                logger.info(
+                    "[VEHICLE] Skipping track_id=%s — confidence %.3f < %.2f threshold",
+                    track_id, confidence, _MIN_CONFIDENCE,
+                )
+                continue
 
             # Resolve slot_id for this car
             matched_rois = which_rois(bbox, rois) if rois else []
@@ -423,8 +451,8 @@ class VehicleExtractionRule(BaseUsecaseRule):
                         slot["extraction_attempts"] -= 1
                         slot["extraction_backoff_until"] = slot["frame_counter"] + 5
                     else:
-                        logger.info("[VEHICLE] Crop OK: shape=%s | calling LLM", crop.shape)
-                        extracted  = _query_llm(crop)
+                        logger.info("[VEHICLE] Crop OK: shape=%s | sending full frame with bbox to LLM", crop.shape)
+                        extracted  = _query_llm(image, bbox)
                         car_number = extracted["car_number"]
                         car_model  = extracted["car_model"]
                         logger.info(
