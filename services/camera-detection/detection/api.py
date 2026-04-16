@@ -175,14 +175,13 @@ async def detect_objects(request: DetectionRequest):
     logger.info(f"Detection completed: {result.total_detections_count} detections")
 
     if result.total_detections_count > 0:
-        resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-        print(f"[S3 DEBUG] Attempting S3 upload for camera={request.camera_id} | frame shape={resized.shape}")
+        print(f"[S3 DEBUG] Attempting S3 upload for camera={request.camera_id} | frame shape={frame.shape}")
         try:
             store = get_s3_frame_store()
             print(f"[S3 DEBUG] S3FrameStore initialized | bucket={store._bucket} | region={store._region}")
             frame_id = str(int(time.time() * 1000))
             print(f"[S3 DEBUG] Uploading frame_id={frame_id} ...")
-            result.snapshot_url = store.upload_frame(request.camera_id, resized, frame_id=frame_id)
+            result.snapshot_url = store.upload_frame(request.camera_id, frame, frame_id=frame_id)
             print(f"[S3 DEBUG] ✓ Upload successful | url={result.snapshot_url}")
         except Exception as e:
             logger.warning(f"[S3] Frame upload failed (non-fatal): {e}")
@@ -245,14 +244,13 @@ def _detect_single_camera(
 
         snapshot_url = None
         if result.total_detections_count > 0:
-            resized = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-            print(f"[S3 DEBUG] Attempting S3 upload for camera={camera_id} (batch) | frame shape={resized.shape}")
+            print(f"[S3 DEBUG] Attempting S3 upload for camera={camera_id} (batch) | frame shape={frame.shape}")
             try:
                 store = get_s3_frame_store()
                 print(f"[S3 DEBUG] S3FrameStore initialized | bucket={store._bucket} | region={store._region}")
                 frame_id = str(int(time.time() * 1000))
                 print(f"[S3 DEBUG] Uploading frame_id={frame_id} ...")
-                snapshot_url = store.upload_frame(camera_id, resized, frame_id=frame_id)
+                snapshot_url = store.upload_frame(camera_id, frame, frame_id=frame_id)
                 print(f"[S3 DEBUG] ✓ Upload successful | url={snapshot_url}")
             except Exception as e:
                 logger.warning(f"[S3] Frame upload failed for {camera_id} (non-fatal): {e}")

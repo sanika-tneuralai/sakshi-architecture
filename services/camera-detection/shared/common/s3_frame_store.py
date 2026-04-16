@@ -55,7 +55,7 @@ class S3FrameStore:
         if frame_id is None:
             frame_id = str(int(time.time() * 1000))
 
-        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         key = self._key(camera_id, frame_id)
 
         self._client.put_object(
