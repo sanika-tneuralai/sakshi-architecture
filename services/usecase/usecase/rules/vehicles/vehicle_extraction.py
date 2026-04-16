@@ -173,7 +173,7 @@ def _annotate_frame(image: np.ndarray, bbox: dict) -> np.ndarray:
 
 
 def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
-    """Send full frame (with bbox highlighted) to Gemini. Returns car_number + car_model."""
+    """Send full frame + crop to Gemini. Returns car_number + car_model."""
     if not GEMINI_API_KEY:
         logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
@@ -186,14 +186,19 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         from google.genai import types
 
         client    = genai.Client(api_key=GEMINI_API_KEY)
-        annotated = _annotate_frame(full_frame, bbox)
-        image_b64 = _crop_to_b64(annotated)
-        logger.info("[VEHICLE] Annotated frame encoded to base64: %d chars", len(image_b64))
+        frame_b64 = _crop_to_b64(full_frame)
+        crop      = _crop_bbox(full_frame, bbox)
+        crop_b64  = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
+        logger.info("[VEHICLE] Full frame encoded: %d chars, crop encoded: %s chars",
+                    len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
             "You are a strict vehicle recognition assistant.\n"
-            "In the provided image, one vehicle is highlighted with a GREEN RECTANGLE.\n"
-            "Analyze ONLY the vehicle inside the green rectangle and extract verifiable information.\n\n"
+            "Two images are provided:\n"
+            "  1. The full scene showing a parking/charging area\n"
+            "  2. A close-up crop of the specific vehicle to analyze\n\n"
+            "Analyze the vehicle shown in the close-up (second image) and extract verifiable information. "
+            "Use the full scene (first image) for additional context if needed.\n\n"
 
             "Return a JSON object with EXACTLY these two keys:\n"
             '  "car_number": string\n'
@@ -212,7 +217,7 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "Example output:\n"
             '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
 
-            "Now analyze the highlighted vehicle and return ONLY the JSON."
+            "Now analyze the vehicle and return ONLY the JSON."
         )
 
         response_schema = {
@@ -224,13 +229,20 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "required": ["car_number", "car_model"],
         }
 
-        logger.info("[VEHICLE] Sending request to Gemini...")
+        # Build content parts: full frame + crop
+        content_parts = [
+            types.Part.from_text(text=prompt),
+            types.Part.from_bytes(data=base64.b64decode(frame_b64), mime_type="image/jpeg"),
+        ]
+        if crop_b64:
+            content_parts.append(
+                types.Part.from_bytes(data=base64.b64decode(crop_b64), mime_type="image/jpeg")
+            )
+
+        logger.info("[VEHICLE] Sending request to Gemini (full frame + crop)...")
         response = client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[
-                types.Part.from_text(text=prompt),
-                types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"),
-            ],
+            contents=content_parts,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema,
@@ -260,7 +272,7 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
 
 
 def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
-    """Send full frame (with bbox highlighted) to OpenAI vision. Returns car_number + car_model."""
+    """Send full frame + crop to OpenAI vision. Returns car_number + car_model."""
     if not OPENAI_API_KEY:
         logger.warning("[VEHICLE] OPENAI_API_KEY not set — skipping OpenAI extraction")
         return {"car_number": "unreadable", "car_model": "unknown"}
@@ -272,14 +284,19 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         from openai import OpenAI
 
         client    = OpenAI(api_key=OPENAI_API_KEY)
-        annotated = _annotate_frame(full_frame, bbox)
-        image_b64 = _crop_to_b64(annotated)
-        logger.info("[VEHICLE] Annotated frame encoded to base64: %d chars", len(image_b64))
+        frame_b64 = _crop_to_b64(full_frame)
+        crop      = _crop_bbox(full_frame, bbox)
+        crop_b64  = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
+        logger.info("[VEHICLE] Full frame encoded: %d chars, crop encoded: %s chars",
+                    len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
             "You are a strict vehicle recognition assistant.\n"
-            "In the provided image, one vehicle is highlighted with a GREEN RECTANGLE.\n"
-            "Analyze ONLY the vehicle inside the green rectangle and extract verifiable information.\n\n"
+            "Two images are provided:\n"
+            "  1. The full scene showing a parking/charging area\n"
+            "  2. A close-up crop of the specific vehicle to analyze\n\n"
+            "Analyze the vehicle shown in the close-up (second image) and extract verifiable information. "
+            "Use the full scene (first image) for additional context if needed.\n\n"
 
             "Return a JSON object with EXACTLY these two keys:\n"
             '  "car_number": string\n'
@@ -298,10 +315,24 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "Example output:\n"
             '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
 
-            "Now analyze the highlighted vehicle and return ONLY the JSON."
+            "Now analyze the vehicle and return ONLY the JSON."
         )
 
-        logger.info("[VEHICLE] Sending request to OpenAI...")
+        # Build image content: full frame + crop
+        image_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"},
+            },
+        ]
+        if crop_b64:
+            image_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{crop_b64}", "detail": "high"},
+            })
+
+        logger.info("[VEHICLE] Sending request to OpenAI (full frame + crop)...")
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             temperature=0.0,
@@ -309,13 +340,7 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}", "detail": "high"},
-                        },
-                    ],
+                    "content": image_content,
                 }
             ],
         )
