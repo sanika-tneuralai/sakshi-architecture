@@ -368,12 +368,31 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
 
 
 def _query_llm(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
-    """Dispatch to OpenAI if OPENAI_API_KEY is set, otherwise fall back to Gemini."""
+    """
+    Try OpenAI first (if available). If it gets the plate but not the model,
+    ask Gemini specifically for the model — Gemini is better at car identification.
+    """
+    result = {"car_number": "unreadable", "car_model": "unknown"}
+
     if OPENAI_API_KEY:
-        logger.info("[VEHICLE] LLM provider: OpenAI (model=%s)", OPENAI_MODEL)
-        return _query_openai(full_frame, bbox)
-    logger.info("[VEHICLE] LLM provider: Gemini (model=%s)", GEMINI_MODEL)
-    return _query_gemini(full_frame, bbox)
+        logger.info("[VEHICLE] LLM provider (primary): OpenAI (model=%s)", OPENAI_MODEL)
+        result = _query_openai(full_frame, bbox)
+    elif GEMINI_API_KEY:
+        logger.info("[VEHICLE] LLM provider (primary): Gemini (model=%s)", GEMINI_MODEL)
+        return _query_gemini(full_frame, bbox)
+
+    # If OpenAI couldn't identify the model, try Gemini as a second opinion
+    if result["car_model"] == "unknown" and GEMINI_API_KEY:
+        logger.info("[VEHICLE] OpenAI returned model=unknown — trying Gemini for car model")
+        gemini_result = _query_gemini(full_frame, bbox)
+        if gemini_result["car_model"] != "unknown":
+            result["car_model"] = gemini_result["car_model"]
+            logger.info("[VEHICLE] Gemini identified model: %s", result["car_model"])
+        if result["car_number"] == "unreadable" and gemini_result["car_number"] != "unreadable":
+            result["car_number"] = gemini_result["car_number"]
+            logger.info("[VEHICLE] Gemini identified plate: %s", result["car_number"])
+
+    return result
 
 
 # ---------------------------------------------------------------------------
