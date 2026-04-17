@@ -204,14 +204,23 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             '  "car_number": string\n'
             '  "car_model": string\n\n'
 
-            "Guardrails:\n"
+            "Guardrails for license plate (car_number):\n"
             "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
+            "- If the license plate is clipped, cut off, or extends beyond the image edge, return \"unreadable\".\n"
+            "- If ANY characters on the plate are obscured, blurry, or ambiguous, return \"unreadable\".\n"
+            "- Do NOT guess, infer, complete, or hallucinate missing characters.\n"
+            "- A valid Indian plate has the form: 2 letters + 1-2 digits + 1-3 letters + 4 digits (e.g. KL01AB1234).\n"
+            "- If you cannot read ALL characters of the plate with high confidence, return \"unreadable\".\n"
+            "- Partial plates like \"NZ04\" or \"KL0\" MUST be returned as \"unreadable\".\n\n"
+
+            "Guardrails for car model:\n"
+            "- Identify make AND model from body shape, headlights, grille, badges (e.g. \"BYD Atto 3\", \"Hyundai Creta\").\n"
+            "- If the vehicle is clearly visible but the exact model is uncertain, provide the make + best-guess model.\n"
+            "- Only return \"unknown\" if you genuinely cannot identify make or model from the visible car.\n"
+            "- Do NOT fabricate brands/models not supported by visible evidence.\n\n"
+
+            "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
-            "- If the license plate is not clearly readable, return \"unreadable\".\n"
-            "- Do NOT guess or infer missing characters in the license plate.\n"
-            "- If the car make/model is not clearly identifiable, return \"unknown\".\n"
-            "- Do NOT hallucinate or assume brands/models.\n"
-            "- Only use visible evidence from the image.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
             "Example output:\n"
@@ -256,10 +265,12 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         car_number = str(result.get("car_number", "unreadable")).strip()
         car_model  = str(result.get("car_model",  "unknown")).strip()
 
-        # Reject suspiciously short plates (real plates have ≥4 chars)
-        if car_number != "unreadable" and len(car_number.replace(" ", "")) < 4:
+        # Reject suspiciously short plates (Indian plates have 8-10 chars: 2L + 1-2D + 1-3L + 4D)
+        plate_clean = car_number.replace(" ", "").replace("-", "")
+        if car_number != "unreadable" and len(plate_clean) < 8:
             logger.warning(
-                "[VEHICLE] Plate '%s' rejected — too short to be real, marking unreadable", car_number
+                "[VEHICLE] Plate '%s' rejected — too short (%d chars) to be a full plate, marking unreadable",
+                car_number, len(plate_clean),
             )
             car_number = "unreadable"
 
@@ -302,14 +313,23 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             '  "car_number": string\n'
             '  "car_model": string\n\n'
 
-            "Guardrails:\n"
+            "Guardrails for license plate (car_number):\n"
             "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
+            "- If the license plate is clipped, cut off, or extends beyond the image edge, return \"unreadable\".\n"
+            "- If ANY characters on the plate are obscured, blurry, or ambiguous, return \"unreadable\".\n"
+            "- Do NOT guess, infer, complete, or hallucinate missing characters.\n"
+            "- A valid Indian plate has the form: 2 letters + 1-2 digits + 1-3 letters + 4 digits (e.g. KL01AB1234).\n"
+            "- If you cannot read ALL characters of the plate with high confidence, return \"unreadable\".\n"
+            "- Partial plates like \"NZ04\" or \"KL0\" MUST be returned as \"unreadable\".\n\n"
+
+            "Guardrails for car model:\n"
+            "- Identify make AND model from body shape, headlights, grille, badges (e.g. \"BYD Atto 3\", \"Hyundai Creta\").\n"
+            "- If the vehicle is clearly visible but the exact model is uncertain, provide the make + best-guess model.\n"
+            "- Only return \"unknown\" if you genuinely cannot identify make or model from the visible car.\n"
+            "- Do NOT fabricate brands/models not supported by visible evidence.\n\n"
+
+            "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
-            "- If the license plate is not clearly readable, return \"unreadable\".\n"
-            "- Do NOT guess or infer missing characters in the license plate.\n"
-            "- If the car make/model is not clearly identifiable, return \"unknown\".\n"
-            "- Do NOT hallucinate or assume brands/models.\n"
-            "- Only use visible evidence from the image.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
             "Example output:\n"
@@ -352,10 +372,12 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         car_number = str(result.get("car_number", "unreadable")).strip()
         car_model  = str(result.get("car_model",  "unknown")).strip()
 
-        # Reject suspiciously short plates (real plates have ≥4 chars)
-        if car_number != "unreadable" and len(car_number.replace(" ", "")) < 4:
+        # Reject suspiciously short plates (Indian plates have 8-10 chars: 2L + 1-2D + 1-3L + 4D)
+        plate_clean = car_number.replace(" ", "").replace("-", "")
+        if car_number != "unreadable" and len(plate_clean) < 8:
             logger.warning(
-                "[VEHICLE] Plate '%s' rejected — too short to be real, marking unreadable", car_number
+                "[VEHICLE] Plate '%s' rejected — too short (%d chars) to be a full plate, marking unreadable",
+                car_number, len(plate_clean),
             )
             car_number = "unreadable"
 
