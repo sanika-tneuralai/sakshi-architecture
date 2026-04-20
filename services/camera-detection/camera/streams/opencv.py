@@ -80,6 +80,12 @@ class OpenCVCamera:
                 self.cap = cv2.VideoCapture(self.rtsp_url)
                 if not self.cap.isOpened():
                     raise Exception(f"Failed to open video file: {self.rtsp_url}")
+
+                # Play file at its native fps so wall-clock matches video time
+                native_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                if native_fps and native_fps > 0:
+                    logger.info(f"[{self.camera_id}] Native video fps={native_fps:.2f} (requested {self.fps}) — using native")
+                    self.fps = native_fps
             else:
                 logger.info(f"[{self.camera_id}] Opening RTSP stream: {self.rtsp_url}")
 
