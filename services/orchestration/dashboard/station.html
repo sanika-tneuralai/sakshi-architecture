@@ -232,7 +232,7 @@ function BayCard({ slotId, data }) {
                     : isActive  ? 'text-success-500'
                     : 'text-slate-400';
 
-  const bayLabel = slotId.replace('_', ' ');
+  const bayLabel = slotId.replace(/ROI_?/i, 'Slot ').trim();
   const violationDisplay = data?.violation ? violationMeta(data.violation).label : null;
 
   const Row = ({ label, value, pending, na }) => {
@@ -345,7 +345,7 @@ function SessionsTable({ sessions }) {
           const parkSecs  = durationSecs(s.in_time, s.out_time);
           const parkStr   = fmtDuration(parkSecs);
           const isAnomaly = parkSecs !== null && parkSecs > ANOMALY_HOURS * 3600;
-          const slotLabel = s.slot_id ? s.slot_id.replace('_', ' ') : null;
+          const slotLabel = s.slot_id ? s.slot_id.replace(/ROI_?/i, 'Slot ').trim() : null;
           return (
             <tr key={s.session_id} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
               <td className="px-4 py-3 font-mono text-xs">
