@@ -16,8 +16,9 @@ Table: energy_readings
   received_time   DATETIME
   created_at      DATETIME
 
-Energy consumed = total_kwh(at plug_out) - total_kwh(at plug_in)
-For live/active sessions: total_kwh(latest) - total_kwh(at plug_in)
+Primary:  energy = total_kwh(plug_out) − total_kwh(plug_in)
+Fallback: if plug times are absent, use car in_time / out_time with ±2 min
+          buffer to find the closest meter readings.
 
 Environment Variables (override defaults):
   MYSQL_ENERGY_HOST      default: 13.235.19.21
@@ -28,7 +29,7 @@ Environment Variables (override defaults):
 """
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _log = logging.getLogger(__name__)
 
@@ -38,6 +39,9 @@ MYSQL_USER     = os.getenv("MYSQL_ENERGY_USER",     "mqtt_user")
 MYSQL_PASSWORD = os.getenv("MYSQL_ENERGY_PASSWORD", "StrongPassword123!")
 MYSQL_DB       = os.getenv("MYSQL_ENERGY_DB",       "mqtt_db")
 MYSQL_PORT     = int(os.getenv("MYSQL_ENERGY_PORT", "3306"))
+
+# Grace window used when falling back to car in/out times
+FALLBACK_BUFFER_MINUTES = 2
 
 
 def _connect():
@@ -68,46 +72,59 @@ def _to_naive_utc(dt) -> datetime | None:
             return None
     if isinstance(dt, datetime):
         if dt.tzinfo is not None:
-            # Convert to UTC then make naive
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
     return None
 
 
 def get_energy_consumed(
-    plug_time,
-    plug_out_time,
+    plug_time=None,
+    plug_out_time=None,
+    in_time=None,
+    out_time=None,
     controller_id: int | None = None,
     sensor_id: int | None = None,
 ) -> float | None:
     """
-    Return the kWh consumed between plug_time and plug_out_time.
+    Return kWh consumed for a charging session.
 
-    Logic:
-      - kwh_in  = total_kwh of the reading closest to (and at/before) plug_time
-      - kwh_out = total_kwh of the reading closest to (and at/after) plug_out_time
-                  If plug_out_time is None (session still active), use the latest reading.
-      - result  = kwh_out - kwh_in  (rounded to 3 dp)
+    Primary (uses exact gun plug timestamps):
+      - t_in  = plug_time
+      - t_out = plug_out_time  (None → use latest reading for live sessions)
 
-    Returns None if:
-      - plug_time is None (session not started)
-      - no matching meter readings found
-      - DB unreachable (silent — dashboard just shows '—')
+    Fallback (when plug_time is missing, uses car arrival/departure times):
+      - t_in  = in_time  − FALLBACK_BUFFER_MINUTES  (2 min before car arrived)
+      - t_out = out_time + FALLBACK_BUFFER_MINUTES  (2 min after car left)
+      The buffer accounts for the gap between car arrival and charging start.
 
-    Parameters
-    ----------
-    plug_time      : ISO string or datetime — gun plug-in timestamp
-    plug_out_time  : ISO string or datetime or None — gun plug-out timestamp
-    controller_id  : filter by controller (None = any)
-    sensor_id      : filter by sensor (None = any)
+    Returns None if no usable start time is available or DB is unreachable.
     """
-    t_in = _to_naive_utc(plug_time)
-    if t_in is None:
-        return None  # Session hasn't started charging yet
+    buf = timedelta(minutes=FALLBACK_BUFFER_MINUTES)
 
-    t_out = _to_naive_utc(plug_out_time)  # None means still active
+    # ── Resolve effective in/out times ──────────────────────────────────────
+    t_in_raw  = _to_naive_utc(plug_time)
+    t_out_raw = _to_naive_utc(plug_out_time)
 
-    # Build optional controller/sensor filters
+    using_fallback = False
+
+    if t_in_raw is None:
+        # Primary missing — try car in/out times with buffer
+        t_in_fb = _to_naive_utc(in_time)
+        if t_in_fb is None:
+            return None  # No usable start time at all
+        t_in_raw  = t_in_fb - buf          # look 2 min before car arrived
+        t_out_raw = _to_naive_utc(out_time)
+        if t_out_raw is not None:
+            t_out_raw = t_out_raw + buf    # look 2 min after car left
+        using_fallback = True
+        _log.debug(
+            f"[MYSQL_ENERGY] Using fallback times: in={t_in_raw} out={t_out_raw}"
+        )
+
+    t_in  = t_in_raw
+    t_out = t_out_raw  # None = session still active, use latest reading
+
+    # ── Optional DB filters ─────────────────────────────────────────────────
     filters = ""
     params_base: list = []
     if controller_id is not None:
@@ -121,7 +138,7 @@ def get_energy_consumed(
         conn = _connect()
         try:
             with conn.cursor() as cur:
-                # Reading at or just before plug_in
+                # Reading at or just before t_in
                 cur.execute(
                     f"SELECT total_kwh FROM energy_readings "
                     f"WHERE received_time <= %s{filters} "
@@ -131,7 +148,7 @@ def get_energy_consumed(
                 row_in = cur.fetchone()
 
                 if t_out is not None:
-                    # Reading at or just after plug_out
+                    # Reading at or just after t_out
                     cur.execute(
                         f"SELECT total_kwh FROM energy_readings "
                         f"WHERE received_time >= %s{filters} "
@@ -140,7 +157,7 @@ def get_energy_consumed(
                     )
                     row_out = cur.fetchone()
                 else:
-                    # Session still active — use latest reading
+                    # Session still active — latest reading after t_in
                     cur.execute(
                         f"SELECT total_kwh FROM energy_readings "
                         f"WHERE received_time >= %s{filters} "
@@ -158,19 +175,19 @@ def get_energy_consumed(
 
     if row_in is None or row_out is None:
         _log.debug(
-            f"[MYSQL_ENERGY] No readings found: plug_in={t_in} plug_out={t_out}"
+            f"[MYSQL_ENERGY] No readings found: t_in={t_in} t_out={t_out} "
+            f"fallback={using_fallback}"
         )
         return None
 
     kwh_in  = float(row_in["total_kwh"])
     kwh_out = float(row_out["total_kwh"])
+    energy  = kwh_out - kwh_in
 
-    energy = kwh_out - kwh_in
     if energy < 0:
-        # Meter rollover or bad data — return None rather than negative kWh
         _log.warning(
-            f"[MYSQL_ENERGY] Negative energy={energy:.3f} kwh_in={kwh_in} kwh_out={kwh_out} "
-            f"plug_in={t_in} plug_out={t_out} — skipping"
+            f"[MYSQL_ENERGY] Negative energy={energy:.3f} kwh_in={kwh_in} "
+            f"kwh_out={kwh_out} t_in={t_in} t_out={t_out} fallback={using_fallback} — skipping"
         )
         return None
 

@@ -1288,11 +1288,13 @@ async def dashboard_sessions(
         rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
         sessions = []
         for r in rows:
-            # Energy consumed: difference in cumulative meter kWh between plug_in and plug_out.
-            # For active/charging sessions (no plug_out_time) returns energy so far.
+            # Energy consumed: primary uses plug times; falls back to car in/out
+            # times (±2 min buffer) when plug times are not yet recorded.
             energy_kwh = get_energy_consumed(
                 plug_time=r.plug_time,
                 plug_out_time=r.plug_out_time,
+                in_time=r.in_time,
+                out_time=r.out_time,
             )
             sessions.append({
                 "session_id":    r.session_id,
@@ -1498,6 +1500,8 @@ async def dashboard_station(
             energy_kwh = get_energy_consumed(
                 plug_time=session.plug_time,
                 plug_out_time=session.plug_out_time,
+                in_time=session.in_time,
+                out_time=session.out_time,
             )
 
             slots_out[slot_id] = {
