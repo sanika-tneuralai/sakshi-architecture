@@ -1275,6 +1275,7 @@ async def dashboard_sessions(
     db = SessionLocal()
     try:
         from shared.database.models import ChargingSession
+        from shared.database.mysql_energy import get_energy_consumed
         q = db.query(ChargingSession)
         if camera_id:
             q = q.filter(ChargingSession.camera_id == camera_id)
@@ -1285,8 +1286,15 @@ async def dashboard_sessions(
         if status:
             q = q.filter(ChargingSession.session_status == status)
         rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
-        sessions = [
-            {
+        sessions = []
+        for r in rows:
+            # Energy consumed: difference in cumulative meter kWh between plug_in and plug_out.
+            # For active/charging sessions (no plug_out_time) returns energy so far.
+            energy_kwh = get_energy_consumed(
+                plug_time=r.plug_time,
+                plug_out_time=r.plug_out_time,
+            )
+            sessions.append({
                 "session_id":    r.session_id,
                 "camera_id":     r.camera_id,
                 "slot_id":       r.slot_id,
@@ -1298,11 +1306,10 @@ async def dashboard_sessions(
                 "plug_out_time": r.plug_out_time.isoformat() if r.plug_out_time else None,
                 "out_time":      r.out_time.isoformat() if r.out_time else None,
                 "session_status": r.session_status,
+                "energy_kwh":    energy_kwh,
                 "created_at":    r.created_at.isoformat() if r.created_at else None,
                 "updated_at":    r.updated_at.isoformat() if r.updated_at else None,
-            }
-            for r in rows
-        ]
+            })
         return {"sessions": sessions, "total": len(sessions)}
     except Exception as e:
         logger.warning(f"[DASHBOARD] Failed to fetch sessions: {e}")
@@ -1438,6 +1445,7 @@ async def dashboard_station(
     db = SessionLocal()
     try:
         from shared.database.models import ChargingSession, Alert
+        from shared.database.mysql_energy import get_energy_consumed
 
         SLOTS = ["ROI_1", "ROI_2"]
         slots_out = {}
@@ -1486,6 +1494,12 @@ async def dashboard_station(
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.isoformat()
 
+            # Live energy: kWh consumed so far (plug_out_time=None for active sessions)
+            energy_kwh = get_energy_consumed(
+                plug_time=session.plug_time,
+                plug_out_time=session.plug_out_time,
+            )
+
             slots_out[slot_id] = {
                 "car_number":      session.car_number,
                 "car_model":       session.car_model,
@@ -1496,6 +1510,7 @@ async def dashboard_station(
                 "gun_plugout_time": fmt_time(session.plug_out_time),
                 "status":          session.session_status or "active",
                 "violation":       violation,
+                "energy_kwh":      energy_kwh,
             }
 
         return {"station_id": station_id, "slots": slots_out}
