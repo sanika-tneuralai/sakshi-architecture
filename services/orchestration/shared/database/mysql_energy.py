@@ -16,9 +16,13 @@ Table: energy_readings
   received_time   DATETIME
   created_at      DATETIME
 
-Primary:  energy = total_kwh(plug_out) − total_kwh(plug_in)
-Fallback: if plug times are absent, use car in_time / out_time with ±2 min
-          buffer to find the closest meter readings.
+Primary (plug times present):
+  kwh_in  = reading within plug_time  ± 1 min  (closest to plug-in moment)
+  kwh_out = reading within plug_out_time ± 1 min (closest to plug-out moment)
+
+Fallback (plug times missing, use car arrival/departure):
+  kwh_in  = first reading at or AFTER  in_time  (car arrives → gun plugged → meter records)
+  kwh_out = last  reading at or BEFORE out_time  (gun unplugged → car leaves)
 
 Environment Variables (override defaults):
   MYSQL_ENERGY_HOST      default: 13.235.19.21
@@ -40,8 +44,7 @@ MYSQL_PASSWORD = os.getenv("MYSQL_ENERGY_PASSWORD", "StrongPassword123!")
 MYSQL_DB       = os.getenv("MYSQL_ENERGY_DB",       "mqtt_db")
 MYSQL_PORT     = int(os.getenv("MYSQL_ENERGY_PORT", "3306"))
 
-# Grace window used when falling back to car in/out times
-FALLBACK_BUFFER_MINUTES = 2
+PLUG_BUFFER_MINUTES = 1   # ±1 min window around plug_time / plug_out_time
 
 
 def _connect():
@@ -88,41 +91,30 @@ def get_energy_consumed(
     """
     Return kWh consumed for a charging session.
 
-    Primary (uses exact gun plug timestamps):
-      - t_in  = plug_time
-      - t_out = plug_out_time  (None → use latest reading for live sessions)
+    Primary — plug times present:
+      kwh_in  : reading closest to plug_time     within ±1 min window
+      kwh_out : reading closest to plug_out_time within ±1 min window
+                (None → latest reading after plug_time for live sessions)
 
-    Fallback (when plug_time is missing, uses car arrival/departure times):
-      - t_in  = in_time  − FALLBACK_BUFFER_MINUTES  (2 min before car arrived)
-      - t_out = out_time + FALLBACK_BUFFER_MINUTES  (2 min after car left)
-      The buffer accounts for the gap between car arrival and charging start.
+    Fallback — plug_time missing, use car times:
+      kwh_in  : first reading at or AFTER  in_time  (energy starts after car arrives)
+      kwh_out : last  reading at or BEFORE out_time  (energy ends before car leaves)
+                (out_time None → latest reading after in_time for live sessions)
 
-    Returns None if no usable start time is available or DB is unreachable.
+    Returns None if no usable start time or DB is unreachable.
     """
-    buf = timedelta(minutes=FALLBACK_BUFFER_MINUTES)
+    buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
 
-    # ── Resolve effective in/out times ──────────────────────────────────────
-    t_in_raw  = _to_naive_utc(plug_time)
-    t_out_raw = _to_naive_utc(plug_out_time)
+    t_plug_in  = _to_naive_utc(plug_time)
+    t_plug_out = _to_naive_utc(plug_out_time)
+    t_in       = _to_naive_utc(in_time)
+    t_out      = _to_naive_utc(out_time)
 
-    using_fallback = False
+    using_fallback = t_plug_in is None
 
-    if t_in_raw is None:
-        # Primary missing — try car in/out times with buffer
-        t_in_fb = _to_naive_utc(in_time)
-        if t_in_fb is None:
-            return None  # No usable start time at all
-        t_in_raw  = t_in_fb - buf          # look 2 min before car arrived
-        t_out_raw = _to_naive_utc(out_time)
-        if t_out_raw is not None:
-            t_out_raw = t_out_raw + buf    # look 2 min after car left
-        using_fallback = True
-        _log.debug(
-            f"[MYSQL_ENERGY] Using fallback times: in={t_in_raw} out={t_out_raw}"
-        )
-
-    t_in  = t_in_raw
-    t_out = t_out_raw  # None = session still active, use latest reading
+    # Must have at least one start time
+    if t_plug_in is None and t_in is None:
+        return None
 
     # ── Optional DB filters ─────────────────────────────────────────────────
     filters = ""
@@ -138,33 +130,70 @@ def get_energy_consumed(
         conn = _connect()
         try:
             with conn.cursor() as cur:
-                # Reading at or just before t_in
-                cur.execute(
-                    f"SELECT total_kwh FROM energy_readings "
-                    f"WHERE received_time <= %s{filters} "
-                    f"ORDER BY received_time DESC LIMIT 1",
-                    [t_in] + params_base,
-                )
-                row_in = cur.fetchone()
 
-                if t_out is not None:
-                    # Reading at or just after t_out
+                if not using_fallback:
+                    # ── PRIMARY: plug times with ±1 min buffer ───────────
+                    _log.debug(f"[MYSQL_ENERGY] Primary: plug_in={t_plug_in} plug_out={t_plug_out}")
+
+                    # kwh_in: closest reading within [plug_time-1min, plug_time+1min]
+                    cur.execute(
+                        f"SELECT total_kwh FROM energy_readings "
+                        f"WHERE received_time BETWEEN %s AND %s{filters} "
+                        f"ORDER BY ABS(TIMESTAMPDIFF(SECOND, received_time, %s)) ASC LIMIT 1",
+                        [t_plug_in - buf, t_plug_in + buf] + params_base + [t_plug_in],
+                    )
+                    row_in = cur.fetchone()
+
+                    if t_plug_out is not None:
+                        # kwh_out: closest reading within [plug_out-1min, plug_out+1min]
+                        cur.execute(
+                            f"SELECT total_kwh FROM energy_readings "
+                            f"WHERE received_time BETWEEN %s AND %s{filters} "
+                            f"ORDER BY ABS(TIMESTAMPDIFF(SECOND, received_time, %s)) ASC LIMIT 1",
+                            [t_plug_out - buf, t_plug_out + buf] + params_base + [t_plug_out],
+                        )
+                        row_out = cur.fetchone()
+                    else:
+                        # Live session — latest reading after plug_in
+                        cur.execute(
+                            f"SELECT total_kwh FROM energy_readings "
+                            f"WHERE received_time >= %s{filters} "
+                            f"ORDER BY received_time DESC LIMIT 1",
+                            [t_plug_in] + params_base,
+                        )
+                        row_out = cur.fetchone()
+
+                else:
+                    # ── FALLBACK: car in/out times, no buffer ────────────
+                    _log.debug(f"[MYSQL_ENERGY] Fallback: in_time={t_in} out_time={t_out}")
+
+                    # kwh_in: first reading AT or AFTER car arrived
                     cur.execute(
                         f"SELECT total_kwh FROM energy_readings "
                         f"WHERE received_time >= %s{filters} "
                         f"ORDER BY received_time ASC LIMIT 1",
-                        [t_out] + params_base,
-                    )
-                    row_out = cur.fetchone()
-                else:
-                    # Session still active — latest reading after t_in
-                    cur.execute(
-                        f"SELECT total_kwh FROM energy_readings "
-                        f"WHERE received_time >= %s{filters} "
-                        f"ORDER BY received_time DESC LIMIT 1",
                         [t_in] + params_base,
                     )
-                    row_out = cur.fetchone()
+                    row_in = cur.fetchone()
+
+                    if t_out is not None:
+                        # kwh_out: last reading AT or BEFORE car left
+                        cur.execute(
+                            f"SELECT total_kwh FROM energy_readings "
+                            f"WHERE received_time <= %s{filters} "
+                            f"ORDER BY received_time DESC LIMIT 1",
+                            [t_out] + params_base,
+                        )
+                        row_out = cur.fetchone()
+                    else:
+                        # Live session — latest reading after in_time
+                        cur.execute(
+                            f"SELECT total_kwh FROM energy_readings "
+                            f"WHERE received_time >= %s{filters} "
+                            f"ORDER BY received_time DESC LIMIT 1",
+                            [t_in] + params_base,
+                        )
+                        row_out = cur.fetchone()
 
         finally:
             conn.close()
@@ -175,8 +204,8 @@ def get_energy_consumed(
 
     if row_in is None or row_out is None:
         _log.debug(
-            f"[MYSQL_ENERGY] No readings found: t_in={t_in} t_out={t_out} "
-            f"fallback={using_fallback}"
+            f"[MYSQL_ENERGY] No readings found — fallback={using_fallback} "
+            f"plug_in={t_plug_in} plug_out={t_plug_out} in={t_in} out={t_out}"
         )
         return None
 
@@ -186,8 +215,8 @@ def get_energy_consumed(
 
     if energy < 0:
         _log.warning(
-            f"[MYSQL_ENERGY] Negative energy={energy:.3f} kwh_in={kwh_in} "
-            f"kwh_out={kwh_out} t_in={t_in} t_out={t_out} fallback={using_fallback} — skipping"
+            f"[MYSQL_ENERGY] Negative energy={energy:.3f} kwh_in={kwh_in} kwh_out={kwh_out} "
+            f"fallback={using_fallback} — skipping"
         )
         return None
 
