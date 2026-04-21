@@ -383,7 +383,7 @@ function SessionsTable({ sessions }) {
                 {fmtTime(s.plug_out_time) || <NA text="—" />}
               </td>
               <td className="px-4 py-3 whitespace-nowrap">
-                {s.energy_kwh != null ? (
+                {s.session_status === 'completed' && s.energy_kwh != null ? (
                   <span className="inline-flex items-center gap-1 text-xs font-semibold text-brand-700">
                     <IconBolt />{s.energy_kwh.toFixed(3)} kWh
                   </span>
