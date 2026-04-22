@@ -44,7 +44,7 @@ MYSQL_PASSWORD = os.getenv("MYSQL_ENERGY_PASSWORD", "StrongPassword123!")
 MYSQL_DB       = os.getenv("MYSQL_ENERGY_DB",       "mqtt_db")
 MYSQL_PORT     = int(os.getenv("MYSQL_ENERGY_PORT", "3306"))
 
-PLUG_BUFFER_MINUTES = 5   # ±5 min window around plug_time / plug_out_time
+PLUG_BUFFER_MINUTES = 2   # ±2 min window around plug_time / plug_out_time
 
 
 def _connect():
