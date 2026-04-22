@@ -33,9 +33,13 @@ Environment Variables (override defaults):
 """
 import os
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 _log = logging.getLogger(__name__)
+
+# MySQL stores received_time in IST — all queries must use IST naive datetimes
+_IST = ZoneInfo("Asia/Kolkata")
 
 # ── Connection config ────────────────────────────────────────────────────────
 MYSQL_HOST     = os.getenv("MYSQL_ENERGY_HOST",     "13.235.19.21")
@@ -61,10 +65,12 @@ def _connect():
     )
 
 
-def _to_naive_utc(dt) -> datetime | None:
+def _to_naive_ist(dt) -> datetime | None:
     """
-    Normalise a datetime-like value to a naive UTC datetime for MySQL queries.
-    MySQL DATETIME columns have no timezone — we strip tzinfo after converting.
+    Normalise a datetime-like value to a naive IST datetime for MySQL queries.
+    MySQL stores received_time as IST strings with no tzinfo — we must convert
+    PostgreSQL UTC timestamps to IST before querying, otherwise we search the
+    wrong 5h30m-shifted time window.
     """
     if dt is None:
         return None
@@ -75,7 +81,8 @@ def _to_naive_utc(dt) -> datetime | None:
             return None
     if isinstance(dt, datetime):
         if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            # Convert to IST, then strip tzinfo for MySQL comparison
+            dt = dt.astimezone(_IST).replace(tzinfo=None)
         return dt
     return None
 
@@ -105,10 +112,10 @@ def get_energy_consumed(
     """
     buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
 
-    t_plug_in  = _to_naive_utc(plug_time)
-    t_plug_out = _to_naive_utc(plug_out_time)
-    t_in       = _to_naive_utc(in_time)
-    t_out      = _to_naive_utc(out_time)
+    t_plug_in  = _to_naive_ist(plug_time)
+    t_plug_out = _to_naive_ist(plug_out_time)
+    t_in       = _to_naive_ist(in_time)
+    t_out      = _to_naive_ist(out_time)
 
     using_fallback = t_plug_in is None
 
