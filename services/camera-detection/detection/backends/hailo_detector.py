@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default class names — must match new model label order
-# {0: "fire", 1: "smoke", 2: "car", 3: "gun"}
+# {0: "car", 1: "gun", 2: "no_gun"}
 # ---------------------------------------------------------------------------
-_DEFAULT_CLASSES = ["fire", "smoke", "car", "gun"]
+_DEFAULT_CLASSES = ["car", "gun", "no_gun"]
 
 
 class HailoDetector(BaseDetector):
