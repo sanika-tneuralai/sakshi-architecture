@@ -18,5 +18,9 @@ psycopg2-binary==2.9.9
 # MySQL driver (external energy meter DB)
 PyMySQL==1.1.1
 
+# Excel upload for client OCPP energy comparison
+openpyxl==3.1.2
+python-multipart==0.0.9
+
 # Utilities
 python-dotenv==1.0.0

@@ -450,6 +450,104 @@ function ComplianceTable({ violations }) {
   );
 }
 
+/* ── Energy Loss Table ── */
+function ConfidenceBadge({ level }) {
+  const styles = {
+    HIGH:      'bg-success-100 text-success-700',
+    MEDIUM:    'bg-brand-100 text-brand-700',
+    LOW:       'bg-amber-100 text-amber-700',
+    UNMATCHED: 'bg-slate-100 text-slate-500',
+  };
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${styles[level] || styles.UNMATCHED}`}>
+      {level}
+    </span>
+  );
+}
+
+function fmtDurationSecs(secs) {
+  if (secs == null) return null;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function EnergyLossTable({ results, summary }) {
+  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)', 'Match', 'Why'];
+
+  if (!results || !results.length) {
+    return (
+      <div className="py-12 text-center text-slate-400 text-sm">
+        Upload the client OCPP Excel to compare per-gun energy against our meter estimate.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {summary && (
+        <div className="flex flex-wrap gap-4 px-4 py-3 bg-slate-50 border-b border-slate-100 text-xs text-slate-600">
+          <div><span className="font-semibold text-slate-700">{summary.total}</span> rows</div>
+          <div><span className="font-semibold text-success-700">{summary.matched}</span> matched</div>
+          <div><span className="font-semibold text-slate-500">{summary.unmatched}</span> unmatched</div>
+          {summary.total_client_kwh != null && (
+            <div>Client total: <span className="font-semibold text-slate-700">{summary.total_client_kwh.toFixed(2)} kWh</span></div>
+          )}
+          {summary.total_loss_kwh != null && (
+            <div>Total loss: <span className={`font-semibold ${summary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{summary.total_loss_kwh.toFixed(2)} kWh</span></div>
+          )}
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              {cols.map(c => (
+                <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {results.map((r, i) => {
+              const loss = r.loss_kwh;
+              const hasLoss = loss != null;
+              return (
+                <tr key={r.excel_row + '-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
+                  <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
+                  <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(r.vrn) || <NA />}</td>
+                  <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
+                    {display([r.make, r.model].filter(Boolean).join(' ')) || <NA />}
+                  </td>
+                  <td className="px-4 py-3 text-slate-600 text-xs">{r.connector_id ?? <NA text="—" />}</td>
+                  <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{fmtDurationSecs(r.duration_seconds) || <NA text="—" />}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">{r.client_kwh != null ? r.client_kwh.toFixed(3) : <NA text="—" />}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{r.meter_kwh != null ? r.meter_kwh.toFixed(3) : <NA text="—" />}</td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
+                    {hasLoss ? (
+                      <span className={loss > 0.1 ? 'font-semibold text-rose-600' : loss < -0.1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
+                        {loss.toFixed(3)}
+                      </span>
+                    ) : <NA text="—" />}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap"><ConfidenceBadge level={r.confidence} /></td>
+                  <td className="px-4 py-3 text-slate-500 text-xs" title={(r.match_reasons || []).join(', ')}>
+                    {(r.match_reasons || []).join(', ') || <NA text="—" />}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ── */
 function StatCard({ label, value, sub, accent }) {
   const accents = {
@@ -489,6 +587,39 @@ function App() {
   const [violations,  setViolations]  = React.useState([]);
   const [lastUpdated, setLastUpdated] = React.useState(null);
   const [error,       setError]       = React.useState(null);
+  const [lossResults, setLossResults] = React.useState(null);
+  const [lossSummary, setLossSummary] = React.useState(null);
+  const [uploading,   setUploading]   = React.useState(false);
+  const [uploadError, setUploadError] = React.useState(null);
+  const [uploadName,  setUploadName]  = React.useState(null);
+
+  const handleExcelUpload = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    setUploadName(file.name);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(`${BASE}/dashboard/energy-comparison/upload?camera_id=camera_01`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`HTTP ${res.status}: ${detail}`);
+      }
+      const data = await res.json();
+      setLossResults(data.results || []);
+      setLossSummary(data.summary || null);
+    } catch (e) {
+      setUploadError(e.message);
+      setLossResults(null);
+      setLossSummary(null);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   React.useEffect(() => {
     async function poll() {
@@ -608,6 +739,47 @@ function App() {
           />
           <div className="bg-white rounded-2xl shadow-card overflow-hidden">
             <SessionsTable sessions={sessions} />
+          </div>
+        </div>
+
+        {/* ── Energy Loss Analysis ── */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-3">
+            <SectionHeader
+              icon={<IconBolt />}
+              title="Energy Loss Analysis"
+              sub="Client OCPP Excel vs. meter-derived estimate"
+            />
+            <div className="flex items-center gap-3">
+              {uploadName && (
+                <span className="text-xs text-slate-500 truncate max-w-[200px]" title={uploadName}>
+                  {uploadName}
+                </span>
+              )}
+              <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer text-sm font-semibold transition-colors ${uploading ? 'bg-slate-200 text-slate-500 cursor-wait' : 'bg-brand-600 hover:bg-brand-700 text-white'}`}>
+                {uploading ? 'Processing…' : 'Upload Excel'}
+                <input
+                  type="file"
+                  accept=".xlsx,.xlsm"
+                  disabled={uploading}
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files && e.target.files[0];
+                    if (f) handleExcelUpload(f);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+          </div>
+          {uploadError && (
+            <div className="mb-3 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+              <IconWarning />
+              <span className="font-medium">Upload failed:</span> {uploadError}
+            </div>
+          )}
+          <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+            <EnergyLossTable results={lossResults} summary={lossSummary} />
           </div>
         </div>
 

@@ -35,7 +35,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import logging
@@ -1318,6 +1318,118 @@ async def dashboard_sessions(
         return {"sessions": [], "total": 0}
     finally:
         db.close()
+
+
+@app.post("/dashboard/energy-comparison/upload", tags=["dashboard"])
+async def dashboard_energy_comparison_upload(
+    file: UploadFile = File(...),
+    camera_id: Optional[str] = "camera_01",
+    days: int = 14,
+):
+    """
+    Accept the client OCPP Excel export and return per-row energy-loss analysis.
+
+    Matching uses weighted scoring across VRN, car model, slot→connector, session
+    duration, and date (see shared/energy_comparison.py). No per-gun meter query
+    is possible — the physical meter is cumulative across both connectors — so
+    `meter_kwh` is our existing per-session estimate (which may over-count when
+    two guns were active simultaneously). The client Excel value is authoritative.
+    """
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Upload an .xlsx file")
+
+    try:
+        contents = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read upload: {e}")
+
+    from shared.energy_comparison import (
+        parse_excel,
+        match_excel_to_cctv,
+        result_to_dict,
+        CctvSession,
+    )
+    try:
+        excel_rows = parse_excel(contents)
+    except Exception as e:
+        logger.warning(f"[ENERGY_COMPARE] Excel parse failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not parse Excel: {e}")
+
+    if not excel_rows:
+        return {"results": [], "summary": {"total": 0, "matched": 0, "unmatched": 0}}
+
+    # Constrain CCTV lookup to the date range covered by the Excel so we don't
+    # load thousands of irrelevant sessions.
+    excel_dates = [r.date for r in excel_rows if r.date is not None]
+    date_floor = min(excel_dates) - timedelta(days=1) if excel_dates else None
+    date_ceiling = max(excel_dates) + timedelta(days=2) if excel_dates else None
+
+    db = SessionLocal()
+    try:
+        from shared.database.models import ChargingSession
+        from shared.database.mysql_energy import get_energy_consumed
+
+        q = db.query(ChargingSession)
+        if camera_id:
+            q = q.filter(ChargingSession.camera_id == camera_id)
+        if date_floor is not None and date_ceiling is not None:
+            q = q.filter(ChargingSession.created_at >= date_floor)
+            q = q.filter(ChargingSession.created_at <= date_ceiling)
+        else:
+            q = q.filter(ChargingSession.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
+
+        rows = q.order_by(ChargingSession.created_at.desc()).limit(2000).all()
+        cctv_sessions = []
+        for r in rows:
+            energy_kwh = get_energy_consumed(
+                plug_time=r.plug_time,
+                plug_out_time=r.plug_out_time,
+                in_time=r.in_time,
+                out_time=r.out_time,
+            )
+            cctv_sessions.append(CctvSession(
+                session_id=r.session_id,
+                camera_id=r.camera_id,
+                slot_id=r.slot_id,
+                gun_number=r.gun_number,
+                car_number=r.car_number,
+                car_model=r.car_model,
+                in_time=r.in_time,
+                plug_time=r.plug_time,
+                plug_out_time=r.plug_out_time,
+                out_time=r.out_time,
+                energy_kwh=energy_kwh,
+            ))
+    except Exception as e:
+        logger.warning(f"[ENERGY_COMPARE] CCTV session fetch failed: {e}")
+        cctv_sessions = []
+    finally:
+        db.close()
+
+    results = match_excel_to_cctv(excel_rows, cctv_sessions)
+    payload = [result_to_dict(r) for r in results]
+
+    matched = sum(1 for r in results if r.cctv_session is not None)
+    total_loss = sum(
+        r.loss_kwh for r in results
+        if r.loss_kwh is not None
+    )
+    total_client_kwh = sum(
+        r.excel_row.units_kwh for r in results
+        if r.excel_row.units_kwh is not None
+    )
+
+    return {
+        "results": payload,
+        "summary": {
+            "total": len(results),
+            "matched": matched,
+            "unmatched": len(results) - matched,
+            "total_client_kwh": round(total_client_kwh, 3),
+            "total_loss_kwh": round(total_loss, 3),
+            "cctv_pool_size": len(cctv_sessions),
+        },
+    }
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
