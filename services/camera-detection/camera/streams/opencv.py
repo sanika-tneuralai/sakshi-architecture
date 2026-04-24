@@ -32,23 +32,81 @@ class OpenCVCamera:
         self.error_count = 0
         self.max_errors = 10
         self.frame_lock = Lock()
-        
+
+        # Reconnect backoff bounds (seconds) — used only for RTSP sources
+        self.reconnect_min_delay = 2.0
+        self.reconnect_max_delay = 30.0
+
+    def _open_rtsp_capture(self) -> bool:
+        """Open (or re-open) the RTSP capture. Returns True on success."""
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        rtsp_url_tcp = self.rtsp_url
+        if "rtsp_transport" not in self.rtsp_url:
+            rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
+
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
+
+        self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000,
+        ])
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+        if not self.cap.isOpened():
+            return False
+
+        ret, _ = self.cap.read()
+        return bool(ret)
+
+    def _reconnect_rtsp(self):
+        """Block until RTSP stream is re-opened or stop() is called. Exponential backoff."""
+        delay = self.reconnect_min_delay
+        attempt = 0
+        while self.is_running:
+            attempt += 1
+            logger.warning(f"[{self.camera_id}] Reconnect attempt #{attempt} (sleep {delay:.1f}s)...")
+            time.sleep(delay)
+            if not self.is_running:
+                return False
+            if self._open_rtsp_capture():
+                logger.info(f"[{self.camera_id}] ✓ Reconnected on attempt #{attempt}")
+                self.error_count = 0
+                return True
+            delay = min(delay * 2, self.reconnect_max_delay)
+        return False
+
     def _capture_loop(self):
         """Background thread for frame capture"""
         frame_interval = 1.0 / self.fps
-        
+
         try:
-            while self.is_running and self.error_count < self.max_errors:
-                ret, frame = self.cap.read()
-                
+            while self.is_running:
+                ret, frame = self.cap.read() if self.cap is not None else (False, None)
+
                 if not ret:
                     if self.is_file_source:
                         # End of file — rewind and keep looping
                         logger.info(f"[{self.camera_id}] End of video file, rewinding...")
                         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
+
                     self.error_count += 1
                     logger.warning(f"[{self.camera_id}] Failed to read frame (errors: {self.error_count}/{self.max_errors})")
+
+                    if self.error_count >= self.max_errors:
+                        logger.error(f"[{self.camera_id}] Max read errors reached — attempting RTSP reconnect")
+                        if not self._reconnect_rtsp():
+                            # is_running flipped to False during reconnect → exit loop
+                            break
+                        continue
+
                     time.sleep(0.5)
                     continue
 
@@ -61,10 +119,11 @@ class OpenCVCamera:
 
                 # Rate limiting
                 time.sleep(frame_interval)
-                
+
         except Exception as e:
-            logger.error(f"[{self.camera_id}] Error in capture loop: {str(e)}")
+            logger.error(f"[{self.camera_id}] Error in capture loop: {str(e)}", exc_info=True)
         finally:
+            self.is_running = False
             logger.info(f"[{self.camera_id}] Capture loop stopped")
             logger.info(f"[{self.camera_id}] ✓ OpenCVCamera._capture_loop completed")
     
