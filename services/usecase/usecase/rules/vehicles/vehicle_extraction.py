@@ -465,20 +465,30 @@ class VehicleExtractionRule(BaseUsecaseRule):
             matched_rois = which_rois(bbox, rois) if rois else []
             slot_id      = matched_rois[0] if matched_rois else None
 
-            if not slot_id:
-                # Car not in any defined ROI — skip
-                continue
+            # Unauthorized parking: car is outside every defined ROI. We still
+            # want car_number/car_model for the charging session row (slot_id
+            # stays NULL downstream). Reuse slot-state infra with a synthetic
+            # "track:{id}" key so the 3-retry budget, backoff, and extraction
+            # cache still apply — just keyed by track_id instead of ROI.
+            is_unauthorized = slot_id is None
+            if is_unauthorized:
+                if not track_id:
+                    # No stable identity to key on — skip.
+                    continue
+                slot_id = f"track:{track_id}"
 
             slot = get_slot_state(camera_id, slot_id)
 
             # ── Trigger check ─────────────────────────────────────────────
             # Conditions from design (all must be true to call Gemini):
-            #   1. slot is occupied
+            #   1. slot is occupied (or unauthorized — presence outside ROIs
+            #      already implies occupancy; parking_detection doesn't run
+            #      for these synthetic track keys)
             #   2. not yet extracted
             #   3. attempts < 3
             #   4. frame_counter >= backoff_until
             should_extract = (
-                slot["occupied"]
+                (slot["occupied"] or is_unauthorized)
                 and not slot["extracted"]
                 and slot["extraction_attempts"] < 3
                 and slot["frame_counter"] >= slot["extraction_backoff_until"]
@@ -575,10 +585,12 @@ class VehicleExtractionRule(BaseUsecaseRule):
                 set_slot_state(camera_id, slot_id, slot)
 
             # Always include in vehicle_details using whatever is stored in slot
-            # (may be null on first attempt; will be populated after success)
+            # (may be null on first attempt; will be populated after success).
+            # For unauthorized cars, emit slot_id=None so downstream routes the
+            # row by track_id into the unauthorized-session path.
             vehicle_details.append({
                 "track_id":  track_id,
-                "slot_id":   slot_id,
+                "slot_id":   None if is_unauthorized else slot_id,
                 "car_number": slot["car_number"],
                 "car_model":  slot["car_model"],
                 "confidence": car.get("confidence", 0.0),

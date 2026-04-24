@@ -167,6 +167,48 @@ class GunDetectionRule(BaseUsecaseRule):
 
             set_slot_state(camera_id, roi_name, slot)
 
+        # ── Unauthorized attribution ──────────────────────────────────────
+        # If a gun sits in an ROI whose slot is NOT occupied, and exactly one
+        # tracked car is currently outside every defined ROI, attribute the
+        # gun to that unauthorized car. We emit a lightweight
+        # "gun_unauthorized" event (gun_number only — no plug_time, no
+        # plug_out_time, no slot_id) so the orchestration layer can attach
+        # gun_number to the unauthorized charging session.
+        #
+        # Conservative matching: skip when there are 0 or >1 unauthorized
+        # cars — guessing which car the gun belongs to would mis-attribute.
+        if rois:
+            unauthorized_cars = [
+                c for c in tracked_cars
+                if not which_rois(c.get("bbox", {}), rois)
+                and c.get("track_id")
+            ]
+            unoccupied_gun_rois = [
+                roi_name for roi_name, gun in roi_to_gun.items()
+                if not get_slot_state(camera_id, roi_name)["occupied"]
+            ]
+            if len(unauthorized_cars) == 1 and unoccupied_gun_rois:
+                ua_track_id = unauthorized_cars[0]["track_id"]
+                for roi_name in unoccupied_gun_rois:
+                    gun_name = _gun_name_for_roi(roi_name)
+                    evt = build_event(
+                        event_type="gun_unauthorized",
+                        camera_id=camera_id,
+                        timestamp=_now(),
+                        track_id=ua_track_id,
+                        metadata={
+                            "gun_name": gun_name,
+                            "roi":      roi_name,
+                            "source":   "unauthorized_parking",
+                        },
+                    )
+                    events.append(evt)
+                    publish_sync("gun_events", evt, task_id=task_id)
+                    logger.info(
+                        "[GUN] Unauthorized gun attribution: camera=%s gun=%s track=%s",
+                        camera_id, gun_name, ua_track_id,
+                    )
+
         triggered = bool(events)
         print(f"[GUN] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
         return {"triggered": triggered, "matched_objects": list(gun_dets), "events": events}
