@@ -183,10 +183,18 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
 
     # ------------------------------------------------------------------ #
     # 1. Extract events from usecase results, grouped by slot_id           #
+    #                                                                      #
+    # Unauthorized parking (parking_compliance with                        #
+    # metadata.source="unauthorized_parking") has no slot_id — those       #
+    # events are bucketed by track_id in parking_by_track. Their session   #
+    # row is written with slot_id=NULL.                                    #
     # ------------------------------------------------------------------ #
-    parking_by_slot: dict = {}   # {slot_id: {"in_time": ts, "out_time": ts, "track_id": str}}
-    gun_by_slot: dict = {}       # {slot_id: {"plug_time": ts, "plug_out_time": ts, "gun_number": str, "track_id": str}}
-    vehicle_by_slot: dict = {}   # {slot_id: {"car_number": str, "car_model": str}}
+    parking_by_slot: dict = {}    # {slot_id: {"in_time": ts, "out_time": ts, "track_id": str}}
+    parking_by_track: dict = {}   # {track_id: {"in_time": ts, "out_time": ts}}  — unauthorized only
+    gun_by_slot: dict = {}        # {slot_id: {"plug_time": ts, "plug_out_time": ts, "gun_number": str, "track_id": str}}
+    gun_by_track: dict = {}       # {track_id: {"gun_number": str}}  — unauthorized only, no plug times
+    vehicle_by_slot: dict = {}    # {slot_id: {"car_number": str, "car_model": str}}
+    vehicle_by_track: dict = {}   # {track_id: {"car_number": str, "car_model": str}}
 
     for result in usecase_results:
         usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
@@ -204,8 +212,21 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 meta    = evt.get("metadata", {})
                 slot_id = meta.get("slot_id") or meta.get("roi")
                 tid     = evt.get("track_id")
-                if etype not in ("parking_intime", "parking_outtime") or not slot_id:
+                if etype not in ("parking_intime", "parking_outtime"):
                     continue
+
+                # Unauthorized parking: no slot_id, bucket by track_id
+                if not slot_id:
+                    if meta.get("source") != "unauthorized_parking" or not tid:
+                        continue
+                    if tid not in parking_by_track:
+                        parking_by_track[tid] = {"in_time": None, "out_time": None}
+                    if etype == "parking_intime" and parking_by_track[tid]["in_time"] is None:
+                        parking_by_track[tid]["in_time"] = ts
+                    elif etype == "parking_outtime" and parking_by_track[tid]["out_time"] is None:
+                        parking_by_track[tid]["out_time"] = ts
+                    continue
+
                 if slot_id not in parking_by_slot:
                     parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None}
                 if etype == "parking_intime" and parking_by_slot[slot_id]["in_time"] is None:
@@ -222,6 +243,17 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 meta    = evt.get("metadata", {})
                 slot_id = meta.get("slot_id") or meta.get("roi")
                 tid     = evt.get("track_id")
+
+                # Gun detected near an unauthorized car (outside all ROIs).
+                # Attach gun_number only; no plug_time/plug_out_time recorded
+                # because slot-based plug semantics don't apply.
+                if etype == "gun_unauthorized" and tid:
+                    gun_name = meta.get("gun_name")
+                    if gun_name:
+                        gun_by_track.setdefault(tid, {"gun_number": None})
+                        gun_by_track[tid]["gun_number"] = gun_by_track[tid]["gun_number"] or gun_name
+                    continue
+
                 if not slot_id:
                     continue
                 if slot_id not in gun_by_slot:
@@ -238,17 +270,22 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         elif usecase_id == "vehicle_extraction":
             for d in extras.get("vehicle_details", result.get("vehicle_details", [])):
                 sid = d.get("slot_id")
+                tid = d.get("track_id")
+                entry = {
+                    "car_number": d.get("car_number"),
+                    "car_model":  d.get("car_model"),
+                }
                 if sid:
-                    vehicle_by_slot[sid] = {
-                        "car_number": d.get("car_number"),
-                        "car_model":  d.get("car_model"),
-                    }
+                    vehicle_by_slot[sid] = entry
+                elif tid:
+                    # Unauthorized-parking car: no slot, key by track_id
+                    vehicle_by_track[tid] = entry
 
     # ------------------------------------------------------------------ #
     # 2. Upsert one session per slot_id seen this frame                    #
     # ------------------------------------------------------------------ #
     all_slots = set(parking_by_slot.keys()) | set(gun_by_slot.keys())
-    if not all_slots:
+    if not all_slots and not parking_by_track and not gun_by_track:
         return
 
     for slot_id in all_slots:
@@ -358,6 +395,112 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             db.rollback()
             _persistence_logger.warning(
                 f"[DB] Failed to upsert ChargingSession for camera {camera_id} slot={slot_id}: {e}"
+            )
+            raise
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------ #
+    # 3. Unauthorized-parking sessions (no slot_id, keyed by track_id)    #
+    #                                                                      #
+    # Inappropriately parked cars (outside all ROIs). We capture in_time,  #
+    # out_time, car_number, and car_model when available. gun_number is    #
+    # attached opportunistically when a gun is detected near the car (no   #
+    # slot semantics apply, so plug_time / plug_out_time stay NULL).       #
+    # Session identity here is (camera_id, track_id, slot_id=NULL):        #
+    # looked up via track_id among open sessions with slot_id IS NULL.     #
+    # ------------------------------------------------------------------ #
+    unauthorized_tracks = set(parking_by_track.keys()) | set(gun_by_track.keys())
+    for track_id in unauthorized_tracks:
+        p = parking_by_track.get(track_id, {})
+        g = gun_by_track.get(track_id, {})
+
+        in_time    = _parse_dt(p.get("in_time"))
+        out_time   = _parse_dt(p.get("out_time"))
+        gun_number = g.get("gun_number")
+
+        car_number = None
+        car_model  = None
+        vd = vehicle_by_track.get(track_id)
+        if vd:
+            cn = vd.get("car_number")
+            cm = vd.get("car_model")
+            if cn not in (None, "unreadable", "unknown"):
+                car_number = cn
+            if cm not in (None, "unknown"):
+                car_model = cm
+
+        _persistence_logger.info(
+            f"[DB][{camera_id}] upsert unauthorized track={track_id} "
+            f"in_time={p.get('in_time')} out_time={p.get('out_time')} "
+            f"gun={gun_number} car={car_number}"
+        )
+
+        if not any([in_time, out_time, car_number, car_model, gun_number]):
+            continue
+
+        db = SessionLocal()
+        try:
+            open_statuses = ("active", "charging")
+            session: ChargingSession | None = (
+                db.query(ChargingSession)
+                .filter(
+                    ChargingSession.camera_id == camera_id,
+                    ChargingSession.slot_id.is_(None),
+                    ChargingSession.track_id == track_id,
+                    ChargingSession.session_status.in_(open_statuses),
+                )
+                .order_by(ChargingSession.session_id.desc())
+                .first()
+            )
+
+            if session is None:
+                # Only open a new unauthorized session when parking_compliance
+                # has confirmed entry (in_time). A gun-only event for a track
+                # we've never seen entering is ignored to avoid orphan rows.
+                if in_time is None:
+                    _persistence_logger.debug(
+                        f"[DB] Skipping new unauthorized session for camera {camera_id} track={track_id} — no in_time yet"
+                    )
+                    continue
+                session = ChargingSession(
+                    camera_id=camera_id,
+                    slot_id=None,
+                    track_id=track_id,
+                    in_time=in_time,
+                    session_status="active",
+                )
+                db.add(session)
+                db.flush()
+                _persistence_logger.info(
+                    f"[DB] Created unauthorized ChargingSession session_id={session.session_id} "
+                    f"track={track_id} for camera {camera_id}"
+                )
+
+            if car_number and session.car_number is None: session.car_number = car_number
+            if car_model  and session.car_model  is None: session.car_model  = car_model
+            if gun_number and session.gun_number is None: session.gun_number = gun_number
+            if in_time    and session.in_time    is None: session.in_time    = in_time
+            if out_time   and session.out_time   is None: session.out_time   = out_time
+
+            if session.out_time is not None:
+                # Unauthorized sessions never get plug_time ⇒ always 'incomplete' when closed.
+                session.session_status = "incomplete"
+            else:
+                session.session_status = "active"
+
+            db.commit()
+            _persistence_logger.info(
+                f"[DB] Unauthorized ChargingSession session_id={session.session_id} "
+                f"track={session.track_id} status={session.session_status} | "
+                f"in_time={session.in_time} out_time={session.out_time} "
+                f"gun={session.gun_number} car={session.car_number} camera={camera_id}"
+            )
+
+        except Exception as e:
+            db.rollback()
+            _persistence_logger.warning(
+                f"[DB] Failed to upsert unauthorized ChargingSession camera={camera_id} track={track_id}: {e}"
             )
             raise
         finally:
@@ -475,8 +618,14 @@ def persist_alerts_from_results(camera_id: str, usecase_results: list) -> int:
             # ── gun_detection: one alert per (slot_id, event_type) ────────
             if usecase_id == "gun_detection":
                 for evt in extras.get("events", []):
-                    slot_id    = evt.get("metadata", {}).get("slot_id") or evt.get("metadata", {}).get("roi")
                     event_type = evt.get("event_type", "")
+                    # gun_unauthorized is a data-attribution ping for the
+                    # unauthorized-parking session path — not an alertable
+                    # event on its own. The parking_compliance alert already
+                    # covers the violation.
+                    if event_type == "gun_unauthorized":
+                        continue
+                    slot_id    = evt.get("metadata", {}).get("slot_id") or evt.get("metadata", {}).get("roi")
                     alert_type = event_type  # gun_plugin / gun_plugout
 
                     if slot_id:
@@ -553,11 +702,16 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
     Close any ChargingSession that has been open (active or charging) for longer
     than stale_hours without receiving an out_time.
 
-    Sessions closed here are marked 'incomplete'.
+    Sessions closed here get an inferred out_time (created_at + stale_hours) and
+    are marked 'completed' if plug_time exists, otherwise 'incomplete'. The
+    inferred out_time lets downstream analytics (energy comparison) still
+    produce a duration window when detection missed the car leaving.
+
     Called periodically by the orchestration pipeline (every 60 iterations).
     Returns the number of sessions closed.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+    now    = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=stale_hours)
     db = SessionLocal()
     closed = 0
     try:
@@ -570,12 +724,20 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
             .all()
         )
         for session in stale:
-            session.session_status = "incomplete"
+            if session.out_time is None:
+                # Prefer created_at + stale_hours over now() so the inferred window
+                # stays anchored to the session's own timeline rather than wall clock.
+                created = session.created_at
+                if created is not None and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                session.out_time = (created + timedelta(hours=stale_hours)) if created else now
+            session.session_status = "completed" if session.plug_time is not None else "incomplete"
             closed += 1
             _persistence_logger.warning(
                 f"[DB] Closed stale session session_id={session.session_id} "
                 f"slot={session.slot_id} camera={session.camera_id} "
-                f"created_at={session.created_at} (stale > {stale_hours}h)"
+                f"created_at={session.created_at} out_time={session.out_time} "
+                f"status={session.session_status} (stale > {stale_hours}h)"
             )
         if closed:
             db.commit()
