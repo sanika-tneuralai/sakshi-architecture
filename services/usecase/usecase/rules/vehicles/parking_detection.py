@@ -40,6 +40,12 @@ EXIT_FRAMES  = 25   # consecutive frames car must be absent to confirm exit (~25
                     # must be > CentroidTracker.max_disappeared (20) so a brief detection gap
                     # doesn't fire a false outtime before the tracker drops the car
 
+# Hard ceiling on how long the "gun still plugged in" exit-guard can block
+# outtime. Protects against a deadlock where a stale/hallucinated gun detection
+# keeps gun_active=True forever while the car is long gone. After this many
+# car-absent frames we force-fire both parking_outtime and gun_plugout.
+FORCE_EXIT_FRAMES = 75  # ~75 s at 1 fps (3× EXIT_FRAMES)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -214,6 +220,39 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
                     # ── Outtime guard: blocked while gun is plugged in ────
                     gun_active = slot["plugin_logged"] and not slot["plugout_logged"]
+
+                    # Force-close safety net: if the car has been gone far
+                    # longer than a normal exit window, the gun_plugout must
+                    # have been missed by detection. Synthesize it here and
+                    # let outtime fire so the slot is not wedged forever.
+                    force_close = (
+                        gun_active
+                        and slot["car_absent_frames"] >= FORCE_EXIT_FRAMES
+                    )
+                    if force_close:
+                        plugout_ts  = _now()
+                        plugout_evt = build_event(
+                            event_type="gun_plugout",
+                            camera_id=camera_id,
+                            timestamp=plugout_ts,
+                            track_id=slot["track_id"] or "",
+                            metadata={
+                                "gun_name":     slot.get("gun_name"),
+                                "roi":          roi_name,
+                                "slot_id":      roi_name,
+                                "plugin_time":  slot.get("plug_time"),
+                                "plugout_time": plugout_ts,
+                                "reason":       "forced — car absent > FORCE_EXIT_FRAMES",
+                            },
+                        )
+                        events.append(plugout_evt)
+                        publish_sync("gun_events", plugout_evt, task_id=task_id)
+                        logger.warning(
+                            "[PARKING] Forced gun_plugout — car absent %d frames: camera=%s roi=%s",
+                            slot["car_absent_frames"], camera_id, roi_name,
+                        )
+                        # Treat the gun as no longer active for the outtime check below
+                        gun_active = False
 
                     if slot["car_absent_frames"] >= EXIT_FRAMES and not gun_active:
                         outtime = _now()
