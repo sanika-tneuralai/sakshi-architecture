@@ -1446,6 +1446,88 @@ async def dashboard_energy_comparison_upload(
     }
 
 
+@app.post("/dashboard/energy-analysis", tags=["dashboard"])
+async def dashboard_energy_analysis(request: dict):
+    """
+    Accept matched energy-comparison results and use Gemini to generate
+    a natural-language insight report identifying:
+      - Cars consuming the most energy
+      - Cars with the highest energy loss vs client OCPP data
+      - Unusual or repeated patterns
+      - Summary recommendations
+
+    Request body: { "results": [...], "summary": {...} }
+    Returns: { "insight": "<markdown text>" }
+    """
+    import os
+    import json
+
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured on server")
+
+    results  = request.get("results", [])
+    summary  = request.get("summary", {})
+
+    if not results:
+        raise HTTPException(status_code=400, detail="No results provided for analysis")
+
+    # Build a compact data table for the prompt
+    table_lines = ["VRN | Make | Model | Connector | Duration(min) | Client kWh | Meter kWh | Loss kWh | Match"]
+    table_lines.append("----|------|-------|-----------|---------------|------------|-----------|----------|------")
+    for r in results:
+        vrn      = r.get("vrn") or "—"
+        make     = r.get("make") or "—"
+        model    = r.get("model") or "—"
+        conn     = r.get("connector_id") or "—"
+        dur_min  = round(r.get("duration_seconds", 0) / 60, 1) if r.get("duration_seconds") else "—"
+        c_kwh    = r.get("client_kwh")
+        m_kwh    = r.get("meter_kwh")
+        loss     = r.get("loss_kwh")
+        conf     = r.get("confidence", "UNMATCHED")
+        table_lines.append(
+            f"{vrn} | {make} | {model} | {conn} | {dur_min} | "
+            f"{c_kwh if c_kwh is not None else '—'} | "
+            f"{m_kwh if m_kwh is not None else '—'} | "
+            f"{loss if loss is not None else '—'} | {conf}"
+        )
+
+    prompt = f"""You are an EV charging station energy analyst. Analyse the following charging session data and provide actionable insights.
+
+## Summary
+- Total sessions: {summary.get('total', '?')}
+- Matched sessions: {summary.get('matched', '?')}
+- Unmatched sessions: {summary.get('unmatched', '?')}
+- Total client kWh: {summary.get('total_client_kwh', '?')}
+- Total energy loss (client − meter): {summary.get('total_loss_kwh', '?')} kWh
+
+## Session Data
+{chr(10).join(table_lines)}
+
+## Your Task
+Write a concise analyst report (use markdown with headers) covering:
+1. **Top energy consumers** — which cars/VRNs consumed the most client kWh
+2. **Highest energy loss** — which cars show the biggest difference between client kWh and meter kWh, and what might explain it
+3. **Patterns** — repeated VRNs, same connector always losing more, short sessions with high loss, etc.
+4. **Unmatched sessions** — any concern about the {summary.get('unmatched', 0)} unmatched rows
+5. **Recommendations** — 2-3 actionable suggestions for the station operator
+
+Keep the report concise and factual. Use actual VRN/car names from the data.
+"""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        insight = response.text
+    except Exception as e:
+        logger.warning(f"[GEMINI] Energy analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
+
+    return {"insight": insight}
+
+
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
 async def dashboard_parking_compliance(
     camera_id: Optional[str] = None,

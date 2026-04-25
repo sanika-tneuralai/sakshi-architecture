@@ -601,6 +601,9 @@ function App() {
   const [uploadError, setUploadError] = React.useState(null);
   const [uploadName,  setUploadName]  = React.useState(null);
   const [filterDate,  setFilterDate]  = React.useState(todayIST());
+  const [insight,     setInsight]     = React.useState(null);
+  const [analysing,   setAnalysing]   = React.useState(false);
+  const [analyseError,setAnalyseError]= React.useState(null);
 
   const handleExcelUpload = async (file) => {
     if (!file) return;
@@ -627,6 +630,30 @@ function App() {
       setLossSummary(null);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleAnalyse = async () => {
+    if (!lossResults || !lossResults.length) return;
+    setAnalysing(true);
+    setAnalyseError(null);
+    setInsight(null);
+    try {
+      const res = await fetch(`${BASE}/dashboard/energy-analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ results: lossResults, summary: lossSummary }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`HTTP ${res.status}: ${detail}`);
+      }
+      const data = await res.json();
+      setInsight(data.insight || 'No insight returned.');
+    } catch (e) {
+      setAnalyseError(e.message);
+    } finally {
+      setAnalysing(false);
     }
   };
 
@@ -812,6 +839,46 @@ function App() {
           <div className="bg-white rounded-2xl shadow-card overflow-hidden">
             <EnergyLossTable results={lossResults} summary={lossSummary} />
           </div>
+
+          {/* ── AI Analyse Button ── */}
+          {lossResults && lossResults.length > 0 && (
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={handleAnalyse}
+                disabled={analysing}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors shadow-sm ${analysing ? 'bg-slate-200 text-slate-500 cursor-wait' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
+              >
+                <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+                  <path d="M12 2L9 9H2L7.5 13.5L5.5 21L12 17L18.5 21L16.5 13.5L22 9H15L12 2Z" fill="currentColor"/>
+                </svg>
+                {analysing ? 'Analysing…' : 'Analyse with AI'}
+              </button>
+            </div>
+          )}
+
+          {/* ── AI Insight Panel ── */}
+          {analyseError && (
+            <div className="mt-4 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+              <IconWarning />
+              <span className="font-medium">Analysis failed:</span> {analyseError}
+            </div>
+          )}
+          {insight && (
+            <div className="mt-4 bg-white rounded-2xl shadow-card overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4 text-violet-600">
+                    <path d="M12 2L9 9H2L7.5 13.5L5.5 21L12 17L18.5 21L16.5 13.5L22 9H15L12 2Z" fill="currentColor"/>
+                  </svg>
+                  <span className="text-sm font-bold text-slate-700">AI Energy Insight</span>
+                </div>
+                <button onClick={() => setInsight(null)} className="text-xs text-slate-400 hover:text-slate-600">✕ Dismiss</button>
+              </div>
+              <div className="px-5 py-4 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
+                {insight}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── Compliance Table ── */}
