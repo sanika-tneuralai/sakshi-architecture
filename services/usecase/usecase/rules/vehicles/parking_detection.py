@@ -7,14 +7,16 @@ Design (locked):
 - One canonical CentroidTracker per camera, owned by this rule.
   gun_detection and vehicle_extraction read tracked cars from the slim
   payload — they do NOT instantiate their own trackers.
-- Slot state (occupied, in_time, car_absent_frames, gun flags) lives in
+- Slot state (occupied, in_time, car_absent_since, gun flags) lives in
   Redis under ``slot:{camera_id}:{slot_id}`` and is shared with the other
   vehicle rules via get_slot_state / set_slot_state.
 - parking_intime fires only when slot.occupied == False (prevents duplicate
   sessions on tracker reset / service restart).
-- parking_outtime fires only when slot.car_absent_frames >= EXIT_FRAMES AND
-  the gun is NOT currently plugged in (plugin_logged=True, plugout_logged=False).
-  This makes it impossible for a car to "leave" while the charger is active.
+- parking_outtime fires only when wall-clock seconds since car_absent_since
+  >= EXIT_SECONDS AND the gun is NOT currently plugged in
+  (plugin_logged=True, plugout_logged=False). Wall-clock means the rule
+  produces correct outtime regardless of detection cadence — a slow
+  pipeline still fires outtime within ~EXIT_SECONDS of the car leaving.
 - On parking_outtime: slot state is fully reset via reset_slot_state().
 
 ROI polygons are injected via detection_output["rois"]:
@@ -36,19 +38,39 @@ from workers.redis_state import get_state, set_state, get_slot_state, set_slot_s
 logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
-EXIT_FRAMES  = 25   # consecutive frames car must be absent to confirm exit (~25 s at 1 fps)
-                    # must be > CentroidTracker.max_disappeared (20) so a brief detection gap
-                    # doesn't fire a false outtime before the tracker drops the car
+
+# Wall-clock thresholds for exit. Frame-count gating produced bad outtimes
+# whenever the detection pipeline ran slower than 1 fps (e.g. RTSP stalls or
+# orchestrator backpressure pushing inter-frame gaps to minutes), because
+# car_absent_frames advanced at most once per call.
+EXIT_SECONDS = 60   # car must be absent this many wall-clock seconds to confirm exit
 
 # Hard ceiling on how long the "gun still plugged in" exit-guard can block
 # outtime. Protects against a deadlock where a stale/hallucinated gun detection
 # keeps gun_active=True forever while the car is long gone. After this many
-# car-absent frames we force-fire both parking_outtime and gun_plugout.
-FORCE_EXIT_FRAMES = 75  # ~75 s at 1 fps (3× EXIT_FRAMES)
+# car-absent seconds we force-fire both parking_outtime and gun_plugout.
+FORCE_EXIT_SECONDS = 180  # 3× EXIT_SECONDS
+
+
+def _now_dt() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _now_dt().isoformat()
+
+
+def _absent_seconds(absent_since_iso: str | None, now: datetime) -> float:
+    """Wall-clock seconds since the slot first became absent. 0 if never set."""
+    if not absent_since_iso:
+        return 0.0
+    try:
+        since = datetime.fromisoformat(absent_since_iso)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return 0.0
+    return max(0.0, (now - since).total_seconds())
 
 
 def _init_debounce(state: dict, roi_names: List[str]) -> dict:
@@ -111,8 +133,8 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
             if occupant_ids:
                 triggered = True
-                # Reset the car-absent counter: car is present this frame
-                slot["car_absent_frames"] = 0
+                # Car is present this frame — clear absent timestamp
+                slot["car_absent_since"] = None
 
                 # Multiple cars in the same ROI — violation event (unchanged)
                 if len(occupant_ids) > 1:
@@ -134,10 +156,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         intime = _now()
                         # Mark slot occupied before publishing so re-entrant calls can't
                         # double-fire even within the same frame batch
-                        slot["occupied"]          = True
-                        slot["in_time"]           = intime
-                        slot["track_id"]          = tid
-                        slot["car_absent_frames"] = 0
+                        slot["occupied"]         = True
+                        slot["in_time"]          = intime
+                        slot["track_id"]         = tid
+                        slot["car_absent_since"] = None
                         entry_buf[roi_name].pop(tid, None)
 
                         evt = build_event(
@@ -187,10 +209,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             reset_slot_state(camera_id, roi_name)
                             slot = get_slot_state(camera_id, roi_name)
 
-                            slot["occupied"]          = True
-                            slot["in_time"]           = swap_ts
-                            slot["track_id"]          = tid
-                            slot["car_absent_frames"] = 0
+                            slot["occupied"]         = True
+                            slot["in_time"]          = swap_ts
+                            slot["track_id"]         = tid
+                            slot["car_absent_since"] = None
                             entry_buf[roi_name].pop(tid, None)
 
                             intime_evt = build_event(
@@ -216,7 +238,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
                 entry_buf[roi_name].clear()
 
                 if slot["occupied"]:
-                    slot["car_absent_frames"] += 1
+                    now_dt = _now_dt()
+                    if not slot.get("car_absent_since"):
+                        slot["car_absent_since"] = now_dt.isoformat()
+                    absent_secs = _absent_seconds(slot.get("car_absent_since"), now_dt)
 
                     # ── Outtime guard: blocked while gun is plugged in ────
                     gun_active = slot["plugin_logged"] and not slot["plugout_logged"]
@@ -225,10 +250,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     # longer than a normal exit window, the gun_plugout must
                     # have been missed by detection. Synthesize it here and
                     # let outtime fire so the slot is not wedged forever.
-                    force_close = (
-                        gun_active
-                        and slot["car_absent_frames"] >= FORCE_EXIT_FRAMES
-                    )
+                    force_close = gun_active and absent_secs >= FORCE_EXIT_SECONDS
                     if force_close:
                         plugout_ts  = _now()
                         plugout_evt = build_event(
@@ -242,19 +264,19 @@ class ParkingDetectionRule(BaseUsecaseRule):
                                 "slot_id":      roi_name,
                                 "plugin_time":  slot.get("plug_time"),
                                 "plugout_time": plugout_ts,
-                                "reason":       "forced — car absent > FORCE_EXIT_FRAMES",
+                                "reason":       "forced — car absent > FORCE_EXIT_SECONDS",
                             },
                         )
                         events.append(plugout_evt)
                         publish_sync("gun_events", plugout_evt, task_id=task_id)
                         logger.warning(
-                            "[PARKING] Forced gun_plugout — car absent %d frames: camera=%s roi=%s",
-                            slot["car_absent_frames"], camera_id, roi_name,
+                            "[PARKING] Forced gun_plugout — car absent %.1fs: camera=%s roi=%s",
+                            absent_secs, camera_id, roi_name,
                         )
                         # Treat the gun as no longer active for the outtime check below
                         gun_active = False
 
-                    if slot["car_absent_frames"] >= EXIT_FRAMES and not gun_active:
+                    if absent_secs >= EXIT_SECONDS and not gun_active:
                         outtime = _now()
                         evt = build_event(
                             event_type="parking_outtime",

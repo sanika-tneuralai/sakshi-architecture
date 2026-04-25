@@ -104,7 +104,7 @@ def _default_slot_state() -> dict:
         "occupied": False,
         "in_time": None,          # ISO str, set once on parking_intime
         "track_id": None,         # informational only
-        "car_absent_frames": 0,   # consecutive frames without car in slot
+        "car_absent_since": None, # ISO str, first frame the car went missing; None while present
 
         # Vehicle extraction
         "extracted": False,                # True once Gemini succeeds OR attempts exhausted
