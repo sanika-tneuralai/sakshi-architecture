@@ -50,7 +50,14 @@ class OpenCVCamera:
         if "rtsp_transport" not in self.rtsp_url:
             rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
 
-        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
+            'rtsp_transport;tcp'
+            '|max_delay;500000'
+            '|stimeout;30000000'
+            '|buffer_size;16777216'
+            '|rtbufsize;100M'
+            '|fflags;discardcorrupt'
+        )
 
         self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
             cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,
@@ -154,7 +161,14 @@ class OpenCVCamera:
                 if "rtsp_transport" not in self.rtsp_url:
                     rtsp_url_tcp = self.rtsp_url + ("&" if "?" in self.rtsp_url else "?") + "rtsp_transport=tcp"
 
-                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|max_delay;500000|stimeout;30000000'
+                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
+            'rtsp_transport;tcp'
+            '|max_delay;500000'
+            '|stimeout;30000000'
+            '|buffer_size;16777216'
+            '|rtbufsize;100M'
+            '|fflags;discardcorrupt'
+        )
 
                 self.cap = cv2.VideoCapture(rtsp_url_tcp, cv2.CAP_FFMPEG, [
                     cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000,  # 30 second connection timeout
