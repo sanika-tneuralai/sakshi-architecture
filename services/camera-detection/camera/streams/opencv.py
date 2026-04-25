@@ -34,8 +34,11 @@ class OpenCVCamera:
         self.frame_lock = Lock()
 
         # Reconnect backoff bounds (seconds) — used only for RTSP sources
-        self.reconnect_min_delay = 2.0
+        # Initial delay is generous so the camera (e.g. TP-Link) has time to expire
+        # the previous RTSP session and avoid "429 Stream Up To Limit".
+        self.reconnect_min_delay = 5.0
         self.reconnect_max_delay = 30.0
+        self.release_grace_seconds = 1.0
 
     def _open_rtsp_capture(self) -> bool:
         """Open (or re-open) the RTSP capture. Returns True on success."""
@@ -45,6 +48,9 @@ class OpenCVCamera:
             except Exception:
                 pass
             self.cap = None
+            # Give the camera a moment to observe TCP FIN and free the RTSP session
+            # slot, otherwise it may answer the next PLAY with 429 Stream Up To Limit.
+            time.sleep(self.release_grace_seconds)
 
         rtsp_url_tcp = self.rtsp_url
         if "rtsp_transport" not in self.rtsp_url:
@@ -90,8 +96,18 @@ class OpenCVCamera:
         return False
 
     def _capture_loop(self):
-        """Background thread for frame capture"""
-        frame_interval = 1.0 / self.fps
+        """Background thread for frame capture.
+
+        For RTSP we drain the decoder as fast as the camera produces frames so
+        the kernel/FFmpeg socket buffer never backs up — backing up causes
+        periodic packet drops and h264 decoder desync. We rate-limit *publishing*
+        to self.fps instead of rate-limiting the read itself.
+
+        For file sources we keep the original throttled-read behaviour so
+        playback stays at native fps.
+        """
+        publish_interval = 1.0 / self.fps
+        next_publish_time = 0.0
 
         try:
             while self.is_running:
@@ -112,20 +128,32 @@ class OpenCVCamera:
                         if not self._reconnect_rtsp():
                             # is_running flipped to False during reconnect → exit loop
                             break
+                        next_publish_time = 0.0
                         continue
 
                     time.sleep(0.5)
                     continue
 
-                # Update frame data
-                with self.frame_lock:
-                    self.current_frame = frame.copy()
-                    self.frame_count += 1
-                    self.last_frame_time = datetime.now().timestamp()
-                    self.error_count = 0  # Reset error count on success
+                self.error_count = 0  # Reset error count on any successful read
 
-                # Rate limiting
-                time.sleep(frame_interval)
+                if self.is_file_source:
+                    # File path: keep frames at native fps (matches dashboard time)
+                    with self.frame_lock:
+                        self.current_frame = frame.copy()
+                        self.frame_count += 1
+                        self.last_frame_time = datetime.now().timestamp()
+                    time.sleep(publish_interval)
+                    continue
+
+                # RTSP path: drain at full speed, only publish at target fps so
+                # downstream consumers see fresh frames at a sensible rate.
+                now = time.monotonic()
+                if now >= next_publish_time:
+                    with self.frame_lock:
+                        self.current_frame = frame.copy()
+                        self.frame_count += 1
+                        self.last_frame_time = datetime.now().timestamp()
+                    next_publish_time = now + publish_interval
 
         except Exception as e:
             logger.error(f"[{self.camera_id}] Error in capture loop: {str(e)}", exc_info=True)
