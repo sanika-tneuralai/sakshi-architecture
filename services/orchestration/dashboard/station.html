@@ -916,7 +916,6 @@ function App() {
           <StatCard label="Active Sessions"  value={activeCount}  sub="Currently charging" accent="green" />
           <StatCard label="Idle Slots"       value={idleSlots}    sub="Available now"      accent="blue" />
           <StatCard label="Live Energy"      value={totalKwh > 0 ? `${totalKwh.toFixed(2)} kWh` : '—'} sub="Across active slots" accent="blue" />
-          <StatCard label="Violations"       value={violCount}    sub="Deduplicated"       accent={violCount > 0 ? 'amber' : 'slate'} />
         </div>
 
         {/* ── Parking Bays ── */}
@@ -1032,17 +1031,6 @@ function App() {
           {insight && <InsightPanel insight={insight} results={lossResults} onDismiss={() => setInsight(null)} />}
         </div>
 
-        {/* ── Compliance Table ── */}
-        <div className="mb-8">
-          <SectionHeader
-            icon={<IconWarning />}
-            title="Parking Compliance Violations"
-            sub="Grouped by car and violation type"
-          />
-          <div className="bg-white rounded-2xl shadow-card overflow-hidden">
-            <ComplianceTable violations={violations} />
-          </div>
-        </div>
 
       </main>
     </div>
