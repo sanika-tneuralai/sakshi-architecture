@@ -1251,6 +1251,7 @@ async def dashboard_sessions(
     gun_number: Optional[str] = None,
     car_number: Optional[str] = None,
     status: Optional[str] = None,
+    date: Optional[str] = None,   # YYYY-MM-DD in IST — filters by in_time date
     limit: int = 100,
 ):
     """
@@ -1285,6 +1286,19 @@ async def dashboard_sessions(
             q = q.filter(ChargingSession.car_number == car_number)
         if status:
             q = q.filter(ChargingSession.session_status == status)
+        if date:
+            from datetime import date as date_type
+            from zoneinfo import ZoneInfo
+            import datetime as _dt
+            _IST = ZoneInfo("Asia/Kolkata")
+            try:
+                d = date_type.fromisoformat(date)
+                day_start_utc = _dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_IST).astimezone(_dt.timezone.utc)
+                day_end_utc   = _dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=_IST).astimezone(_dt.timezone.utc)
+                q = q.filter(ChargingSession.in_time >= day_start_utc,
+                             ChargingSession.in_time <= day_end_utc)
+            except (ValueError, TypeError):
+                pass
         rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
         sessions = []
         for r in rows:
