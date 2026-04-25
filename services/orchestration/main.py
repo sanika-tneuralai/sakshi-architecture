@@ -614,7 +614,7 @@ class PipelineManager:
                     f"[{camera_id}] Pipeline error | "
                     f"iteration={stats.iterations} | "
                     f"consecutive_errors={stats.consecutive_errors} | "
-                    f"error={str(e)}"
+                    f"error={e!r}"
                 )
                 
                 # Pause camera if too many consecutive errors
@@ -675,11 +675,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Max Connections: {MAX_CONNECTIONS}")
     logger.info("=" * 60)
     
-    # Initialize httpx AsyncClient with connection pooling
+    # Initialize httpx AsyncClient.
+    # keepalive_expiry is short because pooled connections to services reached
+    # over Tailscale (e.g. the Pi at CAMERA_DETECTION_URL) can silently die when
+    # the relay/NAT idles them out, surfacing as ConnectTimeout on the next call.
+    # Keeping connections only briefly avoids reusing a half-open socket.
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(
             max_connections=MAX_CONNECTIONS,
-            max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS
+            max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
+            keepalive_expiry=15.0,
         ),
         timeout=httpx.Timeout(
             connect=5.0,
