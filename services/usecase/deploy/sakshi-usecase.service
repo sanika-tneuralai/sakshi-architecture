@@ -1,0 +1,18 @@
+[Unit]
+Description=Sakshi Usecase API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/usecaseapi/sakshi-architecture/services/usecase
+EnvironmentFile=-/home/ubuntu/.env.usecase
+ExecStart=/home/ubuntu/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
