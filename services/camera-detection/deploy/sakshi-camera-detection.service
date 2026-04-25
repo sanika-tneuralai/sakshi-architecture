@@ -1,0 +1,18 @@
+[Unit]
+Description=Sakshi Camera Detection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/Desktop/goec/sakshi-architecture/services/camera-detection
+EnvironmentFile=-/home/admin/Desktop/goec/.env.camera-detection
+ExecStart=/home/admin/Desktop/goec/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
