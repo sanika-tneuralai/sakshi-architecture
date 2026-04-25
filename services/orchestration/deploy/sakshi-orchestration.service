@@ -1,0 +1,18 @@
+[Unit]
+Description=Sakshi Orchestration Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/GOEC/orchestration/sakshi-architecture/services/orchestration
+EnvironmentFile=-/home/ubuntu/.env.orchestration
+ExecStart=/home/ubuntu/GOEC/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
