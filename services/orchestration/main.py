@@ -1492,40 +1492,49 @@ async def dashboard_energy_analysis(request: dict):
             f"{loss if loss is not None else '—'} | {conf}"
         )
 
-    prompt = f"""You are an EV charging station energy analyst. Analyse the following charging session data and provide actionable insights.
+    prompt = f"""You are an EV charging station energy analyst. Analyse the charging session data below and return ONLY a valid JSON object — no markdown, no code fences, no extra text.
 
 ## Summary
 - Total sessions: {summary.get('total', '?')}
-- Matched sessions: {summary.get('matched', '?')}
-- Unmatched sessions: {summary.get('unmatched', '?')}
+- Matched: {summary.get('matched', '?')}, Unmatched: {summary.get('unmatched', '?')}
 - Total client kWh: {summary.get('total_client_kwh', '?')}
 - Total energy loss (client − meter): {summary.get('total_loss_kwh', '?')} kWh
 
 ## Session Data
 {chr(10).join(table_lines)}
 
-## Your Task
-Write a concise analyst report (use markdown with headers) covering:
-1. **Top energy consumers** — which cars/VRNs consumed the most client kWh
-2. **Highest energy loss** — which cars show the biggest difference between client kWh and meter kWh, and what might explain it
-3. **Patterns** — repeated VRNs, same connector always losing more, short sessions with high loss, etc.
-4. **Unmatched sessions** — any concern about the {summary.get('unmatched', 0)} unmatched rows
-5. **Recommendations** — 2-3 actionable suggestions for the station operator
+## Required JSON shape (return exactly this, filled in):
+{{
+  "top_consumer": "VRN or car that consumed the most — one sentence",
+  "highest_loss": "VRN or car with biggest client−meter gap — one sentence",
+  "patterns": ["bullet 1", "bullet 2", "bullet 3"],
+  "unmatched_note": "one sentence about the unmatched sessions",
+  "recommendations": ["action 1", "action 2", "action 3"],
+  "risk_level": "LOW | MEDIUM | HIGH"
+}}
 
-Keep the report concise and factual. Use actual VRN/car names from the data.
+Be concise. Use actual VRNs and numbers from the data.
 """
 
     try:
         import google.generativeai as genai
+        import re as _re
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-        insight = response.text
+        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+        response = gemini_model.generate_content(prompt)
+        raw = response.text.strip()
+        # Strip markdown code fences if Gemini wraps JSON in them
+        raw = _re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = _re.sub(r"\n?```$", "", raw)
+        structured = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: return raw text so UI can still show something
+        structured = {"raw": raw}
     except Exception as e:
         logger.warning(f"[GEMINI] Energy analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
 
-    return {"insight": insight}
+    return {"insight": structured}
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
