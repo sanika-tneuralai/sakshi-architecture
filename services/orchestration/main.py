@@ -1214,7 +1214,7 @@ async def list_charging_sessions(
 ):
     """
     Return charging session rows for the dashboard.
-    Query params: camera_id, status (active/charging/completed/incomplete), limit.
+    Query params: camera_id, status (active/charging/completed/incomplete/discarded), limit.
     """
     db = SessionLocal()
     try:
@@ -1224,6 +1224,10 @@ async def list_charging_sessions(
             q = q.filter(ChargingSession.camera_id == camera_id)
         if status:
             q = q.filter(ChargingSession.session_status == status)
+        else:
+            # Hide discarded (sub-floor noise) from default listings. Callers
+            # who want to audit discarded rows can pass status='discarded'.
+            q = q.filter(ChargingSession.session_status != "discarded")
         rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
         return {
             "sessions": [
@@ -1276,7 +1280,7 @@ async def dashboard_sessions(
     - car_model     — make/model via Gemini Vision    (vehicle_extraction)
 
     Query params: camera_id, gun_number, car_number,
-                  status (active/charging/completed/incomplete), limit.
+                  status (active/charging/completed/incomplete/discarded), limit.
     """
     db = SessionLocal()
     try:
@@ -1291,6 +1295,10 @@ async def dashboard_sessions(
             q = q.filter(ChargingSession.car_number == car_number)
         if status:
             q = q.filter(ChargingSession.session_status == status)
+        else:
+            # Hide discarded (sub-floor noise) from default listings. Callers
+            # who want to audit discarded rows can pass status='discarded'.
+            q = q.filter(ChargingSession.session_status != "discarded")
         if date:
             from datetime import date as date_type
             from zoneinfo import ZoneInfo
@@ -1396,6 +1404,10 @@ async def dashboard_energy_comparison_upload(
             q = q.filter(ChargingSession.created_at <= date_ceiling)
         else:
             q = q.filter(ChargingSession.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
+
+        # Sub-floor visits ('discarded') are tracker fragmentation or non-events;
+        # never match them against meter readings — the kWh would be garbage.
+        q = q.filter(ChargingSession.session_status != "discarded")
 
         rows = q.order_by(ChargingSession.created_at.desc()).limit(2000).all()
         cctv_sessions = []

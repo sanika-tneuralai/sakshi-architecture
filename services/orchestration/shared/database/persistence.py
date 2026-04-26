@@ -8,11 +8,43 @@ Provides helpers that the orchestration layer uses at pipeline runtime:
   - close_stale_sessions          : periodic stale session cleanup
 """
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 from shared.database.connection import SessionLocal
 from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert
+
+
+# ---------------------------------------------------------------------------
+# Minimum charging duration
+#
+# A vehicle's session must last at least this long for it to count as a real
+# charging visit. Anything shorter is almost always tracker noise: a tracker
+# drop + re-acquire that fragmented one physical visit into multiple rows,
+# or a car that pulled in and pulled out without ever plugging in.
+#
+# Sessions under the floor are flagged session_status='discarded' rather
+# than deleted. Keeping the row preserves audit trail (you can prove the
+# discard happened) and lets dashboards / analytics / energy comparison
+# filter them out by status without a schema migration.
+#
+# Tunable via env var; default 20 minutes.
+# ---------------------------------------------------------------------------
+MIN_SESSION_MINUTES = int(os.getenv("MIN_SESSION_MINUTES", "20"))
+
+
+def _is_below_min_duration(in_time: datetime | None, out_time: datetime | None) -> bool:
+    """True when (out_time - in_time) is non-null and below MIN_SESSION_MINUTES."""
+    if in_time is None or out_time is None:
+        return False
+    # Defensive: both sides should be tz-aware (DateTime(timezone=True) columns),
+    # but normalize anyway so a stray naive datetime doesn't raise mid-commit.
+    if in_time.tzinfo is None:
+        in_time = in_time.replace(tzinfo=timezone.utc)
+    if out_time.tzinfo is None:
+        out_time = out_time.replace(tzinfo=timezone.utc)
+    return (out_time - in_time) < timedelta(minutes=MIN_SESSION_MINUTES)
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +412,22 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             # plug events are optional metadata, not status drivers (some valid
             # sessions never produce plug detections, e.g. blind-spot guns or
             # cars that left without charging).
+            #
+            # Sub-floor visits get session_status='discarded' instead. These
+            # are almost always tracker fragmentation or pull-in-pull-out
+            # non-events; flagging them keeps the dashboard, analytics, and
+            # energy comparison clean while preserving the row for audit.
             if session.in_time is not None and session.out_time is not None:
-                session.session_status = "completed"
+                if _is_below_min_duration(session.in_time, session.out_time):
+                    session.session_status = "discarded"
+                    _persistence_logger.info(
+                        f"[DB] Discarded short session session_id={session.session_id} "
+                        f"slot={session.slot_id} duration_min="
+                        f"{(session.out_time - session.in_time).total_seconds() / 60:.1f} "
+                        f"(< {MIN_SESSION_MINUTES} min) camera={camera_id}"
+                    )
+                else:
+                    session.session_status = "completed"
             elif session.plug_time is not None:
                 session.session_status = "charging"
             else:
@@ -488,7 +534,16 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if out_time   and session.out_time   is None: session.out_time   = out_time
 
             if session.in_time is not None and session.out_time is not None:
-                session.session_status = "completed"
+                if _is_below_min_duration(session.in_time, session.out_time):
+                    session.session_status = "discarded"
+                    _persistence_logger.info(
+                        f"[DB] Discarded short unauthorized session session_id={session.session_id} "
+                        f"track={session.track_id} duration_min="
+                        f"{(session.out_time - session.in_time).total_seconds() / 60:.1f} "
+                        f"(< {MIN_SESSION_MINUTES} min) camera={camera_id}"
+                    )
+                else:
+                    session.session_status = "completed"
             else:
                 session.session_status = "active"
 
@@ -706,8 +761,9 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
     than stale_hours without receiving an out_time.
 
     Sessions closed here get an inferred out_time (created_at + stale_hours) and
-    are marked 'completed' if plug_time exists, otherwise 'incomplete'. The
-    inferred out_time lets downstream analytics (energy comparison) still
+    are marked 'completed' (or 'discarded' if the inferred duration is below
+    MIN_SESSION_MINUTES — rare, but possible when in_time was post-dated).
+    The inferred out_time lets downstream analytics (energy comparison) still
     produce a duration window when detection missed the car leaving.
 
     Called periodically by the orchestration pipeline (every 60 iterations).
@@ -735,9 +791,12 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
                     created = created.replace(tzinfo=timezone.utc)
                 session.out_time = (created + timedelta(hours=stale_hours)) if created else now
             # Stale sweep always synthesizes out_time above, so by the time we reach
-            # this line both in_time and out_time are set ⇒ "completed" per the
-            # in+out rule. Plug events remain optional metadata.
-            session.session_status = "completed"
+            # this line both in_time and out_time are set. Same min-duration floor
+            # as upsert_charging_session — sub-floor visits become 'discarded'.
+            if _is_below_min_duration(session.in_time, session.out_time):
+                session.session_status = "discarded"
+            else:
+                session.session_status = "completed"
             closed += 1
             _persistence_logger.warning(
                 f"[DB] Closed stale session session_id={session.session_id} "

@@ -148,6 +148,11 @@ class ChargingSession(Base):
       charging   — plug_time set, out_time not yet set
       completed  — plug_out_time AND out_time both set
       incomplete — out_time set but no plug_time
+      discarded  — in_time + out_time both set, but duration is below
+                   MIN_SESSION_MINUTES (default 20). Almost always tracker
+                   fragmentation or a non-charging visit. Row is preserved
+                   for audit but excluded from default dashboard listings,
+                   analytics, and energy meter comparison.
 
     All fields except (camera_id, slot_id, session_status) are written once
     (first-write-wins). The upsert logic never overwrites a non-null field.
