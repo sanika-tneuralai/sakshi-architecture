@@ -376,8 +376,12 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if out_time    and session.out_time    is None: session.out_time    = out_time
 
             # ---- Status derivation ---- #
-            if session.out_time is not None:
-                session.session_status = "completed" if session.plug_time is not None else "incomplete"
+            # A session is "completed" once both in_time and out_time exist —
+            # plug events are optional metadata, not status drivers (some valid
+            # sessions never produce plug detections, e.g. blind-spot guns or
+            # cars that left without charging).
+            if session.in_time is not None and session.out_time is not None:
+                session.session_status = "completed"
             elif session.plug_time is not None:
                 session.session_status = "charging"
             else:
@@ -483,9 +487,8 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if in_time    and session.in_time    is None: session.in_time    = in_time
             if out_time   and session.out_time   is None: session.out_time   = out_time
 
-            if session.out_time is not None:
-                # Unauthorized sessions never get plug_time ⇒ always 'incomplete' when closed.
-                session.session_status = "incomplete"
+            if session.in_time is not None and session.out_time is not None:
+                session.session_status = "completed"
             else:
                 session.session_status = "active"
 
@@ -731,7 +734,10 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
                 if created is not None and created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 session.out_time = (created + timedelta(hours=stale_hours)) if created else now
-            session.session_status = "completed" if session.plug_time is not None else "incomplete"
+            # Stale sweep always synthesizes out_time above, so by the time we reach
+            # this line both in_time and out_time are set ⇒ "completed" per the
+            # in+out rule. Plug events remain optional metadata.
+            session.session_status = "completed"
             closed += 1
             _persistence_logger.warning(
                 f"[DB] Closed stale session session_id={session.session_id} "
