@@ -15,20 +15,67 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 import uvicorn
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('camera_detection_api.log')
-    ]
+# ---------------------------------------------------------------------------
+# Logging
+#
+# Three sinks on the root logger so every getLogger(__name__) inherits:
+#   - stdout                              INFO+   operational view
+#   - logs/camera_detection.log           INFO+   bounded operational history
+#   - logs/camera_detection_debug.log     DEBUG+  full pipeline trace
+#
+# Format includes file:line so each line points at the call site (e.g.
+# camera/service.py:123 vs detection/yolo.py:88).
+#
+# RotatingFileHandler caps each file at 10 MB × 5 backups so a long-running
+# container can't blow up the disk.
+# ---------------------------------------------------------------------------
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(filename)s:%(lineno)d - %(message)s"
+_LOG_FORMATTER = logging.Formatter(_LOG_FORMAT)
+
+_root = logging.getLogger()
+_root.setLevel(logging.DEBUG)
+for _h in list(_root.handlers):
+    _root.removeHandler(_h)
+
+_console = logging.StreamHandler(sys.stdout)
+_console.setLevel(logging.INFO)
+_console.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_console)
+
+_info_file = RotatingFileHandler(
+    LOG_DIR / "camera_detection.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
 )
+_info_file.setLevel(logging.INFO)
+_info_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_info_file)
+
+_debug_file = RotatingFileHandler(
+    LOG_DIR / "camera_detection_debug.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_debug_file.setLevel(logging.DEBUG)
+_debug_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_debug_file)
+
+# Quiet noisy third-party libs so the debug file stays readable.
+for _noisy in ("urllib3", "httpx", "httpcore", "PIL", "matplotlib", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+logger.info("Logging configured: dir=%s (info+debug, rotating)", LOG_DIR.resolve())
 
 
 @asynccontextmanager
