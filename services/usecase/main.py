@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -17,17 +19,68 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('usecase_service.log')
-    ]
+# ---------------------------------------------------------------------------
+# Logging
+#
+# Configure the root logger once so every `logging.getLogger(__name__)` in
+# the codebase inherits the same handlers. Three sinks:
+#   - stdout                     INFO+   operational view (systemd / docker logs)
+#   - logs/usecase_service.log   INFO+   bounded operational history
+#   - logs/usecase_debug.log     DEBUG+  full state-machine transitions for
+#                                        post-mortem ("where did it break?")
+#
+# Format includes file:line so a log line tells you exactly which rule
+# emitted it (e.g. gun_detection.py:204 vs parking_detection.py:160) —
+# that's the single biggest payoff per character when chasing bugs.
+#
+# Both files use RotatingFileHandler so a long-running container can't
+# blow up the disk. Limits are conservative (10 MB × 5 backups = ~50 MB
+# per file ceiling, ~100 MB total for the service).
+# ---------------------------------------------------------------------------
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(filename)s:%(lineno)d - %(message)s"
+_LOG_FORMATTER = logging.Formatter(_LOG_FORMAT)
+
+_root = logging.getLogger()
+_root.setLevel(logging.DEBUG)         # root captures everything; handlers filter
+# Drop any handlers a previous import attached (uvicorn reloads, tests, etc.)
+for h in list(_root.handlers):
+    _root.removeHandler(h)
+
+_console = logging.StreamHandler(sys.stdout)
+_console.setLevel(logging.INFO)
+_console.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_console)
+
+_info_file = RotatingFileHandler(
+    LOG_DIR / "usecase_service.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
 )
+_info_file.setLevel(logging.INFO)
+_info_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_info_file)
+
+_debug_file = RotatingFileHandler(
+    LOG_DIR / "usecase_debug.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_debug_file.setLevel(logging.DEBUG)
+_debug_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_debug_file)
+
+# Quiet down third-party libraries that flood DEBUG (otherwise the debug
+# file is unreadable). Add more here if needed.
+for noisy in ("urllib3", "httpx", "httpcore", "PIL", "matplotlib"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+logger.info("Logging configured: dir=%s (info+debug, rotating)", LOG_DIR.resolve())
 
 
 @asynccontextmanager
