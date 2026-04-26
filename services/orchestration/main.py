@@ -34,11 +34,13 @@ from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import logging
+from logging.handlers import RotatingFileHandler
 import uvicorn
 import httpx
 from tenacity import (
@@ -51,17 +53,62 @@ from tenacity import (
 from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results, close_stale_sessions
 from shared.database.connection import SessionLocal
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('orchestration.log')
-    ]
+# ---------------------------------------------------------------------------
+# Logging
+#
+# Three sinks on the root logger so every getLogger(__name__) inherits:
+#   - stdout                        INFO+   operational (systemd / docker logs)
+#   - logs/orchestration.log        INFO+   bounded operational history
+#   - logs/orchestration_debug.log  DEBUG+  full pipeline trace for post-mortem
+#
+# Format includes file:line so each line points at the call site (e.g.
+# main.py:1390 vs persistence.py:412) — fastest path to "where it broke."
+#
+# RotatingFileHandler caps each file at 10 MB × 5 backups (~50 MB per file,
+# ~100 MB total) so a long-running container can't blow up the disk.
+# ---------------------------------------------------------------------------
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(filename)s:%(lineno)d - %(message)s"
+_LOG_FORMATTER = logging.Formatter(_LOG_FORMAT)
+
+_root = logging.getLogger()
+_root.setLevel(logging.DEBUG)
+for _h in list(_root.handlers):
+    _root.removeHandler(_h)
+
+_console = logging.StreamHandler(sys.stdout)
+_console.setLevel(logging.INFO)
+_console.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_console)
+
+_info_file = RotatingFileHandler(
+    LOG_DIR / "orchestration.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
 )
+_info_file.setLevel(logging.INFO)
+_info_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_info_file)
+
+_debug_file = RotatingFileHandler(
+    LOG_DIR / "orchestration_debug.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_debug_file.setLevel(logging.DEBUG)
+_debug_file.setFormatter(_LOG_FORMATTER)
+_root.addHandler(_debug_file)
+
+# Quiet noisy third-party libs so the debug file stays readable.
+for _noisy in ("urllib3", "httpx", "httpcore", "PIL", "matplotlib", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+logger.info("Logging configured: dir=%s (info+debug, rotating)", LOG_DIR.resolve())
 
 # =============================================================================
 # CONFIGURATION FROM ENVIRONMENT VARIABLES
