@@ -12,11 +12,9 @@ Design (locked):
   vehicle rules via get_slot_state / set_slot_state.
 - parking_intime fires only when slot.occupied == False (prevents duplicate
   sessions on tracker reset / service restart).
-- parking_outtime fires only when wall-clock seconds since car_absent_since
-  >= EXIT_SECONDS AND the gun is NOT currently plugged in
-  (plugin_logged=True, plugout_logged=False). Wall-clock means the rule
-  produces correct outtime regardless of detection cadence — a slow
-  pipeline still fires outtime within ~EXIT_SECONDS of the car leaving.
+- parking_outtime is debounced via a MAYBE_GONE state machine — see the
+  threshold constants below for full timing. Brief tracker drops no longer
+  fragment one physical visit into multiple ChargingSession rows.
 - On parking_outtime: slot state is fully reset via reset_slot_state().
 
 ROI polygons are injected via detection_output["rois"]:
@@ -39,17 +37,32 @@ logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
 
-# Wall-clock thresholds for exit. Frame-count gating produced bad outtimes
-# whenever the detection pipeline ran slower than 1 fps (e.g. RTSP stalls or
-# orchestrator backpressure pushing inter-frame gaps to minutes), because
-# car_absent_frames advanced at most once per call.
-EXIT_SECONDS = 60   # car must be absent this many wall-clock seconds to confirm exit
+# Exit is a debounced state machine, NOT a single-threshold check. The naive
+# "absent N seconds → outtime" approach fragmented one physical visit into
+# multiple ChargingSession rows whenever the tracker briefly lost the car
+# (a person walking past, a frame drop, partial occlusion). The new flow:
+#
+#   OCCUPIED   → car visible, normal
+#   MAYBE_GONE → after CAR_MAYBE_GONE_SECONDS of absence, mark suspicious
+#                (no event yet)
+#   ↳ car returns → exit MAYBE_GONE entirely, slot stays OCCUPIED
+#                   (this is the "miss → return" half of the user's pattern)
+#   ↳ stays absent CAR_RETURN_GRACE_SECONDS + CAR_CONFIRM_GONE_SECONDS
+#                   without returning → fire parking_outtime
+#
+# Total absence before outtime fires ≈ 30 + 60 + 60 = ~2.5 minutes. Short
+# enough to track real exits; long enough to absorb tracker hiccups and
+# brief occlusion (a person walking past) without fragmenting one visit
+# into multiple ChargingSession rows.
+CAR_MAYBE_GONE_SECONDS    = 30   # absent this long → enter MAYBE_GONE
+CAR_RETURN_GRACE_SECONDS  = 60   # in MAYBE_GONE; a return cancels (cleared in occupied branch)
+CAR_CONFIRM_GONE_SECONDS  = 60   # additional absence after grace → fire outtime
 
 # Hard ceiling on how long the "gun still plugged in" exit-guard can block
 # outtime. Protects against a deadlock where a stale/hallucinated gun detection
 # keeps gun_active=True forever while the car is long gone. After this many
 # car-absent seconds we force-fire both parking_outtime and gun_plugout.
-FORCE_EXIT_SECONDS = 180  # 3× EXIT_SECONDS
+FORCE_EXIT_SECONDS = 300   # 5 minutes — well past normal 2.5-min debounce
 
 
 def _now_dt() -> datetime:
@@ -133,7 +146,16 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
             if occupant_ids:
                 triggered = True
-                # Car is present this frame — clear absent timestamp
+                # Car is present this frame — clear absent timestamp AND
+                # cancel any in-progress MAYBE_GONE debounce. The car came
+                # back, so the previous absence was a tracker hiccup or
+                # transient occlusion, not a real exit.
+                if slot.get("car_maybe_gone_since"):
+                    logger.info(
+                        "[PARKING] MAYBE_GONE cleared (car returned): camera=%s roi=%s",
+                        camera_id, roi_name,
+                    )
+                    slot["car_maybe_gone_since"] = None
                 slot["car_absent_since"] = None
 
                 # Multiple cars in the same ROI — violation event (unchanged)
@@ -276,7 +298,36 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         # Treat the gun as no longer active for the outtime check below
                         gun_active = False
 
-                    if absent_secs >= EXIT_SECONDS and not gun_active:
+                    # ── MAYBE_GONE state machine ──────────────────────────
+                    # Stage 1: enter MAYBE_GONE after sustained absence.
+                    if (
+                        absent_secs >= CAR_MAYBE_GONE_SECONDS
+                        and not slot.get("car_maybe_gone_since")
+                        and not gun_active
+                    ):
+                        slot["car_maybe_gone_since"] = now_dt.isoformat()
+                        logger.info(
+                            "[PARKING] Entered MAYBE_GONE (absent %.1fs): camera=%s roi=%s",
+                            absent_secs, camera_id, roi_name,
+                        )
+
+                    # Stage 2: if still absent past the grace + confirm
+                    # windows without a return, fire parking_outtime.
+                    # (A return would have cleared car_maybe_gone_since
+                    # via the occupant branch above.)
+                    maybe_since = slot.get("car_maybe_gone_since")
+                    in_maybe_secs = (
+                        _absent_seconds(maybe_since, now_dt) if maybe_since else 0.0
+                    )
+                    ready_to_fire = (
+                        maybe_since
+                        and not gun_active
+                        and in_maybe_secs >= (
+                            CAR_RETURN_GRACE_SECONDS + CAR_CONFIRM_GONE_SECONDS
+                        )
+                    )
+
+                    if ready_to_fire:
                         outtime = _now()
                         evt = build_event(
                             event_type="parking_outtime",
@@ -293,8 +344,9 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         events.append(evt)
                         publish_sync("parking_events", evt)
                         logger.info(
-                            "[PARKING] Outtime confirmed: camera=%s roi=%s track=%s",
-                            camera_id, roi_name, slot["track_id"],
+                            "[PARKING] Outtime confirmed (debounced %.0fs in MAYBE_GONE): "
+                            "camera=%s roi=%s track=%s",
+                            in_maybe_secs, camera_id, roi_name, slot["track_id"],
                         )
                         # Reset slot — preserves frame_counter
                         reset_slot_state(camera_id, roi_name)

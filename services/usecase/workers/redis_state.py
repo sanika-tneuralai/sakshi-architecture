@@ -122,6 +122,27 @@ def _default_slot_state() -> dict:
         "plug_out_time": None,    # ISO str, set once on gun_plugout
         "gun_name": None,
 
+        # Inferred plug-in: when the rule synthesizes gun_plugin 2 min after
+        # parking_intime without an actual gun detection. We still expect to
+        # see the gun afterwards; if we never do, the inference is rolled back.
+        "plug_time_inferred": False,
+        "gun_seen_after_plugin": False,   # ever observed a real gun frame since plug
+        "last_gun_seen_at": None,         # ISO ts of most recent real gun frame
+
+        # Plug-out debounce state machine. The naive "gun absent N frames"
+        # check fires too early when a person walks in front of the gun.
+        # Instead: enter MAYBE_OUT after sustained absence; if the gun
+        # reappears we exit MAYBE_OUT entirely (occlusion was a false alarm).
+        # Only commit gun_plugout once the gun stays absent past both the
+        # grace and confirmation windows without returning.
+        "gun_maybe_out_since": None,        # ISO ts when MAYBE_OUT entered
+
+        # Same idea for the car: don't fire parking_outtime on a single
+        # missing-frame stretch. Wait for sustained absence past both
+        # the grace and confirmation windows so a tracker hiccup doesn't
+        # fragment one visit into multiple ChargingSession rows.
+        "car_maybe_gone_since": None,        # ISO ts when MAYBE_GONE entered
+
         # Monotonically increasing frame counter — survives restarts via Redis
         "frame_counter": 0,
     }
