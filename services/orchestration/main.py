@@ -1703,8 +1703,8 @@ async def dashboard_station(
     Real-time slot-oriented station view for the EV charging station monitor.
 
     Returns the two active slots (ROI_1, ROI_2) with the most-recent
-    open/active session for each slot, plus the latest compliance violation
-    per slot as the "violation" field.
+    open/active session for each slot. Compliance violations are surfaced
+    via a separate popup driven by /dashboard/active-violations.
 
     Response shape:
     {
@@ -1718,8 +1718,7 @@ async def dashboard_station(
           "gun_number": "Gun 2",
           "gun_plugin_time": "22:58:53",
           "gun_plugout_time": null,
-          "status": "charging",
-          "violation": null
+          "status": "charging"
         },
         "ROI_2": { "status": "empty" }
       }
@@ -1727,14 +1726,11 @@ async def dashboard_station(
     """
     db = SessionLocal()
     try:
-        from shared.database.models import ChargingSession, Alert
+        from shared.database.models import ChargingSession
         from shared.database.mysql_energy import get_energy_consumed
 
         SLOTS = ["ROI_1", "ROI_2"]
         slots_out = {}
-
-        now = datetime.now(timezone.utc)
-        violation_cutoff = now - timedelta(seconds=30)
 
         for slot_id in SLOTS:
             # Only consider genuinely live sessions: no out_time AND status is
@@ -1755,20 +1751,6 @@ async def dashboard_station(
             if session is None:
                 slots_out[slot_id] = {"status": "empty"}
                 continue
-
-            # Only show a violation if it was raised within the last 30 seconds
-            violation_row = (
-                db.query(Alert)
-                .filter(
-                    Alert.camera_id == camera_id,
-                    Alert.slot_id == slot_id,
-                    Alert.usecase_name == "parking_compliance",
-                    Alert.timestamp >= violation_cutoff,
-                )
-                .order_by(Alert.timestamp.desc())
-                .first()
-            )
-            violation = violation_row.alert_type if violation_row else None
 
             def fmt_time(dt):
                 if dt is None:
@@ -1794,7 +1776,6 @@ async def dashboard_station(
                 "gun_plugin_time": fmt_time(session.plug_time),
                 "gun_plugout_time": fmt_time(session.plug_out_time),
                 "status":          session.session_status or "active",
-                "violation":       violation,
                 "energy_kwh":      energy_kwh,
             }
 
@@ -1806,6 +1787,79 @@ async def dashboard_station(
             "station_id": station_id,
             "slots": {"ROI_1": {"status": "empty"}, "ROI_2": {"status": "empty"}},
         }
+    finally:
+        db.close()
+
+
+@app.get("/dashboard/active-violations", tags=["dashboard"])
+async def dashboard_active_violations(
+    camera_id: str = "camera_01",
+    station_id: str = "station_01",
+    window_seconds: int = 30,
+):
+    """
+    Currently-active parking_compliance violations (within the last
+    `window_seconds`). Designed to drive a popup/toast on the dashboard
+    that appears while a violation is fresh and disappears once it stops
+    being re-emitted.
+
+    Response:
+    {
+      "station_id": "station_01",
+      "violations": [
+        {
+          "alert_id": 42,
+          "type": "wrong_parking",
+          "slots": ["ROI_1", "ROI_2"],   # affected slots, [] if none
+          "timestamp": "2026-04-27T...",
+          "snapshot_url": "..."
+        }
+      ]
+    }
+    """
+    db = SessionLocal()
+    try:
+        from shared.database.models import Alert
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        rows = (
+            db.query(Alert)
+            .filter(
+                Alert.camera_id    == camera_id,
+                Alert.usecase_name == "parking_compliance",
+                Alert.timestamp    >= cutoff,
+            )
+            .order_by(Alert.timestamp.desc())
+            .all()
+        )
+
+        # Dedupe: one entry per alert_type, keeping the most recent.
+        seen = {}
+        for r in rows:
+            if r.alert_type in seen:
+                continue
+            extras = r.extras or {}
+            viols  = extras.get("violations") or []
+            meta   = (viols[0] or {}).get("metadata", {}) if viols else {}
+            slots  = meta.get("overlapping_rois") or (
+                [r.slot_id] if r.slot_id else []
+            )
+            ts = r.timestamp
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            seen[r.alert_type] = {
+                "alert_id":     r.alert_id,
+                "type":         r.alert_type,
+                "slots":        slots,
+                "timestamp":    ts.isoformat() if ts else None,
+                "snapshot_url": r.snapshot_url,
+            }
+
+        return {"station_id": station_id, "violations": list(seen.values())}
+
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] /dashboard/active-violations failed: {e}")
+        return {"station_id": station_id, "violations": []}
     finally:
         db.close()
 

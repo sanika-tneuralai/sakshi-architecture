@@ -56,6 +56,7 @@
 const BASE           = 'http://13.201.133.171:8000';
 const STATION_URL    = `${BASE}/dashboard/station?camera_id=camera_01&station_id=station_01`;
 const COMPLIANCE_URL = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=10`;
+const ACTIVE_VIOLATIONS_URL = `${BASE}/dashboard/active-violations?camera_id=camera_01&station_id=station_01`;
 const POLL_MS        = 2000;
 
 function sessionsUrl(date) {
@@ -242,7 +243,6 @@ function BayCard({ slotId, data }) {
                     : 'text-slate-400';
 
   const bayLabel = slotId.replace(/ROI_?/i, 'Slot ').trim();
-  const violationDisplay = data?.violation ? violationMeta(data.violation).label : null;
 
   const Row = ({ label, value, pending, na }) => {
     const v = display(value);
@@ -276,14 +276,6 @@ function BayCard({ slotId, data }) {
       {/* Status pill row */}
       <div className="flex items-center gap-2 mb-4">
         <StatusBadge status={isEmpty ? 'empty' : data.status} />
-        {!isEmpty && violationDisplay && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-100">
-            <IconWarning />{violationDisplay}
-          </span>
-        )}
-        {!isEmpty && !violationDisplay && (
-          <span className="text-xs text-success-600 font-medium">✓ No violation</span>
-        )}
       </div>
 
       {/* Divider */}
@@ -755,11 +747,42 @@ function InsightPanel({ insight, results, onDismiss }) {
   );
 }
 
+/* ── Active-violation toast (popup) ── */
+function ViolationToasts({ active }) {
+  if (!active || active.length === 0) return null;
+  const slotLabel = (s) => s.replace(/ROI_?/i, 'Slot ').trim();
+  return (
+    <div className="fixed top-20 right-6 z-[60] flex flex-col gap-2 max-w-sm">
+      {active.map((v) => {
+        const { label } = violationMeta(v.type);
+        const slots = (v.slots || []).map(slotLabel);
+        const subtitle =
+          slots.length > 1 ? `Affecting ${slots.join(' & ')}`
+          : slots.length === 1 ? `In ${slots[0]}`
+          : 'Outside designated slots';
+        return (
+          <div
+            key={v.alert_id}
+            className="flex items-start gap-3 bg-white border border-rose-200 shadow-lg rounded-xl px-4 py-3 ring-1 ring-rose-100 animate-pulse-dot"
+          >
+            <div className="text-rose-500 mt-0.5"><IconWarning /></div>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-rose-700">{label}</p>
+              <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── App ── */
 function App() {
   const [stationData, setStationData] = React.useState(null);
   const [sessions,    setSessions]    = React.useState([]);
   const [violations,  setViolations]  = React.useState([]);
+  const [activeViolations, setActiveViolations] = React.useState([]);
   const [lastUpdated, setLastUpdated] = React.useState(null);
   const [error,       setError]       = React.useState(null);
   const [lossResults, setLossResults] = React.useState(null);
@@ -827,22 +850,26 @@ function App() {
   React.useEffect(() => {
     async function poll() {
       try {
-        const [stRes, seRes, coRes] = await Promise.all([
+        const [stRes, seRes, coRes, avRes] = await Promise.all([
           fetch(STATION_URL),
           fetch(sessionsUrl(filterDate)),
           fetch(COMPLIANCE_URL),
+          fetch(ACTIVE_VIOLATIONS_URL),
         ]);
         if (!stRes.ok) throw new Error(`Station API: HTTP ${stRes.status}`);
         if (!seRes.ok) throw new Error(`Sessions API: HTTP ${seRes.status}`);
         if (!coRes.ok) throw new Error(`Compliance API: HTTP ${coRes.status}`);
+        // active-violations is non-critical: never break the dashboard if it fails.
 
         const st = await stRes.json();
         const se = await seRes.json();
         const co = await coRes.json();
+        const av = avRes.ok ? await avRes.json() : { violations: [] };
 
         setStationData(st);
         setSessions(se.sessions || []);
         setViolations(co.violations || []);
+        setActiveViolations(av.violations || []);
         setLastUpdated(fmtNowForStation());
         setError(null);
       } catch (e) {
@@ -863,6 +890,9 @@ function App() {
 
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
+
+      {/* Floating popup for active parking violations */}
+      <ViolationToasts active={activeViolations} />
 
       {/* ── Top Nav ── */}
       <nav className="bg-white border-b border-slate-100 shadow-sm sticky top-0 z-50">
