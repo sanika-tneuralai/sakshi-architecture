@@ -407,6 +407,17 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if plug_out_time and session.plug_out_time is None: session.plug_out_time = plug_out_time
             if out_time    and session.out_time    is None: session.out_time    = out_time
 
+            # If the car has left (out_time set) and was charging (plug_time set)
+            # but no gun_plugout event fired, infer plug_out_time = out_time. The
+            # gun must have been removed at or before the car left, so out_time is
+            # a safe upper-bound proxy when detection missed the plug-out frame.
+            if (
+                session.out_time is not None
+                and session.plug_time is not None
+                and session.plug_out_time is None
+            ):
+                session.plug_out_time = session.out_time
+
             # ---- Status derivation ---- #
             # A session is "completed" once both in_time and out_time exist —
             # plug events are optional metadata, not status drivers (some valid
@@ -790,6 +801,11 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
                 if created is not None and created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 session.out_time = (created + timedelta(hours=stale_hours)) if created else now
+            # Mirror the upsert path: if the session was charging but never produced
+            # a gun_plugout, anchor plug_out_time to the (now-inferred) out_time so
+            # downstream energy/duration math has a closed window.
+            if session.plug_time is not None and session.plug_out_time is None:
+                session.plug_out_time = session.out_time
             # Stale sweep always synthesizes out_time above, so by the time we reach
             # this line both in_time and out_time are set. Same min-duration floor
             # as upsert_charging_session — sub-floor visits become 'discarded'.
