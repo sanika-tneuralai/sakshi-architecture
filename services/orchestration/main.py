@@ -117,9 +117,9 @@ logger.info("Logging configured: dir=%s (info+debug, rotating)", LOG_DIR.resolve
 # Service URLs
 
 CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8004")
-USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://3.6.160.230:8001")
-ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://3.6.160.230:8002")
-ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://3.6.160.230:8003")
+USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://100.112.71.40:8001")
+ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://100.112.71.40:8002")
+ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://100.112.71.40:8003")
 
 # Request timeout
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
