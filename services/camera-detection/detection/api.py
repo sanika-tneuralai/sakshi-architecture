@@ -6,6 +6,7 @@ import logging
 import requests
 import time
 import cv2
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -131,16 +132,43 @@ async def detect_objects(request: DetectionRequest):
     
     print(f"[DETECTION API] Camera stream obtained")
     
-    # Get frame from camera
+    # Get frame + capture-time timestamp from camera. We use
+    # get_preprocessed_frame() rather than get_frame() so the response is stamped
+    # with when the frame was actually pulled off the stream — usecase rules
+    # downstream stamp events with this value, which keeps DB timestamps aligned
+    # with reality even when the orchestration loop runs slowly.
     print(f"[DETECTION API] Retrieving frame from camera")
-    frame = camera.get_frame()
+    frame_data = await camera.get_preprocessed_frame() if hasattr(camera, "get_preprocessed_frame") else None
+    if frame_data is None:
+        # Legacy / multi-stream cameras without get_preprocessed_frame: fall back
+        # to the raw frame. Timestamp falls back to now() inside detection_service.
+        frame = camera.get_frame()
+        frame_timestamp = None
+    else:
+        frame = frame_data["frame"]
+        ts = frame_data.get("timestamp")
+        # capture loop stores last_frame_time as a Unix epoch float; deepstream
+        # returns an ISO string. Normalize both to a tz-aware datetime so the
+        # response schema (datetime) accepts it.
+        if isinstance(ts, (int, float)):
+            frame_timestamp = datetime.fromtimestamp(ts, tz=timezone.utc)
+        elif isinstance(ts, str):
+            try:
+                frame_timestamp = datetime.fromisoformat(ts)
+                if frame_timestamp.tzinfo is None:
+                    frame_timestamp = frame_timestamp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                frame_timestamp = None
+        else:
+            frame_timestamp = None
+
     if frame is None:
         print(f"[DETECTION API] ERROR: No frame available from camera {request.camera_id}")
         logger.error(f"No frame available from camera {request.camera_id}")
         raise HTTPException(status_code=400, detail="No frame available from camera")
-    
-    print(f"[DETECTION API] Frame retrieved successfully")
-    
+
+    print(f"[DETECTION API] Frame retrieved successfully (capture_ts={frame_timestamp})")
+
     # Run detection with configuration values
     print(f"[DETECTION] Running detection with confidence_threshold: {confidence_threshold}")
     detection_service = get_detection_service()
@@ -149,7 +177,8 @@ async def detect_objects(request: DetectionRequest):
         camera_id=request.camera_id,
         confidence_threshold=confidence_threshold,
         iou_threshold=request.iou_threshold,
-        classes=request.classes
+        classes=request.classes,
+        frame_timestamp=frame_timestamp,
     )
     
     # Post-filter: apply per-class thresholds when provided

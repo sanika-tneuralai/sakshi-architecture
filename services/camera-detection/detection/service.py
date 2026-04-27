@@ -54,6 +54,7 @@ class DetectionService:
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         iou_threshold: float = DEFAULT_IOU_THRESHOLD,
         classes: Optional[List[int]] = None,
+        frame_timestamp: Optional[datetime] = None,
     ) -> DetectionResponse:
         """
         Run object detection on a frame.
@@ -64,6 +65,11 @@ class DetectionService:
             confidence_threshold: Minimum confidence score.
             iou_threshold: IOU threshold for NMS.
             classes: Filter specific class IDs.
+            frame_timestamp: Wall-clock time when the frame was captured off the
+                stream. The response's `timestamp` is set to this value so
+                downstream consumers (orchestrator → usecase rules) stamp events
+                with capture time, not detection-completion time. When None,
+                falls back to now() (legacy callers / tests).
 
         Returns:
             DetectionResponse with all detections.
@@ -84,7 +90,7 @@ class DetectionService:
 
         response = DetectionResponse(
             camera_id=camera_id,
-            timestamp=datetime.now(),
+            timestamp=frame_timestamp if frame_timestamp is not None else datetime.now(),
             frame_count=self.stats[camera_id]["total_frames"],
             detections=detection_objects,
             total_detections_count=len(detection_objects),
