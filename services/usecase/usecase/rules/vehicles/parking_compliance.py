@@ -46,12 +46,28 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _event_ts(detection_output: Dict[str, Any]) -> str:
+    """
+    Pick the timestamp that should anchor events emitted from this evaluation.
+    Prefers the camera-stamped frame timestamp; falls back to wall-clock.
+    """
+    ts = detection_output.get("timestamp")
+    if isinstance(ts, str) and ts:
+        return ts
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.isoformat()
+    return _now()
+
+
 class ParkingComplianceRule(BaseUsecaseRule):
     USECASE_ID: ClassVar[str] = "parking_compliance"
 
     def evaluate(self, detection_output: Dict[str, Any]) -> Dict[str, Any]:
         camera_id = detection_output.get("camera_id", "unknown")
         rois = detection_output.get("rois")
+        event_ts = _event_ts(detection_output)
         if not rois:
             logger.error("[COMPLIANCE] 'rois' missing from payload for camera '%s'", camera_id)
             return {"triggered": False, "matched_objects": [], "violations": [], "events": []}
@@ -108,7 +124,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     evt = build_event(
                         event_type="unauthorized_parking",
                         camera_id=camera_id,
-                        timestamp=_now(),
+                        timestamp=event_ts,
                         track_id=track_id,
                         metadata={
                             "bbox": car.get("bbox"),
@@ -131,7 +147,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
 
                     if not slot["occupied"] and slot["entry_buf"] >= ENTRY_FRAMES:
                         slot["occupied"] = True
-                        slot["intime"] = _now()
+                        slot["intime"] = event_ts
                         slot["entry_buf"] = 0
                         intime_evt = build_event(
                             event_type="parking_intime",
@@ -152,7 +168,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     evt = build_event(
                         event_type="wrong_parking",
                         camera_id=camera_id,
-                        timestamp=_now(),
+                        timestamp=event_ts,
                         track_id=track_id,
                         metadata={
                             "bbox": car.get("bbox"),
@@ -174,7 +190,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
             if track_id not in active_unauthorized and slot.get("occupied"):
                 slot["exit_buf"] = slot.get("exit_buf", 0) + 1
                 if slot["exit_buf"] >= EXIT_FRAMES:
-                    outtime = _now()
+                    outtime = event_ts
                     outtime_evt = build_event(
                         event_type="parking_outtime",
                         camera_id=camera_id,

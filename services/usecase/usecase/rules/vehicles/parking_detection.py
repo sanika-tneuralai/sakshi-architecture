@@ -73,6 +73,29 @@ def _now() -> str:
     return _now_dt().isoformat()
 
 
+def _event_ts(detection_output: Dict[str, Any]) -> str:
+    """
+    Pick the timestamp that should anchor events emitted from this evaluation.
+
+    Prefer `detection_output["timestamp"]` (the camera service stamps it from
+    the frame's capture time). Fall back to wall-clock when the field is
+    absent or unparseable so existing callers/tests keep working.
+
+    Returns an ISO 8601 string — same format as the legacy `_now()` helper —
+    so it's a drop-in replacement for `timestamp=...` on event payloads.
+    """
+    ts = detection_output.get("timestamp")
+    if isinstance(ts, str) and ts:
+        # Camera service serializes datetime via Pydantic — already ISO. Keep
+        # the string as-is to avoid round-trip drift.
+        return ts
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.isoformat()
+    return _now()
+
+
 def _absent_seconds(absent_since_iso: str | None, now: datetime) -> float:
     """Wall-clock seconds since the slot first became absent. 0 if never set."""
     if not absent_since_iso:
@@ -101,6 +124,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
         camera_id = detection_output.get("camera_id", "unknown")
         task_id   = detection_output.get("_task_id")
         rois      = detection_output.get("rois")
+        # Anchor every event emitted from this evaluation to the frame's capture
+        # time. Wall-clock comparisons (debounce timers below) keep using
+        # _now_dt() — those measure real elapsed time, independent of camera.
+        event_ts = _event_ts(detection_output)
         if not rois:
             logger.error("[PARKING] 'rois' missing from payload for camera '%s'", camera_id)
             return {"triggered": False, "matched_objects": [], "events": []}
@@ -163,7 +190,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     evt = build_event(
                         event_type="multiple_cars_in_roi",
                         camera_id=camera_id,
-                        timestamp=_now(),
+                        timestamp=event_ts,
                         track_id=",".join(occupant_ids),
                         metadata={"roi": roi_name, "slot_id": roi_name, "count": len(occupant_ids)},
                     )
@@ -175,7 +202,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     entry_buf[roi_name][tid] = entry_buf[roi_name].get(tid, 0) + 1
 
                     if not slot["occupied"] and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
-                        intime = _now()
+                        intime = event_ts
                         # Mark slot occupied before publishing so re-entrant calls can't
                         # double-fire even within the same frame batch
                         slot["occupied"]         = True
@@ -205,7 +232,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             # (e.g. compliance violation, tracker re-ID after service
                             # restart). Fire outtime for the old car, then intime for
                             # the new one so the session boundary is correct in the DB.
-                            swap_ts = _now()
+                            swap_ts = event_ts
 
                             outtime_evt = build_event(
                                 event_type="parking_outtime",
@@ -274,7 +301,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     # let outtime fire so the slot is not wedged forever.
                     force_close = gun_active and absent_secs >= FORCE_EXIT_SECONDS
                     if force_close:
-                        plugout_ts  = _now()
+                        plugout_ts  = event_ts
                         plugout_evt = build_event(
                             event_type="gun_plugout",
                             camera_id=camera_id,
@@ -328,7 +355,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     )
 
                     if ready_to_fire:
-                        outtime = _now()
+                        outtime = event_ts
                         evt = build_event(
                             event_type="parking_outtime",
                             camera_id=camera_id,

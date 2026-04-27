@@ -78,6 +78,25 @@ def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _event_ts(detection_output: Dict[str, Any]) -> str:
+    """
+    Pick the timestamp that should anchor events emitted from this evaluation.
+
+    Prefer `detection_output["timestamp"]` (the camera service stamps it from
+    the frame's capture time). Falls back to wall-clock when the field is
+    absent or unparseable. Returns an ISO 8601 string — drop-in for `_now()`
+    on event payloads.
+    """
+    ts = detection_output.get("timestamp")
+    if isinstance(ts, str) and ts:
+        return ts
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.isoformat()
+    return _now()
+
+
 def _parse_iso(iso_str: str | None) -> datetime | None:
     if not iso_str:
         return None
@@ -112,6 +131,9 @@ class GunDetectionRule(BaseUsecaseRule):
         task_id   = detection_output.get("_task_id")
         rois      = detection_output.get("rois", {})
         all_dets  = detection_output.get("detections", [])
+        # Anchor every emitted event to the frame's capture time. Wall-clock
+        # debounces (now_dt below) keep using _now_dt().
+        event_ts  = _event_ts(detection_output)
 
         # Tracked cars are injected by the engine after parking_detection runs.
         # Falls back to raw car detections if not yet available (e.g. first frame).
@@ -169,7 +191,7 @@ class GunDetectionRule(BaseUsecaseRule):
                 # (it's earlier and more representative of when the user
                 # actually plugged in) but flip the verification flag.
                 if not slot["plugin_logged"] and slot["gun_present_frames"] >= GUN_PLUGIN_FRAMES:
-                    plug_time              = _now()
+                    plug_time              = event_ts
                     slot["plugin_logged"]  = True
                     slot["plug_time"]      = plug_time
                     slot["gun_name"]       = gun_name
@@ -218,7 +240,7 @@ class GunDetectionRule(BaseUsecaseRule):
                 ):
                     parked_secs = _seconds_since(slot["in_time"], now_dt)
                     if parked_secs >= INFERRED_PLUGIN_SECONDS:
-                        plug_time = _now()
+                        plug_time = event_ts
                         slot["plugin_logged"]  = True
                         slot["plug_time"]      = plug_time
                         slot["gun_name"]       = slot["gun_name"] or gun_name
@@ -325,7 +347,7 @@ class GunDetectionRule(BaseUsecaseRule):
                         )
 
                         if ready_to_fire:
-                            plugout_time = _now()
+                            plugout_time = event_ts
                             slot["plug_out_time"]  = plugout_time
                             slot["plugout_logged"] = True
                             # Re-arm for a possible second plug cycle in this slot
@@ -391,7 +413,7 @@ class GunDetectionRule(BaseUsecaseRule):
                     evt = build_event(
                         event_type="gun_unauthorized",
                         camera_id=camera_id,
-                        timestamp=_now(),
+                        timestamp=event_ts,
                         track_id=ua_track_id,
                         metadata={
                             "gun_name": gun_name,
