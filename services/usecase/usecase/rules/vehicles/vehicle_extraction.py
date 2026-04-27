@@ -193,7 +193,8 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
                     len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
-            "You are a strict vehicle recognition assistant.\n"
+            "You are a strict vehicle recognition assistant. Precision over coverage: "
+            "returning \"unknown\" is always preferred over a confident guess.\n"
             "Two images are provided:\n"
             "  1. The full scene showing a parking/charging area\n"
             "  2. A close-up crop of the specific vehicle to analyze\n\n"
@@ -213,18 +214,28 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "- If you cannot read ALL characters of the plate with high confidence, return \"unreadable\".\n"
             "- Partial plates like \"NZ04\" or \"KL0\" MUST be returned as \"unreadable\".\n\n"
 
-            "Guardrails for car model:\n"
-            "- Identify make AND model from body shape, headlights, grille, badges (e.g. \"BYD Atto 3\", \"Hyundai Creta\").\n"
-            "- If the vehicle is clearly visible but the exact model is uncertain, provide the make + best-guess model.\n"
-            "- Only return \"unknown\" if you genuinely cannot identify make or model from the visible car.\n"
-            "- Do NOT fabricate brands/models not supported by visible evidence.\n\n"
+            "Guardrails for car model — STRICT ANTI-HALLUCINATION:\n"
+            "- You may ONLY return a make/model when at least one of these is directly visible:\n"
+            "    (a) a readable manufacturer badge or logo on the vehicle, or\n"
+            "    (b) readable lettering of the model name on the body/tailgate, or\n"
+            "    (c) a distinctive, unambiguous styling cue specific to one model "
+            "(e.g. the split-headlight signature of a Citroën C3, the closed EV grille of a Tata Nexon EV).\n"
+            "- Silhouette, color, body type (SUV/hatch/sedan), or general 'looks like' resemblance is NOT sufficient evidence. "
+            "If those are all you have, return \"unknown\".\n"
+            "- Do NOT default to popular models (e.g. \"Honda Jazz\", \"BYD Atto 3\", \"Tata Tiago EV\") just because the shape is similar. "
+            "Common-model bias is a frequent failure mode — resist it.\n"
+            "- If you can identify the make (badge visible) but NOT the specific model, return just the make (e.g. \"Tata\", \"Hyundai\").\n"
+            "- If the vehicle is partially occluded, far from camera, or shown from an angle that hides badges and model-specific cues, return \"unknown\".\n"
+            "- When uncertain between two candidates, return \"unknown\" rather than picking one.\n\n"
 
             "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
-            "Example output:\n"
-            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
+            "Example outputs:\n"
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }   // badge + model lettering visible\n'
+            '{ "car_number": "unreadable", "car_model": "Tata" }            // Tata badge visible, model unclear\n'
+            '{ "car_number": "unreadable", "car_model": "unknown" }         // rear view, no badges, no plate\n\n'
 
             "Now analyze the vehicle and return ONLY the JSON."
         )
@@ -302,7 +313,8 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
                     len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
-            "You are a strict vehicle recognition assistant.\n"
+            "You are a strict vehicle recognition assistant. Precision over coverage: "
+            "returning \"unknown\" is always preferred over a confident guess.\n"
             "Two images are provided:\n"
             "  1. The full scene showing a parking/charging area\n"
             "  2. A close-up crop of the specific vehicle to analyze\n\n"
@@ -322,18 +334,28 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "- If you cannot read ALL characters of the plate with high confidence, return \"unreadable\".\n"
             "- Partial plates like \"NZ04\" or \"KL0\" MUST be returned as \"unreadable\".\n\n"
 
-            "Guardrails for car model:\n"
-            "- Identify make AND model from body shape, headlights, grille, badges (e.g. \"BYD Atto 3\", \"Hyundai Creta\").\n"
-            "- If the vehicle is clearly visible but the exact model is uncertain, provide the make + best-guess model.\n"
-            "- Only return \"unknown\" if you genuinely cannot identify make or model from the visible car.\n"
-            "- Do NOT fabricate brands/models not supported by visible evidence.\n\n"
+            "Guardrails for car model — STRICT ANTI-HALLUCINATION:\n"
+            "- You may ONLY return a make/model when at least one of these is directly visible:\n"
+            "    (a) a readable manufacturer badge or logo on the vehicle, or\n"
+            "    (b) readable lettering of the model name on the body/tailgate, or\n"
+            "    (c) a distinctive, unambiguous styling cue specific to one model "
+            "(e.g. the split-headlight signature of a Citroën C3, the closed EV grille of a Tata Nexon EV).\n"
+            "- Silhouette, color, body type (SUV/hatch/sedan), or general 'looks like' resemblance is NOT sufficient evidence. "
+            "If those are all you have, return \"unknown\".\n"
+            "- Do NOT default to popular models (e.g. \"Honda Jazz\", \"BYD Atto 3\", \"Tata Tiago EV\") just because the shape is similar. "
+            "Common-model bias is a frequent failure mode — resist it.\n"
+            "- If you can identify the make (badge visible) but NOT the specific model, return just the make (e.g. \"Tata\", \"Hyundai\").\n"
+            "- If the vehicle is partially occluded, far from camera, or shown from an angle that hides badges and model-specific cues, return \"unknown\".\n"
+            "- When uncertain between two candidates, return \"unknown\" rather than picking one.\n\n"
 
             "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
-            "Example output:\n"
-            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }\n\n'
+            "Example outputs:\n"
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }   // badge + model lettering visible\n'
+            '{ "car_number": "unreadable", "car_model": "Tata" }            // Tata badge visible, model unclear\n'
+            '{ "car_number": "unreadable", "car_model": "unknown" }         // rear view, no badges, no plate\n\n'
 
             "Now analyze the vehicle and return ONLY the JSON."
         )
