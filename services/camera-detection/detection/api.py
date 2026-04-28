@@ -3,7 +3,6 @@ Detection API endpoints.
 """
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 import logging
-import requests
 import time
 import cv2
 from datetime import datetime, timezone
@@ -21,52 +20,6 @@ from shared.common.s3_frame_store import get_s3_frame_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/detection", tags=["detection"])
-
-
-def fetch_camera_config(camera_id: str, config_api_url: str = "http://localhost:8004") -> Optional[Dict[str, Any]]:
-    """
-    Fetch camera configuration from Configuration API.
-    
-    Args:
-        camera_id: Camera identifier
-        config_api_url: Base URL of Configuration API
-        
-    Returns:
-        Camera configuration dict or None if unavailable
-    """
-    print(f"[DETECTION CONFIG] Attempting to fetch configuration for camera_id: {camera_id}")
-    print(f"[DETECTION CONFIG] Configuration API URL: {config_api_url}/config/camera/{camera_id}")
-    
-    try:
-        response = requests.get(
-            f"{config_api_url}/config/camera/{camera_id}",
-            timeout=2.0
-        )
-        print(f"[DETECTION CONFIG] Configuration API response status: {response.status_code}")
-        
-        if response.status_code == 200:
-            config = response.json()
-            print(f"[DETECTION CONFIG] Configuration fetched successfully")
-            print(f"[DETECTION CONFIG]   - confidence_threshold: {config.get('confidence_threshold')}")
-            print(f"[DETECTION CONFIG]   - detection_model: {config.get('detection_model')}")
-            print(f"[DETECTION CONFIG]   - roi_count: {len(config.get('rois', []))}")
-            return config
-        elif response.status_code == 404:
-            print(f"[DETECTION CONFIG] No configuration found for camera_id: {camera_id}")
-            return None
-        else:
-            print(f"[DETECTION CONFIG] Unexpected status code: {response.status_code}")
-            return None
-            
-    except requests.exceptions.Timeout:
-        print(f"[DETECTION CONFIG] WARNING: Configuration API timeout for camera_id: {camera_id}")
-        return None
-    except requests.exceptions.ConnectionError:
-        print(f"[DETECTION CONFIG] WARNING: Configuration API connection error for camera_id: {camera_id}")
-        return None
-    except Exception as e:
-        print(f"[DETECTION CONFIG] WARNING: Failed to fetch configuration: {str(e)}")
-        return None
 
 
 @router.post("/detect", response_model=DetectionResponse)
@@ -90,37 +43,21 @@ async def detect_objects(request: DetectionRequest, background_tasks: Background
     - Processing time
     - Frame metadata
     """
-    print(f"\n[DETECTION API] POST /detection/detect")
-    print(f"[DETECTION API] Request for camera: {request.camera_id}")
-    print(f"[DETECTION API] Confidence threshold: {request.confidence_threshold}")
-    
     logger.info(f"Detection request for camera: {request.camera_id}")
-    
-    # Fetch camera configuration from Configuration API
-    print(f"[DETECTION] Fetching camera configuration from Configuration API")
-    camera_config = fetch_camera_config(request.camera_id)
-    
-    # Determine per-class thresholds and base confidence threshold
-    class_thresholds = request.class_thresholds or {}
 
+    # Thresholds come from the orchestration request body. The earlier code
+    # called a local Configuration API (fetch_camera_config) as a fallback,
+    # but that route doesn't exist on this service — every detection wasted
+    # the full 2.0s timeout waiting for it. Orchestration always provides
+    # class_thresholds (looked up from Postgres), so the fallback was dead
+    # code. Remove the call.
+    class_thresholds = request.class_thresholds or {}
     if class_thresholds:
         # Run YOLO at the lowest threshold so all candidates are returned;
         # per-class post-filtering is applied after inference.
         confidence_threshold = min(class_thresholds.values())
-        print(f"[DETECTION] class_thresholds provided — running YOLO at base threshold: {confidence_threshold}")
-    elif camera_config and 'confidence_threshold' in camera_config:
-        confidence_threshold = camera_config['confidence_threshold']
-        print(f"[DETECTION] Using confidence_threshold from Configuration API: {confidence_threshold}")
     else:
         confidence_threshold = request.confidence_threshold
-        print(f"[DETECTION] Using confidence_threshold from request (fallback): {confidence_threshold}")
-    
-    # Log detection model from config (selection only, no loading)
-    if camera_config and 'detection_model' in camera_config:
-        detection_model = camera_config['detection_model']
-        print(f"[DETECTION] Detection model from Configuration API: {detection_model}")
-    else:
-        print(f"[DETECTION] No detection model in configuration, using default")
     
     # Get camera object
     print(f"[DETECTION API] Retrieving camera stream from camera manager")
