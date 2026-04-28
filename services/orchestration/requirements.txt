@@ -22,8 +22,8 @@ PyMySQL==1.1.1
 openpyxl==3.1.2
 python-multipart==0.0.9
 
-# Gemini LLM for energy insight analysis
-google-generativeai==0.8.3
+# OpenAI LLM for energy insight analysis
+openai==1.54.0
 
 # Utilities
 python-dotenv==1.0.0

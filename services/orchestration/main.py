@@ -1637,7 +1637,7 @@ def dashboard_energy_comparison_upload(
 @app.post("/dashboard/energy-analysis", tags=["dashboard"])
 def dashboard_energy_analysis(request: dict):
     """
-    Accept matched energy-comparison results and use Gemini to generate
+    Accept matched energy-comparison results and use OpenAI to generate
     a natural-language insight report identifying:
       - Cars consuming the most energy
       - Cars with the highest energy loss vs client OCPP data
@@ -1650,9 +1650,9 @@ def dashboard_energy_analysis(request: dict):
     import os
     import json
 
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured on server")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
 
     results  = request.get("results", [])
     summary  = request.get("summary", {})
@@ -1705,22 +1705,20 @@ Be concise. Use actual VRNs and numbers from the data.
 """
 
     try:
-        import google.generativeai as genai
-        import re as _re
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
-        response = gemini_model.generate_content(prompt)
-        raw = response.text.strip()
-        # Strip markdown code fences if Gemini wraps JSON in them
-        raw = _re.sub(r"^```[a-z]*\n?", "", raw)
-        raw = _re.sub(r"\n?```$", "", raw)
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
         structured = json.loads(raw)
     except json.JSONDecodeError:
-        # Fallback: return raw text so UI can still show something
         structured = {"raw": raw}
     except Exception as e:
-        logger.warning(f"[GEMINI] Energy analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
+        logger.warning(f"[OPENAI] Energy analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
     return {"insight": structured}
 
