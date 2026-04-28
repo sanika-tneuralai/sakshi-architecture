@@ -1390,7 +1390,7 @@ async def list_charging_sessions(
 
 
 @app.get("/dashboard/sessions", tags=["dashboard"])
-async def dashboard_sessions(
+def dashboard_sessions(
     camera_id: Optional[str] = None,
     gun_number: Optional[str] = None,
     car_number: Optional[str] = None,
@@ -1599,7 +1599,7 @@ async def dashboard_energy_comparison_upload(
 
 
 @app.post("/dashboard/energy-analysis", tags=["dashboard"])
-async def dashboard_energy_analysis(request: dict):
+def dashboard_energy_analysis(request: dict):
     """
     Accept matched energy-comparison results and use Gemini to generate
     a natural-language insight report identifying:
@@ -1690,7 +1690,7 @@ Be concise. Use actual VRNs and numbers from the data.
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
-async def dashboard_parking_compliance(
+def dashboard_parking_compliance(
     camera_id: Optional[str] = None,
     limit: int = 100,
 ):
@@ -1737,7 +1737,7 @@ async def dashboard_parking_compliance(
 
 
 @app.get("/dashboard/safety-monitoring", tags=["dashboard"])
-async def dashboard_safety_monitoring(
+def dashboard_safety_monitoring(
     camera_id: Optional[str] = None,
     limit: int = 100,
 ):
@@ -1783,7 +1783,7 @@ async def dashboard_safety_monitoring(
 
 
 @app.get("/dashboard/station", tags=["dashboard"])
-async def dashboard_station(
+def dashboard_station(
     camera_id: str = "camera_01",
     station_id: str = "station_01",
 ):
@@ -1880,7 +1880,7 @@ async def dashboard_station(
 
 
 @app.get("/dashboard/active-violations", tags=["dashboard"])
-async def dashboard_active_violations(
+def dashboard_active_violations(
     camera_id: str = "camera_01",
     station_id: str = "station_01",
     window_seconds: int = 30,
@@ -1953,7 +1953,7 @@ async def dashboard_active_violations(
 
 
 @app.get("/dashboard/compliance-violations", tags=["dashboard"])
-async def dashboard_compliance_violations(
+def dashboard_compliance_violations(
     camera_id: str = "camera_01",
     station_id: str = "station_01",
     limit: int = 100,
