@@ -803,15 +803,20 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     
     # Initialize httpx AsyncClient.
-    # keepalive_expiry is short because pooled connections to services reached
-    # over Tailscale (e.g. the Pi at CAMERA_DETECTION_URL) can silently die when
-    # the relay/NAT idles them out, surfacing as ConnectTimeout on the next call.
-    # Keeping connections only briefly avoids reusing a half-open socket.
+    # Connection pooling is DISABLED here. The 15s keepalive we tried previously
+    # was still long enough that pooled sockets to the Pi over Tailscale silently
+    # went stale — measured RTT to /detection/health is ~150ms, but reusing a
+    # dead pooled connection would stall in TCP retransmit for 30-60s before
+    # the OS gave up, surfacing as `det=48000ms` in the iteration log even
+    # though the network is healthy. Forcing a fresh handshake per request
+    # costs ~70ms (TCP only, no TLS) and eliminates the failure mode entirely.
+    # Bring keepalive back if/when we move off Tailscale or set up a proper
+    # TCP keepalive policy on both sides.
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(
             max_connections=MAX_CONNECTIONS,
-            max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
-            keepalive_expiry=15.0,
+            max_keepalive_connections=0,
+            keepalive_expiry=0.0,
         ),
         # Per-call timeout= overrides this for run_detection / evaluate_usecases /
         # send_alerts. The client-level read timeout is just a safety ceiling for
@@ -823,7 +828,7 @@ async def lifespan(app: FastAPI):
             pool=5.0
         )
     )
-    logger.info("✓ HTTP client initialized with connection pooling")
+    logger.info("✓ HTTP client initialized (keepalive disabled — fresh connection per request)")
     
     # Initialize semaphores for rate limiting
     camera_detection_semaphore = asyncio.Semaphore(CAMERA_DETECTION_CONCURRENCY)
