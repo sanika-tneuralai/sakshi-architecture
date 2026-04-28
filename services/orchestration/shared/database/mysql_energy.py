@@ -230,6 +230,145 @@ def get_energy_consumed(
     return round(energy, 3)
 
 
+def fetch_readings_window(start_dt: datetime, end_dt: datetime) -> list[dict]:
+    """
+    Bulk-load every energy_readings row whose received_time falls in
+    [start_dt, end_dt]. Returns a list of dicts ordered by received_time ASC.
+
+    Used by the energy-comparison upload path so we make ONE MySQL roundtrip
+    for the whole batch instead of two queries per session (which over a
+    multi-hundred-row Excel was taking minutes).
+
+    Both bounds must be naive IST datetimes. The caller is responsible for
+    extending the window slightly past the first plug_in / last plug_out so
+    the ±2-min buffer used downstream still has data to find.
+
+    Returns [] on connection failure (so the caller degrades to "no energy"
+    rather than crashing the upload).
+    """
+    if start_dt is None or end_dt is None or start_dt > end_dt:
+        return []
+
+    try:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT received_time, total_kwh "
+                    "FROM energy_readings "
+                    "WHERE received_time BETWEEN %s AND %s "
+                    "ORDER BY received_time ASC",
+                    [start_dt, end_dt],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        _log.warning(f"[MYSQL_ENERGY] Bulk fetch failed: {exc}")
+        return []
+
+    _log.info(
+        f"[MYSQL_ENERGY] Bulk fetch: window=[{start_dt}, {end_dt}] rows={len(rows)}"
+    )
+    return rows
+
+
+def compute_kwh_from_readings(
+    readings: list[dict],
+    plug_time=None,
+    plug_out_time=None,
+    in_time=None,
+    out_time=None,
+) -> float | None:
+    """
+    Pure-Python equivalent of get_energy_consumed() that reads from a
+    pre-loaded `readings` list (output of fetch_readings_window) instead of
+    issuing a fresh MySQL query. Mirrors the same primary/fallback logic.
+
+    `readings` must be sorted ASC by received_time and each row must contain
+    {'received_time': datetime, 'total_kwh': float}.
+
+    Returns None when no usable kwh_in / kwh_out can be located, or when the
+    computed energy would be negative (clock skew / out-of-order readings).
+    """
+    if not readings:
+        return None
+
+    buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
+
+    t_plug_in  = _to_naive_ist(plug_time)
+    t_plug_out = _to_naive_ist(plug_out_time)
+    t_in       = _to_naive_ist(in_time)
+    t_out      = _to_naive_ist(out_time)
+
+    using_fallback = t_plug_in is None
+    if t_plug_in is None and t_in is None:
+        return None
+
+    def _closest_in_window(target: datetime, window: timedelta):
+        """Reading closest to `target` whose received_time is within ±window."""
+        lo, hi = target - window, target + window
+        best = None
+        best_delta = None
+        for row in readings:
+            rt = row["received_time"]
+            if rt < lo:
+                continue
+            if rt > hi:
+                break
+            delta = abs((rt - target).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best, best_delta = row, delta
+        return best
+
+    def _first_at_or_after(target: datetime):
+        for row in readings:
+            if row["received_time"] >= target:
+                return row
+        return None
+
+    def _last_at_or_before(target: datetime):
+        last = None
+        for row in readings:
+            if row["received_time"] > target:
+                break
+            last = row
+        return last
+
+    def _latest():
+        return readings[-1] if readings else None
+
+    if not using_fallback:
+        # Primary: plug times with ±2 min buffer
+        row_in = _closest_in_window(t_plug_in, buf)
+        if t_plug_out is not None:
+            row_out = _closest_in_window(t_plug_out, buf)
+        else:
+            # Live session — latest reading after plug_in
+            after_plug = [r for r in readings if r["received_time"] >= t_plug_in]
+            row_out = after_plug[-1] if after_plug else None
+    else:
+        # Fallback: car in/out, no buffer
+        row_in = _first_at_or_after(t_in)
+        if t_out is not None:
+            row_out = _last_at_or_before(t_out)
+        else:
+            after_in = [r for r in readings if r["received_time"] >= t_in]
+            row_out = after_in[-1] if after_in else None
+
+    if row_in is None or row_out is None:
+        return None
+
+    kwh_in  = float(row_in["total_kwh"])
+    kwh_out = float(row_out["total_kwh"])
+    energy  = kwh_out - kwh_in
+
+    if energy < 0:
+        return None
+
+    return round(energy, 3)
+
+
 def test_mysql_connection() -> bool:
     """Return True if the MySQL energy DB is reachable."""
     try:

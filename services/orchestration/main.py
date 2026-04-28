@@ -1483,7 +1483,7 @@ def dashboard_sessions(
 
 
 @app.post("/dashboard/energy-comparison/upload", tags=["dashboard"])
-async def dashboard_energy_comparison_upload(
+def dashboard_energy_comparison_upload(
     file: UploadFile = File(...),
     camera_id: Optional[str] = "camera_01",
     days: int = 14,
@@ -1496,12 +1496,22 @@ async def dashboard_energy_comparison_upload(
     is possible — the physical meter is cumulative across both connectors — so
     `meter_kwh` is our existing per-session estimate (which may over-count when
     two guns were active simultaneously). The client Excel value is authoritative.
+
+    Performance: the previous implementation called get_energy_consumed() per
+    CCTV session, which opened a fresh MySQL connection and ran 2 queries per
+    row. With ~hundreds of sessions over a 14-day window that turned uploads
+    into multi-minute calls. We now do ONE bulk fetch of all energy readings
+    in the date window and match in Python. Endpoint is also `def` (FastAPI
+    runs it in a thread pool) so its sync DB work doesn't block the asyncio
+    loop / starve the live detection pipeline.
     """
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Upload an .xlsx file")
 
     try:
-        contents = await file.read()
+        # Sync read since we're now a `def` handler — file.file is the raw
+        # SpooledTemporaryFile under the hood.
+        contents = file.file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read upload: {e}")
 
@@ -1529,7 +1539,11 @@ async def dashboard_energy_comparison_upload(
     db = SessionLocal()
     try:
         from shared.database.models import ChargingSession
-        from shared.database.mysql_energy import get_energy_consumed
+        from shared.database.mysql_energy import (
+            fetch_readings_window,
+            compute_kwh_from_readings,
+            _to_naive_ist,
+        )
 
         q = db.query(ChargingSession)
         if camera_id:
@@ -1545,9 +1559,31 @@ async def dashboard_energy_comparison_upload(
         q = q.filter(ChargingSession.session_status != "discarded")
 
         rows = q.order_by(ChargingSession.created_at.desc()).limit(2000).all()
+
+        # Single bulk MySQL fetch covering the whole CCTV window, padded to
+        # cover the ±2-min buffer compute_kwh_from_readings uses internally.
+        # Fall back to a full-day pad if the row set is empty so we don't hit
+        # MySQL with a degenerate window.
+        if rows:
+            session_times: list[datetime] = []
+            for r in rows:
+                for t in (r.plug_time, r.plug_out_time, r.in_time, r.out_time):
+                    naive = _to_naive_ist(t)
+                    if naive is not None:
+                        session_times.append(naive)
+            if session_times:
+                window_start = min(session_times) - timedelta(minutes=5)
+                window_end   = max(session_times) + timedelta(minutes=5)
+                readings = fetch_readings_window(window_start, window_end)
+            else:
+                readings = []
+        else:
+            readings = []
+
         cctv_sessions = []
         for r in rows:
-            energy_kwh = get_energy_consumed(
+            energy_kwh = compute_kwh_from_readings(
+                readings,
                 plug_time=r.plug_time,
                 plug_out_time=r.plug_out_time,
                 in_time=r.in_time,
