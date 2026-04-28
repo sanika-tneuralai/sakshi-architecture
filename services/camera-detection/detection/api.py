@@ -1,7 +1,7 @@
 """
 Detection API endpoints.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 import logging
 import requests
 import time
@@ -70,7 +70,7 @@ def fetch_camera_config(camera_id: str, config_api_url: str = "http://localhost:
 
 
 @router.post("/detect", response_model=DetectionResponse)
-async def detect_objects(request: DetectionRequest):
+async def detect_objects(request: DetectionRequest, background_tasks: BackgroundTasks):
     """
     Run object detection on current frame from a camera.
     
@@ -203,18 +203,31 @@ async def detect_objects(request: DetectionRequest):
 
     logger.info(f"Detection completed: {result.total_detections_count} detections")
 
+    # S3 upload is the dominant latency on this hot path (Pi → ap-south-1 over
+    # consumer internet — 1-30s synchronously). The orchestration loop blocks
+    # waiting for this response, so a slow upload stalls the whole detection
+    # cadence. Compute the deterministic URL synchronously and queue the actual
+    # upload as a background task (runs after FastAPI ships the response).
+    #
+    # Vehicle_extraction (the only consumer of snapshot_url) reads the frame
+    # several iterations later — slot must be occupied + ENTRY_FRAMES debounce
+    # + first extraction backoff — so the upload has time to complete. If it
+    # races/fails, _download_image returns None and the 3-attempt retry budget
+    # absorbs it, same as today's failure mode.
     if result.total_detections_count > 0:
-        print(f"[S3 DEBUG] Attempting S3 upload for camera={request.camera_id} | frame shape={frame.shape}")
         try:
             store = get_s3_frame_store()
-            print(f"[S3 DEBUG] S3FrameStore initialized | bucket={store._bucket} | region={store._region}")
             frame_id = str(int(time.time() * 1000))
-            print(f"[S3 DEBUG] Uploading frame_id={frame_id} ...")
-            result.snapshot_url = store.upload_frame(request.camera_id, frame, frame_id=frame_id)
-            print(f"[S3 DEBUG] ✓ Upload successful | url={result.snapshot_url}")
+            result.snapshot_url = store.predict_url(request.camera_id, frame_id)
+            background_tasks.add_task(
+                store.upload_frame_background,
+                request.camera_id,
+                frame,
+                frame_id,
+            )
+            logger.debug(f"[S3] queued background upload for camera={request.camera_id} frame_id={frame_id}")
         except Exception as e:
-            logger.warning(f"[S3] Frame upload failed (non-fatal): {e}")
-            print(f"[S3 DEBUG] ✗ Upload FAILED | error={e}")
+            logger.warning(f"[S3] Failed to queue background upload (non-fatal): {e}")
 
     print(f"[DETECTION API] ✓ Detection completed\n")
     print(f"✓ detect_objects completed for {request.camera_id}")

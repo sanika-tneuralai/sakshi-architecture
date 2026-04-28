@@ -40,6 +40,16 @@ class S3FrameStore:
         """Build the HTTPS URL for an S3 object."""
         return f"https://{self._bucket}.s3.{self._region}.amazonaws.com/{key}"
 
+    def predict_url(self, camera_id: str, frame_id: str) -> str:
+        """
+        Compute the public URL where this (camera_id, frame_id) frame *will* live
+        in S3. Pure string compute — no I/O. Used to return a URL synchronously
+        from the detection hot path while the actual upload runs in a background
+        task. Vehicle_extraction always reads the frame seconds later (slot
+        debounce + retry budget) so the upload has time to complete.
+        """
+        return self._public_url(self._key(camera_id, frame_id))
+
     def upload_frame(self, camera_id: str, frame: np.ndarray, frame_id: Optional[str] = None) -> str:
         """
         Encode frame as JPEG, upload to S3, and return the public HTTPS URL.
@@ -67,6 +77,26 @@ class S3FrameStore:
         url = self._public_url(key)
         logger.info(f"[S3] Uploaded frame: {url}")
         return url
+
+    def upload_frame_background(
+        self, camera_id: str, frame: np.ndarray, frame_id: str
+    ) -> None:
+        """
+        Background-task variant of upload_frame: same work, but designed to run
+        AFTER the HTTP response has been sent (via FastAPI BackgroundTasks).
+        Errors are logged and swallowed — the response already shipped with the
+        predicted URL, so we cannot signal failure back to the caller. If the
+        upload fails, vehicle_extraction's _download_image will return None and
+        its 3-attempt retry budget will kick in (same failure mode as today).
+        """
+        try:
+            self.upload_frame(camera_id, frame, frame_id=frame_id)
+        except Exception as exc:
+            # Swallow so a transient S3 hiccup never crashes anything.
+            logger.warning(
+                "[S3] Background upload failed for camera=%s frame_id=%s: %s",
+                camera_id, frame_id, exc,
+            )
 
     def download_frame(self, camera_id: str, frame_id: str) -> Optional[np.ndarray]:
         """
