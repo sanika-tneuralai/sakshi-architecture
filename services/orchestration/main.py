@@ -121,8 +121,20 @@ USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://100.112.71.40:800
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://100.112.71.40:8002")
 ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://100.112.71.40:8003")
 
-# Request timeout
-REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
+# Request timeouts. Detection is the slowest hop (Pi inference over Tailscale)
+# but we want to fail fast on real hangs — 30s previously meant a single bad
+# request stalled the camera for 30s. Per-stage timeouts make slow detections
+# visible without freezing the loop.
+REQUEST_TIMEOUT          = float(os.getenv("REQUEST_TIMEOUT", "30.0"))     # legacy default
+DETECTION_TIMEOUT        = float(os.getenv("DETECTION_TIMEOUT", "8.0"))    # Pi inference call
+USECASE_TIMEOUT          = float(os.getenv("USECASE_TIMEOUT", "5.0"))      # local-network call
+ALERT_TIMEOUT            = float(os.getenv("ALERT_TIMEOUT", "5.0"))        # local-network call
+RETRY_ATTEMPTS           = int(os.getenv("RETRY_ATTEMPTS", "1"))           # was 3 — compound delays
+
+# Static-config cache TTL. ROIs, usecases, and per-class thresholds change only
+# when an admin updates them; refetching every iteration was 3 DB roundtrips of
+# wasted work. 60s is the staleness window before a config edit takes effect.
+CONFIG_CACHE_TTL_SECONDS = float(os.getenv("CONFIG_CACHE_TTL_SECONDS", "60"))
 
 # Concurrency limits per service (semaphore limits)
 CAMERA_DETECTION_CONCURRENCY = int(os.getenv("CAMERA_DETECTION_CONCURRENCY", "10"))
@@ -234,9 +246,15 @@ class PipelineRequest(BaseModel):
 # =============================================================================
 
 def create_retry_decorator():
-    """Create retry decorator for HTTP calls"""
+    """Create retry decorator for HTTP calls.
+
+    RETRY_ATTEMPTS=1 by default (no retries on top of the initial try): in a
+    real-time detection loop, retrying a slow hop just compounds latency —
+    skipping a frame is preferable to stalling the whole camera. Bump via
+    env var if/when a hop is genuinely flaky.
+    """
     return retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=0.5, min=1, max=10),
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -247,13 +265,48 @@ def create_retry_decorator():
 retry_on_failure = create_retry_decorator()
 
 
+# =============================================================================
+# STATIC CONFIG CACHE
+# =============================================================================
+# ROIs, usecases, and per-class thresholds change rarely (admin edits only).
+# Refetching all three from Postgres on every iteration was 3 sequential DB
+# roundtrips of pure waste. Cache per camera with a short TTL so a config edit
+# still propagates promptly.
+_config_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_camera_config_cached(camera_id: str) -> Dict[str, Any]:
+    """Return {rois, usecases, class_thresholds} for camera_id, cached for TTL.
+
+    Single-threaded by virtue of the asyncio loop — no lock needed for the
+    in-process dict. The DB calls themselves still run in the executor (they're
+    blocking), but only when the cache is cold or stale.
+    """
+    now = datetime.now().timestamp()
+    entry = _config_cache.get(camera_id)
+    if entry and (now - entry["fetched_at"]) < CONFIG_CACHE_TTL_SECONDS:
+        return entry
+
+    rois             = get_camera_rois(camera_id)
+    db_usecases      = get_camera_usecases(camera_id)
+    class_thresholds = get_class_thresholds(camera_id)
+    entry = {
+        "rois":             rois,
+        "usecases":         db_usecases,
+        "class_thresholds": class_thresholds,
+        "fetched_at":       now,
+    }
+    _config_cache[camera_id] = entry
+    return entry
+
+
 @retry_on_failure
 async def fetch_frame(camera_id: str) -> dict:
     """Fetch frame from camera-detection service with retry"""
     async with camera_detection_semaphore:
         response = await http_client.get(
             f"{CAMERA_DETECTION_URL}/camera/frame/{camera_id}",
-            timeout=REQUEST_TIMEOUT
+            timeout=DETECTION_TIMEOUT
         )
         response.raise_for_status()
         return response.json()
@@ -272,11 +325,12 @@ async def run_detection(camera_id: str, confidence_threshold: float, class_thres
         response = await http_client.post(
             f"{CAMERA_DETECTION_URL}/detection/detect",
             json=payload,
-            timeout=REQUEST_TIMEOUT
+            timeout=DETECTION_TIMEOUT
         )
         response.raise_for_status()
         data = response.json()
-        logger.info(f"[{camera_id}] DEBUG detection response: {data}")
+        # Full body only to debug file; INFO summary is logged by the loop.
+        logger.debug(f"[{camera_id}] detection response: {data}")
         return data
 
 
@@ -300,8 +354,9 @@ async def evaluate_usecases(
         detection_output["rois"] = {
             r["roi_id"]: r["points"] for r in rois
         }
-        logger.info(
-            f"[{camera_id}] DEBUG usecase request: usecases={usecases} | "
+        # Request payload (full ROI polygons + detections) is large — debug file only.
+        logger.debug(
+            f"[{camera_id}] usecase request: usecases={usecases} | "
             f"rois={detection_output['rois']} | "
             f"detections={detection_output.get('detections', [])}"
         )
@@ -312,11 +367,11 @@ async def evaluate_usecases(
                 "detection_output": detection_output,
                 "usecases": usecases,
             },
-            timeout=REQUEST_TIMEOUT,
+            timeout=USECASE_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
-        logger.info(f"[{camera_id}] DEBUG usecase response: {data}")
+        logger.debug(f"[{camera_id}] usecase response: {data}")
         return data
 
 
@@ -330,11 +385,11 @@ async def send_alerts(camera_id: str, usecase_results: List[dict]) -> dict:
                 "camera_id": camera_id,
                 "usecase_results": usecase_results
             },
-            timeout=REQUEST_TIMEOUT
+            timeout=ALERT_TIMEOUT
         )
         response.raise_for_status()
         data = response.json()
-        logger.info(f"[{camera_id}] DEBUG alert response: {data}")
+        logger.debug(f"[{camera_id}] alert response: {data}")
         return data
 
 
@@ -530,36 +585,42 @@ class PipelineManager:
 
         logger.info(f"[{camera_id}] Pipeline worker started | poll_interval={config.poll_interval}s")
 
+        loop = asyncio.get_event_loop()
+
         while not stop_event.is_set():
+            # Use loop.time() (monotonic) for pacing — datetime.now() can jump
+            # if the system clock is adjusted, which would break the deadline
+            # arithmetic at the bottom of the loop.
+            tick_start = loop.time()
             iteration_start = datetime.now()
-            
+
             try:
                 stats.iterations += 1
                 iteration = stats.iterations
-                
-                logger.debug(f"[{camera_id}] Iteration {iteration} starting")
-                
-                # STEP 1: Fetch ROIs, usecases, and per-class thresholds from DB
-                rois = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_rois, camera_id
-                )
-                db_usecases = await asyncio.get_event_loop().run_in_executor(
-                    None, get_camera_usecases, camera_id
-                )
-                class_thresholds = await asyncio.get_event_loop().run_in_executor(
-                    None, get_class_thresholds, camera_id
-                )
+                tag = f"[{camera_id}][iter={iteration}]"   # grep-friendly
+
+                logger.debug(f"{tag} starting")
+
+                # STEP 1: Static config (cached). Cold/stale path runs the 3
+                # blocking DB calls in the executor; warm path is in-memory.
+                t0 = loop.time()
+                cfg = await loop.run_in_executor(None, _get_camera_config_cached, camera_id)
+                rois             = cfg["rois"]
+                db_usecases      = cfg["usecases"]
+                class_thresholds = cfg["class_thresholds"]
+                t_cfg = (loop.time() - t0) * 1000
                 # Fall back to config usecases if none configured in DB
                 active_usecases = db_usecases if db_usecases else config.usecases
 
                 # STEP 2: Run detection with per-class thresholds when configured
+                t0 = loop.time()
                 detection_data = await run_detection(
                     camera_id,
                     config.confidence_threshold,
                     class_thresholds or None,
                 )
+                t_det = (loop.time() - t0) * 1000
                 total_det = detection_data.get('total_detections_count', 0)
-                logger.info(f"[{camera_id}] Detection complete | total={total_det} | class_thresholds={class_thresholds or 'none'}")
 
                 # Cache snapshot URL if detections found
                 if total_det > 0 and detection_data.get('snapshot_url'):
@@ -570,60 +631,58 @@ class PipelineManager:
                         "detections": detection_data.get('detections', []),
                         "detection_count": total_det
                     }
-                    logger.debug(f"[{camera_id}] Snapshot URL cached ({total_det} detections)")
-                logger.debug(
-                    f"[{camera_id}] DB config | rois={len(rois)} usecases={active_usecases}"
-                )
 
                 # STEP 3: Evaluate usecases
+                t0 = loop.time()
                 usecase_data = await evaluate_usecases(camera_id, detection_data, active_usecases, rois)
+                t_uc = (loop.time() - t0) * 1000
                 results = usecase_data.get('results', [])
                 triggered = [r for r in results if r.get('triggered')]
-                logger.info(f"[{camera_id}] DEBUG: Usecases evaluated | total={len(results)} triggered={len(triggered)}")
 
-                # DEBUG: Log full raw results from usecase API
-                import json as _json
-                logger.info(f"[{camera_id}] DEBUG: Raw usecase results = {_json.dumps(results, default=str)}")
-
-                # Log rule-specific extras from triggered results (parking events, vehicle details, etc.)
-                for r in triggered:
-                    uid = r.get('usecase_id', r.get('usecase_name'))
-                    extras = r.get('extras')
-                    events = r.get('events')
-                    vehicle_details = r.get('vehicle_details')
-                    logger.info(
-                        f"[{camera_id}] DEBUG: triggered usecase={uid} | "
-                        f"extras={extras} | events={events} | vehicle_details={vehicle_details}"
-                    )
+                # On a triggered iteration we want full evidence in the INFO
+                # log (debug file always has it). On a quiet iteration we keep
+                # the line short so the log stays readable at high cadence.
+                if triggered:
+                    import json as _json
+                    for r in triggered:
+                        uid = r.get('usecase_id', r.get('usecase_name'))
+                        logger.info(
+                            f"{tag} TRIGGERED usecase={uid} | "
+                            f"extras={r.get('extras')} | events={r.get('events')} | "
+                            f"vehicle_details={r.get('vehicle_details')}"
+                        )
+                    logger.debug(f"{tag} raw results = {_json.dumps(results, default=str)}")
 
                 # STEP 3.5: Persist charging session data
-                logger.info(f"[{camera_id}] DEBUG: Calling upsert_charging_session with {len(results)} results")
+                t0 = loop.time()
                 try:
-                    await asyncio.get_event_loop().run_in_executor(
+                    await loop.run_in_executor(
                         None, upsert_charging_session, camera_id, results
                     )
                 except Exception as e:
-                    logger.error(f"[{camera_id}] Charging session update failed: {str(e)}", exc_info=True)
+                    logger.error(f"{tag} charging session update failed: {e!r}", exc_info=True)
+                t_sess = (loop.time() - t0) * 1000
 
                 # STEP 3.6: Persist triggered alerts to DB (for dashboard)
-                logger.info(f"[{camera_id}] DEBUG: Calling persist_alerts_from_results with {len(results)} results")
+                t0 = loop.time()
+                alerts_written = 0
                 try:
-                    alerts_written = await asyncio.get_event_loop().run_in_executor(
+                    alerts_written = await loop.run_in_executor(
                         None, persist_alerts_from_results, camera_id, results
                     )
-                    logger.info(f"[{camera_id}] DEBUG: Alerts persisted to DB | count={alerts_written}")
                 except Exception as e:
-                    logger.warning(f"[{camera_id}] Alert persistence failed (non-critical): {str(e)}")
+                    logger.warning(f"{tag} alert persistence failed (non-critical): {e!r}")
+                t_alerts = (loop.time() - t0) * 1000
 
                 # STEP 3.7: Periodically close stale open sessions (Issue #8)
                 # Every 60 iterations (~1 min at 1fps) sweep for sessions open > 4h.
                 if iteration % 60 == 0:
                     try:
-                        await asyncio.get_event_loop().run_in_executor(
+                        await loop.run_in_executor(
                             None, close_stale_sessions
                         )
                     except Exception as e:
-                        logger.warning(f"[{camera_id}] Stale session sweep failed (non-critical): {str(e)}")
+                        logger.warning(f"{tag} stale session sweep failed (non-critical): {e!r}")
 
                 # STEP 4: Send dashboard alerts for parking_compliance and safety_monitoring only
                 _DASHBOARD_USECASES = {"parking_compliance", "safety_monitoring"}
@@ -631,39 +690,47 @@ class PipelineManager:
                     r for r in results
                     if r.get("usecase_id") in _DASHBOARD_USECASES or r.get("usecase_name") in _DASHBOARD_USECASES
                 ]
+                t_send = 0.0
                 if dashboard_results:
+                    t0 = loop.time()
                     try:
                         await send_alerts(camera_id, dashboard_results)
                     except Exception as e:
-                        logger.warning(f"[{camera_id}] Dashboard alert send failed (non-critical): {str(e)}")
+                        logger.warning(f"{tag} dashboard alert send failed (non-critical): {e!r}")
+                    t_send = (loop.time() - t0) * 1000
 
                 # Update stats
                 iteration_time = (datetime.now() - iteration_start).total_seconds() * 1000
                 stats.add_latency(iteration_time)
                 stats.last_run = datetime.now()
                 stats.consecutive_errors = 0  # Reset on success
-                
+
+                # Single structured INFO line per iteration: per-stage timing
+                # makes it instantly clear which hop is slow next time. Full
+                # payloads are in the debug file at the same iter= tag.
                 logger.info(
-                    f"[{camera_id}] Iteration {iteration} complete | "
-                    f"latency={iteration_time:.1f}ms | triggered={len(triggered)}"
+                    f"{tag} done | total={iteration_time:.0f}ms "
+                    f"cfg={t_cfg:.0f} det={t_det:.0f} uc={t_uc:.0f} "
+                    f"sess={t_sess:.0f} alerts={t_alerts:.0f} send={t_send:.0f} | "
+                    f"detections={total_det} triggered={len(triggered)} "
+                    f"alerts_written={alerts_written}"
                 )
-                
+
             except asyncio.CancelledError:
                 logger.info(f"[{camera_id}] Pipeline cancelled")
                 break
-                
+
             except Exception as e:
                 stats.errors += 1
                 stats.consecutive_errors += 1
                 stats.last_error = str(e)
-                
+
                 logger.error(
-                    f"[{camera_id}] Pipeline error | "
-                    f"iteration={stats.iterations} | "
+                    f"[{camera_id}][iter={stats.iterations}] error | "
                     f"consecutive_errors={stats.consecutive_errors} | "
                     f"error={e!r}"
                 )
-                
+
                 # Pause camera if too many consecutive errors
                 if stats.consecutive_errors >= config.max_errors_before_pause:
                     logger.error(
@@ -674,11 +741,22 @@ class PipelineManager:
                     stats.consecutive_errors = 0  # Reset after pause
                 else:
                     await asyncio.sleep(5)  # Short backoff
-                
+
                 continue
-            
-            # Wait before next iteration
-            await asyncio.sleep(config.poll_interval)
+
+            # Deadline-based pacing: aim for one tick every poll_interval
+            # regardless of how long the work took. If work took longer than
+            # the interval, fire the next tick immediately (catch-up) instead
+            # of compounding the delay with another full poll_interval sleep.
+            elapsed = loop.time() - tick_start
+            sleep_for = config.poll_interval - elapsed
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            else:
+                logger.warning(
+                    f"[{camera_id}][iter={stats.iterations}] iter exceeded poll_interval "
+                    f"({elapsed:.1f}s > {config.poll_interval}s) — running next tick immediately"
+                )
         
         stats.running = False
         logger.info(
@@ -713,7 +791,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Camera-Detection URL: {CAMERA_DETECTION_URL}")
     logger.info(f"Usecase Service URL: {USECASE_SERVICE_URL}")
     logger.info(f"Alert Service URL: {ALERT_SERVICE_URL}")
-    logger.info(f"Request Timeout: {REQUEST_TIMEOUT}s")
+    logger.info(f"Timeouts (s): detection={DETECTION_TIMEOUT} usecase={USECASE_TIMEOUT} alert={ALERT_TIMEOUT} (legacy={REQUEST_TIMEOUT})")
+    logger.info(f"Retry attempts per HTTP call: {RETRY_ATTEMPTS}")
+    logger.info(f"Config cache TTL: {CONFIG_CACHE_TTL_SECONDS}s")
     logger.info(f"Concurrency Limits:")
     logger.info(f"  Camera-Detection: {CAMERA_DETECTION_CONCURRENCY}")
     logger.info(f"  Usecase: {USECASE_CONCURRENCY}")
@@ -733,9 +813,12 @@ async def lifespan(app: FastAPI):
             max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
             keepalive_expiry=15.0,
         ),
+        # Per-call timeout= overrides this for run_detection / evaluate_usecases /
+        # send_alerts. The client-level read timeout is just a safety ceiling for
+        # ad-hoc requests elsewhere in main.py (e.g. /pipeline/once handlers).
         timeout=httpx.Timeout(
             connect=5.0,
-            read=REQUEST_TIMEOUT,
+            read=DETECTION_TIMEOUT,
             write=10.0,
             pool=5.0
         )
