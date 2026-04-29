@@ -2111,6 +2111,7 @@ def dashboard_compliance_violations(
                 "alert_id":       row.alert_id,
                 "station":        station_id,
                 "slot_id":        row.slot_id,
+                "track_id":       extract_track_id(row),
                 "car_number":     car_number,
                 "car_model":      car_model,
                 "violation_type": resolve_violation_type(row),
