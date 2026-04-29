@@ -55,7 +55,7 @@
 /* ── Constants ── */
 const BASE           = 'http://13.201.133.171:8000';
 const STATION_URL    = `${BASE}/dashboard/station?camera_id=camera_01&station_id=station_01`;
-const COMPLIANCE_URL = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=10`;
+const COMPLIANCE_URL = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=200`;
 const ACTIVE_VIOLATIONS_URL = `${BASE}/dashboard/active-violations?camera_id=camera_01&station_id=station_01`;
 const POLL_MS        = 2000;
 
@@ -402,52 +402,92 @@ function SessionsTable({ sessions }) {
   );
 }
 
-/* ── Compliance Table ── */
-function ComplianceTable({ violations }) {
-  const deduped = deduplicateViolations(violations);
-  const cols    = ['Car Number', 'Car Model', 'Violation', 'Parking Duration', 'Count'];
+/* ── Compliance Gallery ──
+   Groups raw alerts into one card per distinct violating car. Same car
+   re-triggering the same violation is collapsed; different cars get
+   their own cards. The grouping key is alert_id-stable (track_id when
+   present, falling back to violation_type + 60s bucket).               */
+function groupIncidents(violations) {
+  const groups = new Map();
+  const BUCKET_SEC = 60;
 
-  if (!deduped.length) {
+  for (const v of violations) {
+    const ts = v.timestamp ? new Date(v.timestamp).getTime() : 0;
+    const key = v.track_id
+      ? `${v.violation_type}::trk:${v.track_id}`
+      : `${v.violation_type}::ts:${Math.floor(ts / 1000 / BUCKET_SEC)}`;
+
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, { ...v, _firstTs: ts });
+    } else {
+      // Keep the first (earliest) snapshot — when the violation began.
+      if (ts < existing._firstTs) {
+        existing.snapshot_url = v.snapshot_url;
+        existing.timestamp    = v.timestamp;
+        existing._firstTs     = ts;
+      }
+      if (!existing.car_number && v.car_number) existing.car_number = v.car_number;
+      if (!existing.car_model  && v.car_model)  existing.car_model  = v.car_model;
+    }
+  }
+  return Array.from(groups.values()).sort((a, b) => b._firstTs - a._firstTs);
+}
+
+function fmtTimeIST(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleTimeString('en-IN', {
+      hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata',
+    });
+  } catch { return ''; }
+}
+
+function ComplianceGallery({ violations, todayOnly }) {
+  const todayStr = todayIST();
+  const filtered = todayOnly
+    ? violations.filter(v => (v.timestamp || '').startsWith(todayStr))
+    : violations;
+  const incidents = groupIncidents(filtered).filter(v => v.snapshot_url);
+
+  if (!incidents.length) {
     return (
-      <div className="py-12 text-center text-slate-400 text-sm">No violations recorded</div>
+      <div className="py-12 text-center text-slate-400 text-sm">
+        {todayOnly ? 'No violations today' : 'No violations recorded'}
+      </div>
     );
   }
 
   return (
-    <table className="w-full text-sm">
-      <thead>
-        <tr>
-          {cols.map(c => (
-            <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
-              {c}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {deduped.map((v, i) => (
-          <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
-            <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700">
-              {display(v.car_number) || <NA />}
-            </td>
-            <td className="px-4 py-3 text-slate-600">
-              {display(v.car_model) || <NA />}
-            </td>
-            <td className="px-4 py-3">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
+      {incidents.map((v, i) => (
+        <div key={i} className="bg-white border border-slate-100 rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+          <a href={v.snapshot_url} target="_blank" rel="noopener noreferrer" className="block">
+            <img
+              src={v.snapshot_url}
+              alt={v.violation_type}
+              className="w-full h-44 object-cover bg-slate-100"
+              loading="lazy"
+            />
+          </a>
+          <div className="p-3 space-y-2">
+            <div className="flex items-center justify-between">
               <ViolationBadge vtype={v.violation_type} />
-            </td>
-            <td className="px-4 py-3 text-slate-600 font-medium text-xs">
-              {display(v.duration) || <NA text="—" />}
-            </td>
-            <td className="px-4 py-3">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs font-bold">
-                {v.count}
+              <span className="text-xs text-slate-400 font-medium">{fmtTimeIST(v.timestamp)}</span>
+            </div>
+            <div className="flex items-baseline gap-2 text-xs">
+              <span className="font-mono font-semibold text-slate-700">
+                {display(v.car_number) || <NA text="No plate" />}
               </span>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500 truncate">
+                {display(v.car_model) || <NA text="—" />}
+              </span>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -791,6 +831,7 @@ function App() {
   const [uploadError, setUploadError] = React.useState(null);
   const [uploadName,  setUploadName]  = React.useState(null);
   const [filterDate,  setFilterDate]  = React.useState(todayIST());
+  const [violTodayOnly, setViolTodayOnly] = React.useState(true);
   const [insight,     setInsight]     = React.useState(null);
   const [analysing,   setAnalysing]   = React.useState(false);
   const [analyseError,setAnalyseError]= React.useState(null);
@@ -993,6 +1034,36 @@ function App() {
           </div>
           <div className="bg-white rounded-2xl shadow-card overflow-hidden">
             <SessionsTable sessions={sessions} />
+          </div>
+        </div>
+
+        {/* ── Parking Compliance Violations ── */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="text-slate-400"><IconWarning /></div>
+              <div>
+                <h2 className="text-sm font-bold text-slate-700">Parking Compliance Violations</h2>
+                <p className="text-xs text-slate-400">Snapshot evidence of unauthorized or wrong parking</p>
+              </div>
+            </div>
+            <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold">
+              <button
+                onClick={() => setViolTodayOnly(true)}
+                className={`px-3 py-1.5 transition-colors ${violTodayOnly ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+              >
+                Today
+              </button>
+              <button
+                onClick={() => setViolTodayOnly(false)}
+                className={`px-3 py-1.5 transition-colors ${!violTodayOnly ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+              >
+                All
+              </button>
+            </div>
+          </div>
+          <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+            <ComplianceGallery violations={violations} todayOnly={violTodayOnly} />
           </div>
         </div>
 
