@@ -136,6 +136,53 @@ RETRY_ATTEMPTS           = int(os.getenv("RETRY_ATTEMPTS", "1"))           # was
 # wasted work. 60s is the staleness window before a config edit takes effect.
 CONFIG_CACHE_TTL_SECONDS = float(os.getenv("CONFIG_CACHE_TTL_SECONDS", "60"))
 
+# S3 pre-signed URL helper. The snapshot bucket is private, so the raw URLs
+# stored on alerts.snapshot_url are not browser-fetchable. We hand the dashboard
+# time-limited signed URLs instead — bucket stays private, no per-image proxy.
+_S3_URL_RE = __import__("re").compile(
+    r"https?://([^./]+)\.s3[.-]([^./]+)\.amazonaws\.com/(.+)"
+)
+S3_PRESIGN_REGION = os.getenv("AWS_REGION", "ap-south-1")
+S3_PRESIGN_EXPIRES = int(os.getenv("S3_PRESIGN_EXPIRES", "3600"))  # 1 hour
+_s3_client = None  # lazy init — only instantiate if presign is actually called
+
+def _get_s3_client():
+    global _s3_client
+    if _s3_client is None:
+        import boto3
+        from botocore.config import Config
+        _s3_client = boto3.client(
+            "s3",
+            region_name=S3_PRESIGN_REGION,
+            config=Config(signature_version="s3v4"),
+        )
+    return _s3_client
+
+def presign_snapshot(url: Optional[str], expires: int = S3_PRESIGN_EXPIRES) -> Optional[str]:
+    """Convert a private S3 object URL into a time-limited pre-signed URL."""
+    if not url:
+        return None
+    m = _S3_URL_RE.match(url)
+    if not m:
+        return url  # not an S3 URL; return as-is
+    bucket, _region, key = m.group(1), m.group(2), m.group(3)
+    try:
+        return _get_s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=expires,
+        )
+    except Exception as e:
+        # Logger isn't initialized yet at import time, so use print as a fallback
+        # if this somehow runs early. In practice it's always called from request
+        # handlers, by which point logger exists.
+        try:
+            logger.warning(f"[S3] presign failed for {url}: {e}")
+        except NameError:
+            print(f"[S3] presign failed for {url}: {e}")
+        return None
+
+
 # Concurrency limits per service (semaphore limits)
 CAMERA_DETECTION_CONCURRENCY = int(os.getenv("CAMERA_DETECTION_CONCURRENCY", "10"))
 USECASE_CONCURRENCY = int(os.getenv("USECASE_CONCURRENCY", "20"))
@@ -1306,7 +1353,7 @@ async def list_alerts(
                     "message":     r.message,
                     "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                     "status":      r.status,
-                    "snapshot_url": r.snapshot_url,
+                    "snapshot_url": presign_snapshot(r.snapshot_url),
                     "extras":      r.extras,
                 }
                 for r in rows
@@ -1331,7 +1378,7 @@ async def get_alert_snapshot(alert_id: int):
         row = db.query(Alert).filter(Alert.alert_id == alert_id).first()
         if not row:
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-        return {"alert_id": alert_id, "snapshot_url": row.snapshot_url}
+        return {"alert_id": alert_id, "snapshot_url": presign_snapshot(row.snapshot_url)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1789,7 +1836,7 @@ def dashboard_parking_compliance(
                 "message":     r.message,
                 "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                 "status":      r.status,
-                "snapshot_url": r.snapshot_url,
+                "snapshot_url": presign_snapshot(r.snapshot_url),
                 "extras":      r.extras,
             }
             for r in rows
@@ -1835,7 +1882,7 @@ def dashboard_safety_monitoring(
                 "message":     r.message,
                 "timestamp":   r.timestamp.isoformat() if r.timestamp else None,
                 "status":      r.status,
-                "snapshot_url": r.snapshot_url,
+                "snapshot_url": presign_snapshot(r.snapshot_url),
                 "extras":      r.extras,
             }
             for r in rows
@@ -2006,7 +2053,7 @@ def dashboard_active_violations(
                 "type":         r.alert_type,
                 "slots":        slots,
                 "timestamp":    ts.isoformat() if ts else None,
-                "snapshot_url": r.snapshot_url,
+                "snapshot_url": presign_snapshot(r.snapshot_url),
             }
 
         return {"station_id": station_id, "violations": list(seen.values())}
@@ -2149,7 +2196,7 @@ def dashboard_compliance_violations(
                 "violation_type": resolve_violation_type(row),
                 "timestamp":      row.timestamp.isoformat() if row.timestamp else None,
                 "duration":       duration,
-                "snapshot_url":   row.snapshot_url,
+                "snapshot_url":   presign_snapshot(row.snapshot_url),
             })
 
         return {"violations": violations, "total": len(violations)}

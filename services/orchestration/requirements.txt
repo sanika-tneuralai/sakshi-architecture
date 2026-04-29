@@ -25,5 +25,8 @@ python-multipart==0.0.9
 # OpenAI LLM for energy insight analysis
 openai==1.54.0
 
+# AWS S3 — pre-signed snapshot URLs for the dashboard
+boto3==1.42.97
+
 # Utilities
 python-dotenv==1.0.0
