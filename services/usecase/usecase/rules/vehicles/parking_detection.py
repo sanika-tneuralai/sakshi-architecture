@@ -14,7 +14,8 @@ Design (locked):
   sessions on tracker reset / service restart).
 - parking_outtime is debounced via a MAYBE_GONE state machine — see the
   threshold constants below for full timing. Brief tracker drops no longer
-  fragment one physical visit into multiple ChargingSession rows.
+  fragment one physical visit into multiple ChargingSession rows. The
+  debounce depends only on car presence; gun state does not gate outtime.
 - On parking_outtime: slot state is fully reset via reset_slot_state().
 
 ROI polygons are injected via detection_output["rois"]:
@@ -57,12 +58,6 @@ ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
 CAR_MAYBE_GONE_SECONDS    = 30   # absent this long → enter MAYBE_GONE
 CAR_RETURN_GRACE_SECONDS  = 60   # in MAYBE_GONE; a return cancels (cleared in occupied branch)
 CAR_CONFIRM_GONE_SECONDS  = 60   # additional absence after grace → fire outtime
-
-# Hard ceiling on how long the "gun still plugged in" exit-guard can block
-# outtime. Protects against a deadlock where a stale/hallucinated gun detection
-# keeps gun_active=True forever while the car is long gone. After this many
-# car-absent seconds we force-fire both parking_outtime and gun_plugout.
-FORCE_EXIT_SECONDS = 300   # 5 minutes — well past normal 2.5-min debounce
 
 
 def _now_dt() -> datetime:
@@ -292,45 +287,21 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         slot["car_absent_since"] = now_dt.isoformat()
                     absent_secs = _absent_seconds(slot.get("car_absent_since"), now_dt)
 
-                    # ── Outtime guard: blocked while gun is plugged in ────
-                    gun_active = slot["plugin_logged"] and not slot["plugout_logged"]
-
-                    # Force-close safety net: if the car has been gone far
-                    # longer than a normal exit window, the gun_plugout must
-                    # have been missed by detection. Synthesize it here and
-                    # let outtime fire so the slot is not wedged forever.
-                    force_close = gun_active and absent_secs >= FORCE_EXIT_SECONDS
-                    if force_close:
-                        plugout_ts  = event_ts
-                        plugout_evt = build_event(
-                            event_type="gun_plugout",
-                            camera_id=camera_id,
-                            timestamp=plugout_ts,
-                            track_id=slot["track_id"] or "",
-                            metadata={
-                                "gun_name":     slot.get("gun_name"),
-                                "roi":          roi_name,
-                                "slot_id":      roi_name,
-                                "plugin_time":  slot.get("plug_time"),
-                                "plugout_time": plugout_ts,
-                                "reason":       "forced — car absent > FORCE_EXIT_SECONDS",
-                            },
-                        )
-                        events.append(plugout_evt)
-                        publish_sync("gun_events", plugout_evt, task_id=task_id)
-                        logger.warning(
-                            "[PARKING] Forced gun_plugout — car absent %.1fs: camera=%s roi=%s",
-                            absent_secs, camera_id, roi_name,
-                        )
-                        # Treat the gun as no longer active for the outtime check below
-                        gun_active = False
+                    # parking_outtime depends only on the car-absence debounce —
+                    # NOT on gun state. The earlier `gun_active` guard tied
+                    # outtime to gun_plugout firing, which in this deployment
+                    # is unreliable (the gun detector misses most plugs/unplugs)
+                    # and pushed every recorded out_time onto the FORCE_EXIT
+                    # safety net at +5min past the real exit. Decoupling means
+                    # outtime fires on the natural 150s debounce; if the gun
+                    # rule never produced a plug_out_time, the persistence
+                    # layer infers plug_out_time = out_time downstream.
 
                     # ── MAYBE_GONE state machine ──────────────────────────
                     # Stage 1: enter MAYBE_GONE after sustained absence.
                     if (
                         absent_secs >= CAR_MAYBE_GONE_SECONDS
                         and not slot.get("car_maybe_gone_since")
-                        and not gun_active
                     ):
                         slot["car_maybe_gone_since"] = now_dt.isoformat()
                         logger.info(
@@ -348,7 +319,6 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     )
                     ready_to_fire = (
                         maybe_since
-                        and not gun_active
                         and in_maybe_secs >= (
                             CAR_RETURN_GRACE_SECONDS + CAR_CONFIRM_GONE_SECONDS
                         )
