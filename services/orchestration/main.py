@@ -1404,7 +1404,8 @@ def dashboard_sessions(
     Gun Number | Car Number | Car Model | In Time |
     Plug In Time | Plug Out Time | Car Out Time
 
-    Proxies to the analytics service /analytics/charging/sessions.
+    Reads ChargingSession rows directly from the orchestrate Postgres DB
+    and joins per-session energy from the MySQL meter via one bulk fetch.
     Fields populate automatically as the vehicle moves through the facility:
     - in_time       — car enters parking ROI         (parking_detection)
     - plug_time     — charging gun plugged in         (gun_detection)
@@ -1420,7 +1421,13 @@ def dashboard_sessions(
     db = SessionLocal()
     try:
         from shared.database.models import ChargingSession
-        from shared.database.mysql_energy import get_energy_consumed
+        from shared.database.mysql_energy import (
+            fetch_readings_window,
+            compute_kwh_from_readings,
+            _to_naive_ist,
+            PLUG_BUFFER_MINUTES,
+        )
+        from datetime import timedelta
         q = db.query(ChargingSession)
         if camera_id:
             q = q.filter(ChargingSession.camera_id == camera_id)
@@ -1448,11 +1455,36 @@ def dashboard_sessions(
             except (ValueError, TypeError):
                 pass
         rows = q.order_by(ChargingSession.created_at.desc()).limit(limit).all()
+
+        # ── Energy: ONE bulk MySQL fetch covering every row's plug/in window,
+        #            then compute per-session kWh in Python. The previous
+        #            implementation did 2 MySQL queries per row (limit=100 →
+        #            up to 200 round-trips), which made the dashboard hang
+        #            for minutes when MySQL was slow or remote.
+        readings: list = []
+        buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
+        candidate_starts = []
+        candidate_ends   = []
+        for r in rows:
+            for t in (r.plug_time, r.in_time):
+                ts = _to_naive_ist(t)
+                if ts is not None:
+                    candidate_starts.append(ts - buf)
+                    break
+            for t in (r.plug_out_time, r.out_time):
+                ts = _to_naive_ist(t)
+                if ts is not None:
+                    candidate_ends.append(ts + buf)
+                    break
+        if candidate_starts and candidate_ends:
+            window_start = min(candidate_starts)
+            window_end   = max(candidate_ends)
+            readings = fetch_readings_window(window_start, window_end)
+
         sessions = []
         for r in rows:
-            # Energy consumed: primary uses plug times; falls back to car in/out
-            # times (±2 min buffer) when plug times are not yet recorded.
-            energy_kwh = get_energy_consumed(
+            energy_kwh = compute_kwh_from_readings(
+                readings,
                 plug_time=r.plug_time,
                 plug_out_time=r.plug_out_time,
                 in_time=r.in_time,
