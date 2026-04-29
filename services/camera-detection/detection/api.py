@@ -1,7 +1,9 @@
 """
 Detection API endpoints.
 """
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+import asyncio
+import os
+from fastapi import APIRouter, HTTPException
 import logging
 import time
 import cv2
@@ -21,9 +23,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/detection", tags=["detection"])
 
+# Hard cap on how long the /detect handler is willing to wait for an S3 upload.
+# Pi → ap-south-1 is normally ~1 s; we drop the URL rather than block the
+# orchestration loop if the network or S3 stalls. Tunable via env so we don't
+# need a code change to widen it.
+S3_UPLOAD_TIMEOUT_S = float(os.getenv("S3_UPLOAD_TIMEOUT_S", "3.0"))
+
 
 @router.post("/detect", response_model=DetectionResponse)
-async def detect_objects(request: DetectionRequest, background_tasks: BackgroundTasks):
+async def detect_objects(request: DetectionRequest):
     """
     Run object detection on current frame from a camera.
     
@@ -140,31 +148,31 @@ async def detect_objects(request: DetectionRequest, background_tasks: Background
 
     logger.info(f"Detection completed: {result.total_detections_count} detections")
 
-    # S3 upload is the dominant latency on this hot path (Pi → ap-south-1 over
-    # consumer internet — 1-30s synchronously). The orchestration loop blocks
-    # waiting for this response, so a slow upload stalls the whole detection
-    # cadence. Compute the deterministic URL synchronously and queue the actual
-    # upload as a background task (runs after FastAPI ships the response).
-    #
-    # Vehicle_extraction (the only consumer of snapshot_url) reads the frame
-    # several iterations later — slot must be occupied + ENTRY_FRAMES debounce
-    # + first extraction backoff — so the upload has time to complete. If it
-    # races/fails, _download_image returns None and the 3-attempt retry budget
-    # absorbs it, same as today's failure mode.
+    # Upload to S3 synchronously, but bounded — the URL we return MUST resolve
+    # to a real object, otherwise vehicle_extraction on the usecase server burns
+    # its 3-attempt budget on NoSuchKey and writes the session row with null
+    # plate/model. The earlier BackgroundTask version broke that invariant: it
+    # returned a predicted URL whose upload sometimes never ran (worker shutdown
+    # or boto3 connection-pool exhaustion silently dropped tasks). We fall back
+    # to snapshot_url=None on timeout so the consumer skips this iteration
+    # cleanly instead of chasing a phantom URL.
     if result.total_detections_count > 0:
+        store = get_s3_frame_store()
+        frame_id = str(int(time.time() * 1000))
         try:
-            store = get_s3_frame_store()
-            frame_id = str(int(time.time() * 1000))
-            result.snapshot_url = store.predict_url(request.camera_id, frame_id)
-            background_tasks.add_task(
-                store.upload_frame_background,
-                request.camera_id,
-                frame,
-                frame_id,
+            result.snapshot_url = await asyncio.wait_for(
+                asyncio.to_thread(store.upload_frame, request.camera_id, frame, frame_id),
+                timeout=S3_UPLOAD_TIMEOUT_S,
             )
-            logger.debug(f"[S3] queued background upload for camera={request.camera_id} frame_id={frame_id}")
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[S3] Upload exceeded {S3_UPLOAD_TIMEOUT_S}s for camera={request.camera_id} "
+                f"frame_id={frame_id} — returning snapshot_url=None"
+            )
+            result.snapshot_url = None
         except Exception as e:
-            logger.warning(f"[S3] Failed to queue background upload (non-fatal): {e}")
+            logger.warning(f"[S3] Frame upload failed (non-fatal): {e}")
+            result.snapshot_url = None
 
     print(f"[DETECTION API] ✓ Detection completed\n")
     print(f"✓ detect_objects completed for {request.camera_id}")
