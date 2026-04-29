@@ -29,9 +29,9 @@ from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Al
 # discard happened) and lets dashboards / analytics / energy comparison
 # filter them out by status without a schema migration.
 #
-# Tunable via env var; default 20 minutes.
+# Tunable via env var; default 15 minutes.
 # ---------------------------------------------------------------------------
-MIN_SESSION_MINUTES = int(os.getenv("MIN_SESSION_MINUTES", "20"))
+MIN_SESSION_MINUTES = int(os.getenv("MIN_SESSION_MINUTES", "15"))
 
 
 def _is_below_min_duration(in_time: datetime | None, out_time: datetime | None) -> bool:
