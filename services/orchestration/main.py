@@ -2116,6 +2116,7 @@ def dashboard_compliance_violations(
                 "violation_type": resolve_violation_type(row),
                 "timestamp":      row.timestamp.isoformat() if row.timestamp else None,
                 "duration":       duration,
+                "snapshot_url":   row.snapshot_url,
             })
 
         return {"violations": violations, "total": len(violations)}
