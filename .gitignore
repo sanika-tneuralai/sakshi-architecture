@@ -1,0 +1,72 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+.genv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+app.log
+camera_detection_api.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Screenshots and temporary files
+screenshots/
+*.png
+*.jpg
+*.jpeg
+
+# Cache and temporary
+.cache/
+*.tmp
+temp/
+tmp/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Package manager
+poetry.lock
+Pipfile.lock
