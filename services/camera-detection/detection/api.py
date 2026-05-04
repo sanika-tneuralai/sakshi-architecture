@@ -16,6 +16,7 @@ from detection.schemas import (
     DetectBatchRequest, DetectBatchResponse, CameraDetectionResult
 )
 from detection.service import get_detection_service
+from detection.logo_occlusion import get_logo_occlusion_detector
 from camera.service import camera_manager
 from shared.common.s3_frame_store import get_s3_frame_store
 
@@ -148,6 +149,29 @@ async def detect_objects(request: DetectionRequest):
 
     logger.info(f"Detection completed: {result.total_detections_count} detections")
 
+    # Logo-occlusion check (YOLO-independent occupancy signal). Runs only when
+    # the orchestrator supplied logo polygons. Each ROI is evaluated
+    # independently: a frame with two slots produces two booleans. We feed
+    # the result into the upload gate below so frames with no YOLO cars but
+    # an occluded logo still reach S3 — that is exactly the missed-detection
+    # case this whole feature exists to fix.
+    logo_occluded: Dict[str, bool] = {}
+    if request.logo_rois:
+        try:
+            logo_occluded = get_logo_occlusion_detector().evaluate(
+                camera_id=request.camera_id,
+                frame=frame,
+                logo_rois=request.logo_rois,
+            )
+            result.logo_occluded = logo_occluded
+            print(f"[DETECTION API]   - Logo occluded: {logo_occluded}")
+        except Exception as exc:
+            # Fail-open: never let an occlusion bug block detection responses.
+            logger.warning("[LOGO] Occlusion check failed (non-fatal): %s", exc, exc_info=True)
+            result.logo_occluded = None
+
+    any_logo_occluded = any(logo_occluded.values()) if logo_occluded else False
+
     # Upload to S3 synchronously, but bounded — the URL we return MUST resolve
     # to a real object, otherwise vehicle_extraction on the usecase server burns
     # its 3-attempt budget on NoSuchKey and writes the session row with null
@@ -156,7 +180,10 @@ async def detect_objects(request: DetectionRequest):
     # or boto3 connection-pool exhaustion silently dropped tasks). We fall back
     # to snapshot_url=None on timeout so the consumer skips this iteration
     # cleanly instead of chasing a phantom URL.
-    if result.total_detections_count > 0:
+    #
+    # Upload gate: YOLO saw something OR a logo is occluded (YOLO-miss case).
+    # Empty slots with empty logos still skip the upload to keep S3 cheap.
+    if result.total_detections_count > 0 or any_logo_occluded:
         store = get_s3_frame_store()
         frame_id = str(int(time.time() * 1000))
         try:
@@ -184,14 +211,15 @@ def _detect_single_camera(
     camera_id: str,
     confidence_threshold: float,
     iou_threshold: float,
-    classes: Optional[List[int]]
+    classes: Optional[List[int]],
+    logo_rois: Optional[Dict[str, List[List[int]]]] = None,
 ) -> CameraDetectionResult:
     """
     Internal function to run detection on a single camera.
     Used by batch detection to avoid code duplication.
     """
     start_time = time.time()
-    
+
     try:
         # Get camera object
         camera = camera_manager.get_camera_stream(camera_id)
@@ -216,7 +244,7 @@ def _detect_single_camera(
                 detections=[],
                 error="No frame available"
             )
-        
+
         # Run detection
         detection_service = get_detection_service()
         result = detection_service.detect(
@@ -226,11 +254,29 @@ def _detect_single_camera(
             iou_threshold=iou_threshold,
             classes=classes
         )
-        
+
         processing_time_ms = (time.time() - start_time) * 1000
 
+        # Logo-occlusion check (YOLO-independent occupancy signal).
+        logo_occluded: Dict[str, bool] = {}
+        if logo_rois:
+            try:
+                logo_occluded = get_logo_occlusion_detector().evaluate(
+                    camera_id=camera_id,
+                    frame=frame,
+                    logo_rois=logo_rois,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[LOGO] Occlusion check failed for %s (non-fatal): %s",
+                    camera_id, exc, exc_info=True,
+                )
+
+        any_logo_occluded = any(logo_occluded.values()) if logo_occluded else False
+
         snapshot_url = None
-        if result.total_detections_count > 0:
+        # Upload gate: YOLO saw something OR a logo is occluded (YOLO-miss case).
+        if result.total_detections_count > 0 or any_logo_occluded:
             print(f"[S3 DEBUG] Attempting S3 upload for camera={camera_id} (batch) | frame shape={frame.shape}")
             try:
                 store = get_s3_frame_store()
@@ -250,9 +296,10 @@ def _detect_single_camera(
             processing_time_ms=processing_time_ms,
             detections=result.detections,
             error=None,
-            snapshot_url=snapshot_url
+            snapshot_url=snapshot_url,
+            logo_occluded=(logo_occluded or None),
         )
-        
+
     except Exception as e:
         processing_time_ms = (time.time() - start_time) * 1000
         logger.error(f"Detection failed for camera {camera_id}: {str(e)}")
@@ -318,6 +365,8 @@ async def detect_objects_batch(request: DetectBatchRequest):
     results = []
     max_workers = min(len(camera_ids), 10)  # Cap at 10 concurrent workers
     
+    logo_rois_by_camera = request.logo_rois_by_camera or {}
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all detection tasks
         future_to_camera = {
@@ -326,7 +375,8 @@ async def detect_objects_batch(request: DetectBatchRequest):
                 camera_id,
                 request.confidence_threshold,
                 request.iou_threshold,
-                request.classes
+                request.classes,
+                logo_rois_by_camera.get(camera_id),
             ): camera_id
             for camera_id in camera_ids
         }

@@ -34,6 +34,14 @@ class DetectionRequest(BaseModel):
                     "YOLO runs at min(values); results are post-filtered per class. "
                     "Classes not listed fall back to confidence_threshold."
     )
+    logo_rois: Optional[Dict[str, List[List[int]]]] = Field(
+        None,
+        description="Per-ROI polygons of the painted G-logo region inside each parking slot. "
+                    "Used as a YOLO-independent occupancy fallback: if a car covers the logo, "
+                    "occupancy fires even when YOLO misses the car (bad parking angle, occlusion). "
+                    "Format: {\"ROI_1\": [[x,y],...], \"ROI_2\": [[x,y],...]}. Coords in original "
+                    "1920x1080 frame space."
+    )
 
 
 class DetectionResponse(BaseModel):
@@ -44,7 +52,12 @@ class DetectionResponse(BaseModel):
     detections: List[Detection]
     total_detections_count: int = Field(..., description="Total number of detections")
     processing_time_ms: float = Field(..., description="Detection processing time in milliseconds")
-    snapshot_url: Optional[str] = Field(None, description="S3 HTTPS URL of the frame snapshot (only when detections > 0)")
+    snapshot_url: Optional[str] = Field(None, description="S3 HTTPS URL of the frame snapshot (only when detections > 0 OR any logo is occluded)")
+    logo_occluded: Optional[Dict[str, bool]] = Field(
+        None,
+        description="Per-ROI boolean: True if the painted G-logo region is occluded vs. the empty reference. "
+                    "Acts as a YOLO-independent occupancy signal. None when the request did not supply logo_rois."
+    )
 
 
 class DetectionStats(BaseModel):
@@ -62,6 +75,11 @@ class DetectBatchRequest(BaseModel):
     confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
     iou_threshold: Optional[float] = Field(0.45, ge=0.0, le=1.0, description="IOU threshold for NMS")
     classes: Optional[List[int]] = Field(None, description="Filter specific class IDs (None = all classes)")
+    logo_rois_by_camera: Optional[Dict[str, Dict[str, List[List[int]]]]] = Field(
+        None,
+        description="Per-camera logo polygons. Outer key=camera_id, inner=DetectionRequest.logo_rois. "
+                    "Optional — cameras without a mapping skip the logo-occlusion check."
+    )
 
 
 class CameraDetectionResult(BaseModel):
@@ -72,7 +90,11 @@ class CameraDetectionResult(BaseModel):
     processing_time_ms: float
     detections: List[Detection]
     error: Optional[str] = None
-    snapshot_url: Optional[str] = Field(None, description="S3 HTTPS URL of the frame snapshot (only when detections > 0)")
+    snapshot_url: Optional[str] = Field(None, description="S3 HTTPS URL of the frame snapshot (only when detections > 0 OR any logo is occluded)")
+    logo_occluded: Optional[Dict[str, bool]] = Field(
+        None,
+        description="Per-ROI G-logo occlusion booleans. None when no logo polygons were supplied for this camera."
+    )
 
 
 class DetectBatchResponse(BaseModel):
