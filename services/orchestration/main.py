@@ -337,10 +337,31 @@ def _get_camera_config_cached(camera_id: str) -> Dict[str, Any]:
     rois             = get_camera_rois(camera_id)
     db_usecases      = get_camera_usecases(camera_id)
     class_thresholds = get_class_thresholds(camera_id)
+
+    # Logo polygons are stored as rows with roi_type='logo' alongside the
+    # parking-zone polygons. The camera-detection service expects them keyed
+    # by the *parking slot's* roi_id (so its logo_occluded response maps
+    # 1:1 onto slots), which we read from roi_metadata.slot_roi_id. A logo
+    # row missing that metadata is logged and skipped — falling back to the
+    # logo's own roi_id would silently desync slot/logo pairing downstream.
+    logo_rois: Dict[str, List[List[int]]] = {}
+    for r in rois:
+        if r.get("roi_type") != "logo":
+            continue
+        slot_roi = (r.get("roi_metadata") or {}).get("slot_roi_id")
+        if not slot_roi:
+            logger.warning(
+                "[%s] logo ROI %s missing roi_metadata.slot_roi_id — skipping",
+                camera_id, r.get("roi_id"),
+            )
+            continue
+        logo_rois[slot_roi] = r["points"]
+
     entry = {
         "rois":             rois,
         "usecases":         db_usecases,
         "class_thresholds": class_thresholds,
+        "logo_rois":        logo_rois,
         "fetched_at":       now,
     }
     _config_cache[camera_id] = entry
@@ -360,7 +381,12 @@ async def fetch_frame(camera_id: str) -> dict:
 
 
 @retry_on_failure
-async def run_detection(camera_id: str, confidence_threshold: float, class_thresholds: Optional[Dict[str, float]] = None) -> dict:
+async def run_detection(
+    camera_id: str,
+    confidence_threshold: float,
+    class_thresholds: Optional[Dict[str, float]] = None,
+    logo_rois: Optional[Dict[str, List[List[int]]]] = None,
+) -> dict:
     """Run detection on frame with retry"""
     async with camera_detection_semaphore:
         payload: Dict[str, Any] = {
@@ -369,6 +395,8 @@ async def run_detection(camera_id: str, confidence_threshold: float, class_thres
         }
         if class_thresholds:
             payload["class_thresholds"] = class_thresholds
+        if logo_rois:
+            payload["logo_rois"] = logo_rois
         response = await http_client.post(
             f"{CAMERA_DETECTION_URL}/detection/detect",
             json=payload,
@@ -655,16 +683,22 @@ class PipelineManager:
                 rois             = cfg["rois"]
                 db_usecases      = cfg["usecases"]
                 class_thresholds = cfg["class_thresholds"]
+                logo_rois        = cfg["logo_rois"]
                 t_cfg = (loop.time() - t0) * 1000
                 # Fall back to config usecases if none configured in DB
                 active_usecases = db_usecases if db_usecases else config.usecases
 
-                # STEP 2: Run detection with per-class thresholds when configured
+                # STEP 2: Run detection with per-class thresholds when configured.
+                # logo_rois drives the YOLO-independent occupancy fallback on
+                # camera-detection — the response carries logo_occluded per
+                # slot ROI, which the usecase service consumes as a second
+                # occupancy signal alongside YOLO car bboxes.
                 t0 = loop.time()
                 detection_data = await run_detection(
                     camera_id,
                     config.confidence_threshold,
                     class_thresholds or None,
+                    logo_rois or None,
                 )
                 t_det = (loop.time() - t0) * 1000
                 total_det = detection_data.get('total_detections_count', 0)
