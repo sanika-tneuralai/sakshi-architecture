@@ -341,17 +341,17 @@ def _get_camera_config_cached(camera_id: str) -> Dict[str, Any]:
     # Logo polygons are stored as rows with roi_type='logo' alongside the
     # parking-zone polygons. The camera-detection service expects them keyed
     # by the *parking slot's* roi_id (so its logo_occluded response maps
-    # 1:1 onto slots), which we read from roi_metadata.slot_roi_id. A logo
-    # row missing that metadata is logged and skipped — falling back to the
-    # logo's own roi_id would silently desync slot/logo pairing downstream.
+    # 1:1 onto slots), which we read from metadata.slot_roi_id. The
+    # persistence layer flattens roi_configs.roi_metadata into the "metadata"
+    # key on the dict — matching the convention every other consumer uses.
     logo_rois: Dict[str, List[List[int]]] = {}
     for r in rois:
         if r.get("roi_type") != "logo":
             continue
-        slot_roi = (r.get("roi_metadata") or {}).get("slot_roi_id")
+        slot_roi = (r.get("metadata") or {}).get("slot_roi_id")
         if not slot_roi:
             logger.warning(
-                "[%s] logo ROI %s missing roi_metadata.slot_roi_id — skipping",
+                "[%s] logo ROI %s missing metadata.slot_roi_id — skipping",
                 camera_id, r.get("roi_id"),
             )
             continue
