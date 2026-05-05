@@ -24,6 +24,7 @@ lighting" from "car covers the logo" with margin.
 """
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -72,7 +73,7 @@ def main() -> int:
     print(f"[INFO] Warp size = {WARP_SIZE}x{WARP_SIZE}")
     print(f"[INFO] References: {[p.name for p in refs]}\n")
 
-    out_dir = Path("/tmp/logo_warps")
+    out_dir = Path(tempfile.gettempdir()) / "logo_warps"
     out_dir.mkdir(exist_ok=True)
 
     det = LogoOcclusionDetector()
