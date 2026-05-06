@@ -195,6 +195,88 @@ class ParkingDetectionRule(BaseUsecaseRule):
 
             if occupant_ids:
                 triggered = True
+
+                # Car-swap-during-absence guard. The previous design cleared
+                # MAYBE_GONE the moment any car returned to the ROI. That
+                # masked the case where Car A leaves and Car B arrives within
+                # the debounce window — Car A's outtime never fires, Car B
+                # gets attributed to Car A's session.
+                #
+                # Two sub-cases trigger an immediate session boundary:
+                #
+                #   (a) The returning track_id differs from slot.track_id
+                #       (and isn't the YOLO↔CV alias for the same physical
+                #       car). The tracker confirms a different identity.
+                #
+                #   (b) The same track_id returns, BUT slot.car_absent_since
+                #       is older than CAR_MAYBE_GONE_SECONDS. The centroid
+                #       tracker re-identifies new arrivals at the same
+                #       position with the same id when the gap is short
+                #       (< max_disappeared frames), so a stale absence
+                #       coupled with a "returning" id is a strong signal
+                #       that this is actually a different physical car.
+                cv_tid_for_swap = _cv_track_id(camera_id, roi_name)
+                prev_tid_for_swap = slot.get("track_id")
+                fire_immediate_swap = False
+                swap_reason = None
+
+                if slot["occupied"] and slot.get("car_maybe_gone_since"):
+                    # Any returning car arriving while we're already debouncing
+                    # an exit is treated as a new vehicle when (a) the id
+                    # differs and isn't a CV alias, or (b) the absence has
+                    # already exceeded the MAYBE_GONE threshold.
+                    different_real_id = (
+                        prev_tid_for_swap is not None
+                        and all(tid != prev_tid_for_swap for tid in occupant_ids)
+                        and prev_tid_for_swap != cv_tid_for_swap
+                        and all(tid != cv_tid_for_swap for tid in occupant_ids)
+                    )
+                    long_absence = (
+                        _absent_seconds(slot.get("car_absent_since"), _now_dt())
+                        >= CAR_MAYBE_GONE_SECONDS
+                    )
+                    if different_real_id:
+                        fire_immediate_swap = True
+                        swap_reason = "different track_id during MAYBE_GONE"
+                    elif long_absence:
+                        fire_immediate_swap = True
+                        swap_reason = (
+                            f"same track_id returned after >= "
+                            f"{CAR_MAYBE_GONE_SECONDS}s absence — likely re-id"
+                        )
+
+                if fire_immediate_swap:
+                    swap_ts = event_ts
+                    outtime_evt = build_event(
+                        event_type="parking_outtime",
+                        camera_id=camera_id,
+                        timestamp=swap_ts,
+                        track_id=prev_tid_for_swap or "",
+                        metadata={
+                            "roi":     roi_name,
+                            "slot_id": roi_name,
+                            "intime":  slot.get("in_time"),
+                            "outtime": swap_ts,
+                            "reason":  swap_reason,
+                        },
+                    )
+                    events.append(outtime_evt)
+                    publish_sync("parking_events", outtime_evt, task_id=task_id)
+                    logger.warning(
+                        "[PARKING] Immediate exit during MAYBE_GONE: camera=%s roi=%s "
+                        "old=%s new=%s reason=%s",
+                        camera_id, roi_name, prev_tid_for_swap, occupant_ids, swap_reason,
+                    )
+                    # Hard reset — the new car must go through normal entry
+                    # debounce (3 frames) before parking_intime fires.
+                    reset_slot_state(camera_id, roi_name)
+                    slot = get_slot_state(camera_id, roi_name)
+                    entry_buf[roi_name].clear()
+                    # Don't start counting frames toward the new entry yet;
+                    # let the next iteration handle this slot from a clean state.
+                    set_slot_state(camera_id, roi_name, slot)
+                    continue
+
                 # Car is present this frame — clear absent timestamp AND
                 # cancel any in-progress MAYBE_GONE debounce. The car came
                 # back, so the previous absence was a tracker hiccup or
