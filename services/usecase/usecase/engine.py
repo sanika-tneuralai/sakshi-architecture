@@ -38,6 +38,13 @@ def build_slim_payload(detection_output: Dict[str, Any]) -> Dict[str, Any]:
         "camera_id": camera_id,
         "rois": detection_output.get("rois"),
         "snapshot_url": detection_output.get("snapshot_url"),
+        # Frame capture timestamp — parking_detection's _event_ts() reads this
+        # so DB rows are stamped with capture time, not rule-fire time.
+        "timestamp": detection_output.get("timestamp"),
+        # Per-slot CV occupancy signal from camera-detection's logo-occlusion
+        # check. parking_detection ORs this with YOLO occupancy so YOLO-miss
+        # frames still drive parking_intime / parking_outtime.
+        "logo_occluded": detection_output.get("logo_occluded"),
     }
 
 def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camera_id: str) -> UsecaseResult:
