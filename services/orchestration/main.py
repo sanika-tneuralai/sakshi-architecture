@@ -426,8 +426,17 @@ async def evaluate_usecases(
         detection_output = dict(detection_data)
         # Convert DB list-of-dicts → {"ROI_1": [[x,y], ...], "ROI_2": ...}
         # Rules (parking_detection, gun_detection, etc.) expect this dict format.
+        #
+        # Drop roi_type='logo' rows. They share the table with parking-zone ROIs
+        # but represent painted G-logo polygons used only by camera-detection's
+        # logo-occlusion check (already passed separately as logo_rois). If we
+        # leave them in, parking_detection iterates them too and emits a second
+        # parking_intime per visit — producing duplicate "LOGO_X" charging
+        # session rows alongside the real "Slot X" rows.
         detection_output["rois"] = {
-            r["roi_id"]: r["points"] for r in rois
+            r["roi_id"]: r["points"]
+            for r in rois
+            if r.get("roi_type") != "logo"
         }
         # Request payload (full ROI polygons + detections) is large — debug file only.
         logger.debug(
