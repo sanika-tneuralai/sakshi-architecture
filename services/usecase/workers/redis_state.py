@@ -143,6 +143,15 @@ def _default_slot_state() -> dict:
         # fragment one visit into multiple ChargingSession rows.
         "car_maybe_gone_since": None,        # ISO ts when MAYBE_GONE entered
 
+        # LLM-driven gun detection (GUN_DETECTION_BACKEND=llm). We poll the
+        # LLM at a tight cadence while hunting plug-in (1 min, 2-of-N
+        # confirmation) and a loose cadence while watching plug-out
+        # (5 min, one-shot). All three fields are wall-clock based so they
+        # are robust to orchestration poll_interval changes.
+        "last_gun_check_at": None,                 # ISO ts of most recent LLM call for this slot
+        "gun_check_attempts": 0,                   # plug-in attempts; capped by GUN_LLM_PLUGIN_MAX_POLLS
+        "gun_consecutive_pluggedin_count": 0,      # 2-of-N counter for plug-in confirmation
+
         # Monotonically increasing frame counter — survives restarts via Redis
         "frame_counter": 0,
     }
