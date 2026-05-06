@@ -172,38 +172,106 @@ def _annotate_frame(image: np.ndarray, bbox: dict) -> np.ndarray:
     return annotated
 
 
-def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
-    """Send full frame + crop to Gemini. Returns car_number + car_model."""
+def _polygon_to_bbox(polygon: List[List[int]]) -> Dict[str, float]:
+    """
+    Bounding rectangle of a slot polygon in detection-space coords. Used as
+    a stand-in 'bbox' for CV-only entries (YOLO missed the car, so there is
+    no real detection bbox). The bbox feeds the existing crop / quality gate
+    pipeline; the LLM prompt also receives the polygon directly so the model
+    can reason about parking quality.
+    """
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return {
+        "x1": float(min(xs)),
+        "y1": float(min(ys)),
+        "x2": float(max(xs)),
+        "y2": float(max(ys)),
+    }
+
+
+def _annotate_full_frame(
+    image: np.ndarray,
+    bbox: Dict[str, float] | None,
+    polygon: List[List[int]] | None,
+) -> np.ndarray:
+    """
+    Draw the slot polygon (yellow) and, when available, the YOLO bbox
+    (green) on a copy of the frame. The LLM gets the annotated image so it
+    can:
+      - Identify which car to read (the one inside the highlighted slot),
+      - Judge parking quality against the slot boundary.
+    """
+    annotated = image.copy()
+    h, w = annotated.shape[:2]
+    sx = w / DETECTION_W
+    sy = h / DETECTION_H
+
+    if polygon:
+        pts = np.array(
+            [[int(p[0] * sx), int(p[1] * sy)] for p in polygon],
+            dtype=np.int32,
+        ).reshape((-1, 1, 2))
+        cv2.polylines(annotated, [pts], isClosed=True, color=(0, 255, 255), thickness=4)
+
+    if bbox:
+        x1 = max(0, int(bbox.get("x1", 0) * sx))
+        y1 = max(0, int(bbox.get("y1", 0) * sy))
+        x2 = min(w, int(bbox.get("x2", w) * sx))
+        y2 = min(h, int(bbox.get("y2", h) * sy))
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 4)
+
+    return annotated
+
+
+def _query_gemini(
+    full_frame: np.ndarray,
+    bbox: dict | None,
+    polygon: List[List[int]] | None = None,
+) -> Dict[str, str]:
+    """
+    Send the annotated full frame (slot polygon + optional bbox) to Gemini.
+    Returns car_number, car_model, parking_quality.
+    """
     if not GEMINI_API_KEY:
         logger.warning("[VEHICLE] GEMINI_API_KEY not set — skipping Gemini extraction")
-        return {"car_number": "unreadable", "car_model": "unknown"}
+        return {"car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown"}
 
     logger.info("[VEHICLE] Gemini API key present (len=%d), model=%s", len(GEMINI_API_KEY), GEMINI_MODEL)
-    logger.info("[VEHICLE] Full frame shape: %s, bbox=%s", full_frame.shape, bbox)
+    logger.info(
+        "[VEHICLE] Full frame shape: %s, bbox=%s, polygon=%s",
+        full_frame.shape, bbox, polygon,
+    )
 
     try:
         from google import genai
         from google.genai import types
 
-        client    = genai.Client(api_key=GEMINI_API_KEY)
-        frame_b64 = _crop_to_b64(full_frame)
-        crop      = _crop_bbox(full_frame, bbox)
-        crop_b64  = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        annotated = _annotate_full_frame(full_frame, bbox, polygon)
+        frame_b64 = _crop_to_b64(annotated)
+        # Tight crop is only available when YOLO produced a bbox. For CV-only
+        # entries we rely on the polygon overlay to direct the model's focus.
+        crop = _crop_bbox(full_frame, bbox) if bbox else None
+        crop_b64 = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
         logger.info("[VEHICLE] Full frame encoded: %d chars, crop encoded: %s chars",
                     len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
             "You are a strict vehicle recognition assistant. Precision over coverage: "
             "returning \"unknown\" is always preferred over a confident guess.\n"
-            "Two images are provided:\n"
-            "  1. The full scene showing a parking/charging area\n"
-            "  2. A close-up crop of the specific vehicle to analyze\n\n"
-            "Analyze the vehicle shown in the close-up (second image) and extract verifiable information. "
-            "Use the full scene (first image) for additional context if needed.\n\n"
+            "Images provided:\n"
+            "  1. Full scene with the target parking slot outlined in YELLOW. "
+            "When a green rectangle is also drawn, that is the YOLO car bbox.\n"
+            "  2. (Optional) A close-up crop of the YOLO bbox.\n\n"
+            "Analyze the vehicle parked inside the YELLOW slot outline. "
+            "If a crop is provided, use it for plate / badge detail; "
+            "otherwise read directly from the full scene.\n\n"
 
-            "Return a JSON object with EXACTLY these two keys:\n"
+            "Return a JSON object with EXACTLY these THREE keys:\n"
             '  "car_number": string\n'
-            '  "car_model": string\n\n'
+            '  "car_model": string\n'
+            '  "parking_quality": string  // one of: "proper", "double_slot", "across_line", "outside_slot", "unknown"\n\n'
 
             "Guardrails for license plate (car_number):\n"
             "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
@@ -228,14 +296,22 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "- If the vehicle is partially occluded, far from camera, or shown from an angle that hides badges and model-specific cues, return \"unknown\".\n"
             "- When uncertain between two candidates, return \"unknown\" rather than picking one.\n\n"
 
+            "Guardrails for parking_quality — judge against the YELLOW slot outline:\n"
+            "  \"proper\"        — the car is fully inside the yellow outline.\n"
+            "  \"double_slot\"   — the car spans this slot AND visibly overlaps an adjacent slot.\n"
+            "  \"across_line\"   — the car straddles the yellow boundary on one side.\n"
+            "  \"outside_slot\"  — the car is mostly or entirely outside the yellow outline.\n"
+            "  \"unknown\"       — you cannot tell (slot boundary not clearly visible, occlusion, etc).\n"
+            "- Report what you actually see; do not default to \"proper\" when uncertain.\n\n"
+
             "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
             "Example outputs:\n"
-            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }   // badge + model lettering visible\n'
-            '{ "car_number": "unreadable", "car_model": "Tata" }            // Tata badge visible, model unclear\n'
-            '{ "car_number": "unreadable", "car_model": "unknown" }         // rear view, no badges, no plate\n\n'
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta", "parking_quality": "proper" }\n'
+            '{ "car_number": "unreadable", "car_model": "Tata", "parking_quality": "across_line" }\n'
+            '{ "car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown" }\n\n'
 
             "Now analyze the vehicle and return ONLY the JSON."
         )
@@ -243,13 +319,14 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         response_schema = {
             "type": "object",
             "properties": {
-                "car_number": {"type": "string"},
-                "car_model":  {"type": "string"},
+                "car_number":      {"type": "string"},
+                "car_model":       {"type": "string"},
+                "parking_quality": {"type": "string"},
             },
-            "required": ["car_number", "car_model"],
+            "required": ["car_number", "car_model", "parking_quality"],
         }
 
-        # Build content parts: full frame + crop
+        # Build content parts: annotated full frame + (optional) crop
         content_parts = [
             types.Part.from_text(text=prompt),
             types.Part.from_bytes(data=base64.b64decode(frame_b64), mime_type="image/jpeg"),
@@ -259,7 +336,8 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
                 types.Part.from_bytes(data=base64.b64decode(crop_b64), mime_type="image/jpeg")
             )
 
-        logger.info("[VEHICLE] Sending request to Gemini (full frame + crop)...")
+        logger.info("[VEHICLE] Sending request to Gemini (annotated full frame%s)...",
+                    " + crop" if crop_b64 else "")
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=content_parts,
@@ -275,6 +353,7 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         result = json.loads(text)
         car_number = str(result.get("car_number", "unreadable")).strip()
         car_model  = str(result.get("car_model",  "unknown")).strip()
+        parking_quality = str(result.get("parking_quality", "unknown")).strip().lower()
 
         # Reject suspiciously short plates (Indian plates have 8-10 chars: 2L + 1-2D + 1-3L + 4D)
         plate_clean = car_number.replace(" ", "").replace("-", "")
@@ -285,45 +364,64 @@ def _query_gemini(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             )
             car_number = "unreadable"
 
-        logger.info("[VEHICLE] Gemini parsed result: car_number=%s car_model=%s", car_number, car_model)
-        return {"car_number": car_number, "car_model": car_model}
+        logger.info(
+            "[VEHICLE] Gemini parsed result: car_number=%s car_model=%s parking_quality=%s",
+            car_number, car_model, parking_quality,
+        )
+        return {"car_number": car_number, "car_model": car_model, "parking_quality": parking_quality}
 
     except Exception as exc:
         logger.warning("[VEHICLE] Gemini extraction failed: %s", exc, exc_info=True)
-        return {"car_number": "unreadable", "car_model": "unknown"}
+        return {"car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown"}
 
 
-def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
-    """Send full frame + crop to OpenAI vision. Returns car_number + car_model."""
+def _query_openai(
+    full_frame: np.ndarray,
+    bbox: dict | None,
+    polygon: List[List[int]] | None = None,
+) -> Dict[str, str]:
+    """
+    Send the annotated full frame (slot polygon + optional bbox) to OpenAI.
+    Returns car_number, car_model, parking_quality.
+    """
     if not OPENAI_API_KEY:
         logger.warning("[VEHICLE] OPENAI_API_KEY not set — skipping OpenAI extraction")
-        return {"car_number": "unreadable", "car_model": "unknown"}
+        return {"car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown"}
 
     logger.info("[VEHICLE] OpenAI API key present (len=%d), model=%s", len(OPENAI_API_KEY), OPENAI_MODEL)
-    logger.info("[VEHICLE] Full frame shape: %s, bbox=%s", full_frame.shape, bbox)
+    logger.info(
+        "[VEHICLE] Full frame shape: %s, bbox=%s, polygon=%s",
+        full_frame.shape, bbox, polygon,
+    )
 
     try:
         from openai import OpenAI
 
-        client    = OpenAI(api_key=OPENAI_API_KEY)
-        frame_b64 = _crop_to_b64(full_frame)
-        crop      = _crop_bbox(full_frame, bbox)
-        crop_b64  = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        annotated = _annotate_full_frame(full_frame, bbox, polygon)
+        frame_b64 = _crop_to_b64(annotated)
+        # Tight crop is only available when YOLO produced a bbox. For CV-only
+        # entries we rely on the polygon overlay to direct the model's focus.
+        crop = _crop_bbox(full_frame, bbox) if bbox else None
+        crop_b64 = _crop_to_b64(crop) if crop is not None and crop.size > 0 else None
         logger.info("[VEHICLE] Full frame encoded: %d chars, crop encoded: %s chars",
                     len(frame_b64), len(crop_b64) if crop_b64 else "N/A")
 
         prompt = (
             "You are a strict vehicle recognition assistant. Precision over coverage: "
             "returning \"unknown\" is always preferred over a confident guess.\n"
-            "Two images are provided:\n"
-            "  1. The full scene showing a parking/charging area\n"
-            "  2. A close-up crop of the specific vehicle to analyze\n\n"
-            "Analyze the vehicle shown in the close-up (second image) and extract verifiable information. "
-            "Use the full scene (first image) for additional context if needed.\n\n"
+            "Images provided:\n"
+            "  1. Full scene with the target parking slot outlined in YELLOW. "
+            "When a green rectangle is also drawn, that is the YOLO car bbox.\n"
+            "  2. (Optional) A close-up crop of the YOLO bbox.\n\n"
+            "Analyze the vehicle parked inside the YELLOW slot outline. "
+            "If a crop is provided, use it for plate / badge detail; "
+            "otherwise read directly from the full scene.\n\n"
 
-            "Return a JSON object with EXACTLY these two keys:\n"
+            "Return a JSON object with EXACTLY these THREE keys:\n"
             '  "car_number": string\n'
-            '  "car_model": string\n\n'
+            '  "car_model": string\n'
+            '  "parking_quality": string  // one of: "proper", "double_slot", "across_line", "outside_slot", "unknown"\n\n'
 
             "Guardrails for license plate (car_number):\n"
             "- Output MUST be valid JSON. No extra text, no explanation, no comments.\n"
@@ -348,19 +446,27 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             "- If the vehicle is partially occluded, far from camera, or shown from an angle that hides badges and model-specific cues, return \"unknown\".\n"
             "- When uncertain between two candidates, return \"unknown\" rather than picking one.\n\n"
 
+            "Guardrails for parking_quality — judge against the YELLOW slot outline:\n"
+            "  \"proper\"        — the car is fully inside the yellow outline.\n"
+            "  \"double_slot\"   — the car spans this slot AND visibly overlaps an adjacent slot.\n"
+            "  \"across_line\"   — the car straddles the yellow boundary on one side.\n"
+            "  \"outside_slot\"  — the car is mostly or entirely outside the yellow outline.\n"
+            "  \"unknown\"       — you cannot tell (slot boundary not clearly visible, occlusion, etc).\n"
+            "- Report what you actually see; do not default to \"proper\" when uncertain.\n\n"
+
             "Output rules:\n"
             "- Do NOT include anything outside the JSON object.\n"
             "- Ensure correct JSON formatting (double quotes, no trailing commas).\n\n"
 
             "Example outputs:\n"
-            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta" }   // badge + model lettering visible\n'
-            '{ "car_number": "unreadable", "car_model": "Tata" }            // Tata badge visible, model unclear\n'
-            '{ "car_number": "unreadable", "car_model": "unknown" }         // rear view, no badges, no plate\n\n'
+            '{ "car_number": "KL01AB1234", "car_model": "Hyundai Creta", "parking_quality": "proper" }\n'
+            '{ "car_number": "unreadable", "car_model": "Tata", "parking_quality": "across_line" }\n'
+            '{ "car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown" }\n\n'
 
             "Now analyze the vehicle and return ONLY the JSON."
         )
 
-        # Build image content: full frame + crop
+        # Build image content: annotated full frame + (optional) crop
         image_content = [
             {"type": "text", "text": prompt},
             {
@@ -374,7 +480,8 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
                 "image_url": {"url": f"data:image/jpeg;base64,{crop_b64}", "detail": "high"},
             })
 
-        logger.info("[VEHICLE] Sending request to OpenAI (full frame + crop)...")
+        logger.info("[VEHICLE] Sending request to OpenAI (annotated full frame%s)...",
+                    " + crop" if crop_b64 else "")
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             temperature=0.0,
@@ -393,6 +500,7 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
         result     = json.loads(text)
         car_number = str(result.get("car_number", "unreadable")).strip()
         car_model  = str(result.get("car_model",  "unknown")).strip()
+        parking_quality = str(result.get("parking_quality", "unknown")).strip().lower()
 
         # Reject suspiciously short plates (Indian plates have 8-10 chars: 2L + 1-2D + 1-3L + 4D)
         plate_clean = car_number.replace(" ", "").replace("-", "")
@@ -403,38 +511,48 @@ def _query_openai(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
             )
             car_number = "unreadable"
 
-        logger.info("[VEHICLE] OpenAI parsed result: car_number=%s car_model=%s", car_number, car_model)
-        return {"car_number": car_number, "car_model": car_model}
+        logger.info(
+            "[VEHICLE] OpenAI parsed result: car_number=%s car_model=%s parking_quality=%s",
+            car_number, car_model, parking_quality,
+        )
+        return {"car_number": car_number, "car_model": car_model, "parking_quality": parking_quality}
 
     except Exception as exc:
         logger.warning("[VEHICLE] OpenAI extraction failed: %s", exc, exc_info=True)
-        return {"car_number": "unreadable", "car_model": "unknown"}
+        return {"car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown"}
 
 
-def _query_llm(full_frame: np.ndarray, bbox: dict) -> Dict[str, str]:
+def _query_llm(
+    full_frame: np.ndarray,
+    bbox: dict | None,
+    polygon: List[List[int]] | None = None,
+) -> Dict[str, str]:
     """
     Try OpenAI first (if available). If it gets the plate but not the model,
     ask Gemini specifically for the model — Gemini is better at car identification.
     """
-    result = {"car_number": "unreadable", "car_model": "unknown"}
+    result = {"car_number": "unreadable", "car_model": "unknown", "parking_quality": "unknown"}
 
     if OPENAI_API_KEY:
         logger.info("[VEHICLE] LLM provider (primary): OpenAI (model=%s)", OPENAI_MODEL)
-        result = _query_openai(full_frame, bbox)
+        result = _query_openai(full_frame, bbox, polygon)
     elif GEMINI_API_KEY:
         logger.info("[VEHICLE] LLM provider (primary): Gemini (model=%s)", GEMINI_MODEL)
-        return _query_gemini(full_frame, bbox)
+        return _query_gemini(full_frame, bbox, polygon)
 
     # If OpenAI couldn't identify the model, try Gemini as a second opinion
     if result["car_model"] == "unknown" and GEMINI_API_KEY:
         logger.info("[VEHICLE] OpenAI returned model=unknown — trying Gemini for car model")
-        gemini_result = _query_gemini(full_frame, bbox)
+        gemini_result = _query_gemini(full_frame, bbox, polygon)
         if gemini_result["car_model"] != "unknown":
             result["car_model"] = gemini_result["car_model"]
             logger.info("[VEHICLE] Gemini identified model: %s", result["car_model"])
         if result["car_number"] == "unreadable" and gemini_result["car_number"] != "unreadable":
             result["car_number"] = gemini_result["car_number"]
             logger.info("[VEHICLE] Gemini identified plate: %s", result["car_number"])
+        # Take Gemini's parking_quality only when OpenAI didn't have an opinion
+        if result.get("parking_quality") in (None, "unknown") and gemini_result.get("parking_quality") not in (None, "unknown"):
+            result["parking_quality"] = gemini_result["parking_quality"]
 
     return result
 
@@ -450,12 +568,44 @@ class VehicleExtractionRule(BaseUsecaseRule):
         camera_id    = detection_output.get("camera_id", "unknown")
         rois         = detection_output.get("rois") or {}
         snapshot_url = detection_output.get("snapshot_url")
+        logo_occluded = detection_output.get("logo_occluded") or {}
 
         # Tracked cars from parking_detection (injected into slim payload by engine)
         tracked_cars = detection_output.get("tracked_cars") or [
             d for d in detection_output.get("detections", [])
             if d.get("class_name") == "car"
         ]
+
+        # ── CV-only entries ───────────────────────────────────────────────
+        # When camera-detection's logo-occlusion check reports a slot
+        # occluded but YOLO produced no car bbox in that ROI, append a
+        # synthetic "car" so the rest of the loop (slot lookup, retry
+        # budget, LLM call) treats it identically. The bbox is the slot
+        # polygon's bounding rect, used both for the optional tight crop
+        # and so the existing crop/quality gate doesn't crash on a missing
+        # bbox. The synthetic track_id matches the one parking_detection
+        # writes into slot.track_id, so this is the same session.
+        rois_with_yolo_car: set = set()
+        if rois:
+            for car in tracked_cars:
+                bb = car.get("bbox") or {}
+                if not all(k in bb for k in ("x1", "y1", "x2", "y2")):
+                    continue
+                for roi_name in which_rois(bb, rois):
+                    rois_with_yolo_car.add(roi_name)
+        for roi_name, occluded in logo_occluded.items():
+            if not occluded or roi_name not in rois:
+                continue
+            if roi_name in rois_with_yolo_car:
+                # YOLO already has a car in this ROI — handled by the normal path.
+                continue
+            tracked_cars.append({
+                "bbox":       _polygon_to_bbox(rois[roi_name]),
+                "track_id":   f"cv:{camera_id}:{roi_name}",
+                "confidence": 1.0,   # synthetic; bypasses _MIN_CONFIDENCE
+                "class_name": "car",
+                "_cv_only":   True,  # flag for the loop below
+            })
 
         print(f"[VEHICLE] camera={camera_id} | tracked_cars={len(tracked_cars)} | snapshot={'yes' if snapshot_url else 'no'}")
         logger.info("[VEHICLE] snapshot_url=%s", snapshot_url)
@@ -474,8 +624,11 @@ class VehicleExtractionRule(BaseUsecaseRule):
             bbox     = car.get("bbox", {})
             track_id = car.get("track_id")
             confidence = car.get("confidence", 0.0)
+            cv_only  = bool(car.get("_cv_only"))
 
-            # Skip low-confidence detections — they often produce hallucinated plates
+            # Skip low-confidence detections — they often produce hallucinated
+            # plates. CV-only entries have synthetic confidence=1.0 and bypass
+            # the gate by construction.
             if confidence < _MIN_CONFIDENCE:
                 logger.info(
                     "[VEHICLE] Skipping track_id=%s — confidence %.3f < %.2f threshold",
@@ -492,12 +645,21 @@ class VehicleExtractionRule(BaseUsecaseRule):
             # stays NULL downstream). Reuse slot-state infra with a synthetic
             # "track:{id}" key so the 3-retry budget, backoff, and extraction
             # cache still apply — just keyed by track_id instead of ROI.
-            is_unauthorized = slot_id is None
-            if is_unauthorized:
-                if not track_id:
-                    # No stable identity to key on — skip.
-                    continue
-                slot_id = f"track:{track_id}"
+            #
+            # CV-only entries always have a slot (the ROI we synthesized them
+            # for); the polygon-bounding bbox can drift outside the polygon
+            # under perspective, so resolve via the synthetic track_id prefix
+            # rather than which_rois().
+            if cv_only:
+                slot_id = track_id.split(":", 2)[2]   # cv:cam:ROI_1 → ROI_1
+                is_unauthorized = False
+            else:
+                is_unauthorized = slot_id is None
+                if is_unauthorized:
+                    if not track_id:
+                        # No stable identity to key on — skip.
+                        continue
+                    slot_id = f"track:{track_id}"
 
             slot = get_slot_state(camera_id, slot_id)
 
@@ -534,30 +696,62 @@ class VehicleExtractionRule(BaseUsecaseRule):
                     logger.info("[VEHICLE] image download result: %s", "OK" if image is not None else "FAILED/None")
 
                 if image is not None:
-                    crop = _crop_bbox(image, bbox)
-                    if crop is None or crop.size == 0:
-                        logger.warning(
-                            "[VEHICLE] Skipping LLM — crop is empty for bbox=%s image_shape=%s",
-                            bbox, image.shape,
+                    # The slot polygon is sent to the LLM for parking_quality
+                    # judgement and (for CV-only entries with no YOLO bbox) to
+                    # direct the model's focus inside the full frame. Skip
+                    # the polygon for unauthorized cars — they have no slot.
+                    polygon = (
+                        rois.get(slot_id)
+                        if not is_unauthorized and slot_id in rois
+                        else None
+                    )
+
+                    if cv_only:
+                        # No real YOLO bbox to crop or quality-gate. Send
+                        # full frame + polygon overlay; rely on the LLM to
+                        # focus on the highlighted slot.
+                        logger.info(
+                            "[VEHICLE] CV-only entry slot=%s — sending full frame with polygon overlay to LLM",
+                            slot_id,
                         )
-                        # Don't waste this attempt on a bad crop — roll back
-                        slot["extraction_attempts"] -= 1
-                        slot["extraction_backoff_until"] = slot["frame_counter"] + 5
-                    elif not _is_crop_quality_ok(crop):
-                        logger.info("[VEHICLE] Skipping LLM — crop quality below threshold")
-                        # Don't waste this attempt on a low-quality crop — roll back
-                        slot["extraction_attempts"] -= 1
-                        slot["extraction_backoff_until"] = slot["frame_counter"] + 5
-                    else:
-                        logger.info("[VEHICLE] Crop OK: shape=%s | sending full frame with bbox to LLM", crop.shape)
-                        extracted  = _query_llm(image, bbox)
+                        extracted  = _query_llm(image, None, polygon)
                         car_number = extracted["car_number"]
                         car_model  = extracted["car_model"]
+                        parking_quality = extracted.get("parking_quality", "unknown")
                         logger.info(
-                            "[VEHICLE] LLM result: plate=%s model=%s", car_number, car_model
+                            "[VEHICLE] LLM result (CV-only): plate=%s model=%s parking_quality=%s",
+                            car_number, car_model, parking_quality,
                         )
+                    else:
+                        crop = _crop_bbox(image, bbox)
+                        if crop is None or crop.size == 0:
+                            logger.warning(
+                                "[VEHICLE] Skipping LLM — crop is empty for bbox=%s image_shape=%s",
+                                bbox, image.shape,
+                            )
+                            # Don't waste this attempt on a bad crop — roll back
+                            slot["extraction_attempts"] -= 1
+                            slot["extraction_backoff_until"] = slot["frame_counter"] + 5
+                        elif not _is_crop_quality_ok(crop):
+                            logger.info("[VEHICLE] Skipping LLM — crop quality below threshold")
+                            # Don't waste this attempt on a low-quality crop — roll back
+                            slot["extraction_attempts"] -= 1
+                            slot["extraction_backoff_until"] = slot["frame_counter"] + 5
+                        else:
+                            logger.info(
+                                "[VEHICLE] Crop OK: shape=%s | sending full frame + bbox + polygon to LLM",
+                                crop.shape,
+                            )
+                            extracted  = _query_llm(image, bbox, polygon)
+                            car_number = extracted["car_number"]
+                            car_model  = extracted["car_model"]
+                            parking_quality = extracted.get("parking_quality", "unknown")
+                            logger.info(
+                                "[VEHICLE] LLM result: plate=%s model=%s parking_quality=%s",
+                                car_number, car_model, parking_quality,
+                            )
                 else:
-                    logger.warning("[VEHICLE] Skipping Gemini — image is None")
+                    logger.warning("[VEHICLE] Skipping LLM — image is None")
 
                 plate_ok = car_number != "unreadable"
                 model_ok = car_model != "unknown"

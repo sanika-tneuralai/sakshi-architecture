@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
 
+# Synthetic track_id for slots where CV (logo-occlusion) reports a car but
+# YOLO does not. Deterministic per slot so vehicle_extraction can anchor to
+# it for the whole session, and so a real YOLO track_id never collides
+# (CentroidTracker emits integer-string ids; this prefix is stable).
+def _cv_track_id(camera_id: str, roi_name: str) -> str:
+    return f"cv:{camera_id}:{roi_name}"
+
 # Exit is a debounced state machine, NOT a single-threshold check. The naive
 # "absent N seconds → outtime" approach fragmented one physical visit into
 # multiple ChargingSession rows whenever the tracker briefly lost the car
@@ -153,6 +160,26 @@ class ParkingDetectionRule(BaseUsecaseRule):
         # Build a quick lookup: track_id → car dict (for track_id enrichment)
         car_by_tid = {c["track_id"]: c for c in tracked_cars}
 
+        # ── CV occupancy fallback ────────────────────────────────────────
+        # camera-detection runs a logo-coverage check per slot polygon. Pixels
+        # bright in every empty reference are the painted G-logo; when a car
+        # body covers them, the slot is reported occluded. We OR this with
+        # YOLO occupancy so a YOLO-miss (bad parking angle, partial occlusion,
+        # low-confidence frame) still drives parking_intime.
+        #
+        # When CV says occluded but YOLO has no track in this ROI, attach a
+        # synthetic, deterministic track_id so the rest of the rule (entry
+        # debounce, slot.track_id, vehicle_extraction anchor) treats it
+        # identically to a YOLO entry.
+        logo_occluded = detection_output.get("logo_occluded") or {}
+        cv_occupied_rois = {
+            roi_name for roi_name, occ in logo_occluded.items()
+            if occ and roi_name in rois
+        }
+        for roi_name in cv_occupied_rois:
+            if not roi_occupants[roi_name]:
+                roi_occupants[roi_name].append(_cv_track_id(camera_id, roi_name))
+
         events: List[dict]  = []
         triggered           = False
 
@@ -221,7 +248,22 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         )
                     elif slot["occupied"]:
                         prev_tid = slot.get("track_id")
-                        if prev_tid and tid != prev_tid and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
+                        # Don't fire car-swap when the only difference is YOLO
+                        # vs CV id for the same physical car. A YOLO drop +
+                        # CV pickup (or the reverse) on a parked car is a
+                        # detection blip, not a new vehicle. Treat any
+                        # transition involving the synthetic cv:* id as the
+                        # same session.
+                        cv_tid = _cv_track_id(camera_id, roi_name)
+                        same_physical_car = (
+                            tid == cv_tid or prev_tid == cv_tid
+                        )
+                        if (
+                            prev_tid
+                            and tid != prev_tid
+                            and not same_physical_car
+                            and entry_buf[roi_name][tid] >= ENTRY_FRAMES
+                        ):
                             # A different track_id has been consistently present for
                             # ENTRY_FRAMES — the previous car left without a clean exit
                             # (e.g. compliance violation, tracker re-ID after service
