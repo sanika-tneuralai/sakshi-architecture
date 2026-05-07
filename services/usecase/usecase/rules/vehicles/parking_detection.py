@@ -18,6 +18,18 @@ Design (locked):
   debounce depends only on car presence; gun state does not gate outtime.
 - On parking_outtime: slot state is fully reset via reset_slot_state().
 
+YOLO-miss safety net (LLM polling):
+- When YOLO sees no car in a slot, every LLM_POLL_INTERVAL_SECONDS we ask
+  the strict-prompt LLM whether there's a vehicle in that slot's polygon.
+  The verdict is sticky for the poll interval (cached in slot state) so we
+  never burn an LLM call every frame.
+- A True verdict injects a synthetic ``llm:{camera}:{ROI}`` track into
+  roi_occupants so the rest of this rule's logic (entry debounce, swap
+  detection, MAYBE_GONE) treats it identically to a YOLO-detected car.
+  parking_intime fires after ENTRY_FRAMES of consistent injection.
+- Replaces the previous G-marker / logo-occlusion CV fallback, which was
+  removed because shadows on the painted G triggered phantom sessions.
+
 ROI polygons are injected via detection_output["rois"]:
     {"ROI_1": [[x,y], ...], "ROI_2": [[x,y], ...]}
 
@@ -25,7 +37,8 @@ Tracker state is persisted in Redis under ``tracker:{camera_id}``.
 Entry debounce buffers are persisted under ``parking:{camera_id}``.
 """
 import logging
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, List
 
 from shared.common.roi import which_rois
@@ -39,19 +52,17 @@ logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
 
-# After the LLM rejects a CV-only intime (G-marker says occupied, YOLO sees
-# nothing, LLM confirms there's no vehicle in the slot), suppress further LLM
-# checks for this slot until this many seconds pass. Bounded re-check cost
-# during sustained false occlusion (sun-shadow on the painted G, debris, etc).
-import os as _os
-CV_LLM_SUPPRESS_SECONDS = int(_os.getenv("CV_ONLY_LLM_SUPPRESS_SECONDS", "300"))
+# How often (seconds) to re-poll the LLM for an empty-per-YOLO slot. Verdict
+# is cached in slot.last_llm_poll_at / slot.last_llm_verdict so we never call
+# the LLM more than once per slot per interval.
+LLM_POLL_INTERVAL_SECONDS = int(os.getenv("LLM_POLL_INTERVAL_SECONDS", "60"))
 
-# Synthetic track_id for slots where CV (logo-occlusion) reports a car but
-# YOLO does not. Deterministic per slot so vehicle_extraction can anchor to
-# it for the whole session, and so a real YOLO track_id never collides
+# Synthetic track_id for slots where the LLM confirms a vehicle but YOLO
+# does not. Deterministic per slot so vehicle_extraction can anchor to it
+# for the whole session, and so a real YOLO track_id never collides
 # (CentroidTracker emits integer-string ids; this prefix is stable).
-def _cv_track_id(camera_id: str, roi_name: str) -> str:
-    return f"cv:{camera_id}:{roi_name}"
+def _llm_track_id(camera_id: str, roi_name: str) -> str:
+    return f"llm:{camera_id}:{roi_name}"
 
 # Exit is a debounced state machine, NOT a single-threshold check. The naive
 # "absent N seconds → outtime" approach fragmented one physical visit into
@@ -168,25 +179,70 @@ class ParkingDetectionRule(BaseUsecaseRule):
         # Build a quick lookup: track_id → car dict (for track_id enrichment)
         car_by_tid = {c["track_id"]: c for c in tracked_cars}
 
-        # ── CV occupancy fallback ────────────────────────────────────────
-        # camera-detection runs a logo-coverage check per slot polygon. Pixels
-        # bright in every empty reference are the painted G-logo; when a car
-        # body covers them, the slot is reported occluded. We OR this with
-        # YOLO occupancy so a YOLO-miss (bad parking angle, partial occlusion,
-        # low-confidence frame) still drives parking_intime.
+        # ── LLM safety net for YOLO misses ───────────────────────────────
+        # When YOLO sees no car in an ROI, periodically (every
+        # LLM_POLL_INTERVAL_SECONDS) ask the strict-prompt LLM if there's
+        # actually a vehicle in this slot's polygon. The LLM is robust to
+        # low-light / odd-angle conditions where YOLO under-recalls.
         #
-        # When CV says occluded but YOLO has no track in this ROI, attach a
-        # synthetic, deterministic track_id so the rest of the rule (entry
-        # debounce, slot.track_id, vehicle_extraction anchor) treats it
+        # The verdict is cached on slot state so the LLM call happens at most
+        # once per slot per interval — every frame in between just reuses
+        # the cached verdict (sticky). A True verdict injects a synthetic
+        # llm:{cam}:{ROI} track so the rest of the rule (entry debounce,
+        # MAYBE_GONE, swap detection, vehicle_extraction anchor) treats it
         # identically to a YOLO entry.
-        logo_occluded = detection_output.get("logo_occluded") or {}
-        cv_occupied_rois = {
-            roi_name for roi_name, occ in logo_occluded.items()
-            if occ and roi_name in rois
-        }
-        for roi_name in cv_occupied_rois:
-            if not roi_occupants[roi_name]:
-                roi_occupants[roi_name].append(_cv_track_id(camera_id, roi_name))
+        snapshot_url = detection_output.get("snapshot_url")
+        now_for_poll = _now_dt()
+        # Synthetic "cars" appended here are forwarded to vehicle_extraction
+        # via matched_objects so it can run plate/model extraction on
+        # YOLO-blind sessions. The synthetic bbox is the slot polygon's
+        # bounding rectangle so existing which_rois / cropping code handles
+        # them identically to YOLO detections.
+        synthetic_llm_cars: List[Dict[str, Any]] = []
+
+        def _emit_synthetic(roi_name: str) -> None:
+            roi_occupants[roi_name].append(_llm_track_id(camera_id, roi_name))
+            poly = rois.get(roi_name) or []
+            if not poly:
+                return
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            synthetic_llm_cars.append({
+                "track_id":   _llm_track_id(camera_id, roi_name),
+                "bbox": {
+                    "x1": float(min(xs)), "y1": float(min(ys)),
+                    "x2": float(max(xs)), "y2": float(max(ys)),
+                },
+                "class_name": "car",
+                "confidence": 1.0,
+            })
+
+        for roi_name in list(roi_occupants.keys()):
+            if roi_occupants[roi_name]:
+                continue   # YOLO has a car — skip LLM, free of charge
+            slot_for_poll = get_slot_state(camera_id, roi_name)
+            last_poll_iso = slot_for_poll.get("last_llm_poll_at")
+            elapsed = _absent_seconds(last_poll_iso, now_for_poll) if last_poll_iso else float("inf")
+
+            if elapsed < LLM_POLL_INTERVAL_SECONDS:
+                # Within the sticky window — reuse last verdict, no new call.
+                if slot_for_poll.get("last_llm_verdict") is True:
+                    _emit_synthetic(roi_name)
+                continue
+
+            if not snapshot_url:
+                continue  # Can't ask the LLM without a frame.
+
+            verdict = llm_confirms_vehicle_in_slot(snapshot_url, rois, roi_name)
+            slot_for_poll["last_llm_poll_at"] = now_for_poll.isoformat()
+            slot_for_poll["last_llm_verdict"] = verdict   # True / False / None
+            set_slot_state(camera_id, roi_name, slot_for_poll)
+            logger.info(
+                "[PARKING] LLM poll: camera=%s roi=%s verdict=%s",
+                camera_id, roi_name, verdict,
+            )
+            if verdict is True:
+                _emit_synthetic(roi_name)
 
         events: List[dict]  = []
         triggered           = False
@@ -223,7 +279,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                 #       (< max_disappeared frames), so a stale absence
                 #       coupled with a "returning" id is a strong signal
                 #       that this is actually a different physical car.
-                cv_tid_for_swap = _cv_track_id(camera_id, roi_name)
+                llm_tid_for_swap = _llm_track_id(camera_id, roi_name)
                 prev_tid_for_swap = slot.get("track_id")
                 fire_immediate_swap = False
                 swap_reason = None
@@ -231,13 +287,14 @@ class ParkingDetectionRule(BaseUsecaseRule):
                 if slot["occupied"] and slot.get("car_maybe_gone_since"):
                     # Any returning car arriving while we're already debouncing
                     # an exit is treated as a new vehicle when (a) the id
-                    # differs and isn't a CV alias, or (b) the absence has
-                    # already exceeded the MAYBE_GONE threshold.
+                    # differs and isn't an LLM-poll alias for the same car,
+                    # or (b) the absence has already exceeded the MAYBE_GONE
+                    # threshold.
                     different_real_id = (
                         prev_tid_for_swap is not None
                         and all(tid != prev_tid_for_swap for tid in occupant_ids)
-                        and prev_tid_for_swap != cv_tid_for_swap
-                        and all(tid != cv_tid_for_swap for tid in occupant_ids)
+                        and prev_tid_for_swap != llm_tid_for_swap
+                        and all(tid != llm_tid_for_swap for tid in occupant_ids)
                     )
                     long_absence = (
                         _absent_seconds(slot.get("car_absent_since"), _now_dt())
@@ -310,72 +367,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     publish_sync("violation_events", evt, task_id=task_id)
 
                 # Entry debounce — fire parking_intime only when slot was idle
-                cv_tid_for_gate = _cv_track_id(camera_id, roi_name)
-                snapshot_url    = detection_output.get("snapshot_url")
                 for tid in occupant_ids:
                     entry_buf[roi_name][tid] = entry_buf[roi_name].get(tid, 0) + 1
 
                     if not slot["occupied"] and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
-                        # ── LLM-as-arbiter gate for CV-only entries ───────
-                        # If the only signal driving this intime is the G-marker
-                        # logo-occlusion check (synthetic cv:* track_id, no real
-                        # YOLO car in the same ROI), ask the strict-prompt LLM
-                        # to confirm there's actually a vehicle there before
-                        # opening a session. Cheap (cached per snapshot URL),
-                        # gated for 5 minutes after a False so a sustained
-                        # false occlusion costs at most one call per window.
-                        is_cv_only = (
-                            tid == cv_tid_for_gate
-                            and not any(t != cv_tid_for_gate for t in occupant_ids)
-                        )
-                        if is_cv_only:
-                            suppress_until = slot.get("cv_llm_suppress_until")
-                            now_dt_ = _now_dt()
-                            within_suppression = False
-                            if suppress_until:
-                                try:
-                                    until_dt = datetime.fromisoformat(suppress_until)
-                                    if until_dt.tzinfo is None:
-                                        until_dt = until_dt.replace(tzinfo=timezone.utc)
-                                    within_suppression = now_dt_ < until_dt
-                                except (ValueError, TypeError):
-                                    within_suppression = False
-                            if within_suppression:
-                                logger.info(
-                                    "[PARKING] CV-only intime suppressed (cached LLM=False) "
-                                    "camera=%s roi=%s until=%s",
-                                    camera_id, roi_name, suppress_until,
-                                )
-                                entry_buf[roi_name].pop(tid, None)
-                                continue
-                            verdict = llm_confirms_vehicle_in_slot(
-                                snapshot_url or "", rois, roi_name,
-                            )
-                            if verdict is False:
-                                # LLM saw the frame and there is no vehicle in
-                                # this slot. Suppress the phantom intime and
-                                # mark the slot so we don't re-check for a
-                                # window. (Fall back to existing behaviour on
-                                # None — call failure or no API key — so we
-                                # never regress versus today.)
-                                slot["cv_llm_suppress_until"] = (
-                                    now_dt_ + timedelta(seconds=CV_LLM_SUPPRESS_SECONDS)
-                                ).isoformat()
-                                set_slot_state(camera_id, roi_name, slot)
-                                entry_buf[roi_name].pop(tid, None)
-                                logger.warning(
-                                    "[PARKING] Phantom CV-only intime suppressed by LLM: "
-                                    "camera=%s roi=%s (suppressing for %ds)",
-                                    camera_id, roi_name, CV_LLM_SUPPRESS_SECONDS,
-                                )
-                                continue
-                            if verdict is True:
-                                logger.info(
-                                    "[PARKING] CV-only intime confirmed by LLM: camera=%s roi=%s",
-                                    camera_id, roi_name,
-                                )
-                            # verdict is None → fall through (existing behaviour)
-
                         intime = event_ts
                         # Mark slot occupied before publishing so re-entrant calls can't
                         # double-fire even within the same frame batch
@@ -401,14 +396,14 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     elif slot["occupied"]:
                         prev_tid = slot.get("track_id")
                         # Don't fire car-swap when the only difference is YOLO
-                        # vs CV id for the same physical car. A YOLO drop +
-                        # CV pickup (or the reverse) on a parked car is a
-                        # detection blip, not a new vehicle. Treat any
-                        # transition involving the synthetic cv:* id as the
+                        # vs LLM-poll id for the same physical car. A YOLO
+                        # drop + LLM pickup (or the reverse) on a parked car
+                        # is a detection blip, not a new vehicle. Treat any
+                        # transition involving the synthetic llm:* id as the
                         # same session.
-                        cv_tid = _cv_track_id(camera_id, roi_name)
+                        llm_tid = _llm_track_id(camera_id, roi_name)
                         same_physical_car = (
-                            tid == cv_tid or prev_tid == cv_tid
+                            tid == llm_tid or prev_tid == llm_tid
                         )
                         if (
                             prev_tid
@@ -553,4 +548,8 @@ class ParkingDetectionRule(BaseUsecaseRule):
         set_state(debounce_key, debounce)
 
         print(f"[PARKING] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
-        return {"triggered": triggered, "matched_objects": tracked_cars, "events": events}
+        return {
+            "triggered":       triggered,
+            "matched_objects": tracked_cars + synthetic_llm_cars,
+            "events":          events,
+        }

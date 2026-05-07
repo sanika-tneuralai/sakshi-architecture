@@ -789,33 +789,32 @@ class VehicleExtractionRule(BaseUsecaseRule):
         camera_id     = detection_output.get("camera_id", "unknown")
         rois          = detection_output.get("rois") or {}
         snapshot_url  = detection_output.get("snapshot_url")
-        logo_occluded = detection_output.get("logo_occluded") or {}
 
         tracked_cars = detection_output.get("tracked_cars") or [
             d for d in detection_output.get("detections", [])
             if d.get("class_name") == "car"
         ]
 
-        # Filter low-confidence YOLO detections.
+        # Filter low-confidence YOLO detections. Synthetic LLM-poll tracks
+        # (parking_detection emits them when YOLO is blind but the LLM
+        # confirms a vehicle) come in with confidence=1.0 and pass the
+        # threshold by construction.
         tracked_cars = [
             c for c in tracked_cars
             if float(c.get("confidence", 0.0)) >= _MIN_CONFIDENCE
             and all(k in (c.get("bbox") or {}) for k in ("x1", "y1", "x2", "y2"))
         ]
 
-        if not tracked_cars and not any(logo_occluded.values()):
-            logger.info("[VEHICLE] camera=%s no cars and no logo-occluded slots", camera_id)
+        if not tracked_cars:
+            logger.info("[VEHICLE] camera=%s no cars", camera_id)
             return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
         # ── Build target list ────────────────────────────────────────────
-        # Each "target" is something we may want plate/model for. Three kinds:
-        #   - in-slot YOLO car      key=slot_id
-        #   - unauthorized YOLO car key=track:<track_id>
-        #   - logo-occluded slot    key=slot_id (no YOLO bbox)
+        # Each "target" is something we may want plate/model for. Two kinds:
+        #   - in-slot car (YOLO or LLM-poll synthetic) key=slot_id
+        #   - unauthorized YOLO car                     key=track:<track_id>
         targets: List[Dict[str, Any]] = []
         target_meta: Dict[str, Dict[str, Any]] = {}  # key -> {kind, track_id, slot_id, bbox}
-
-        slots_with_yolo: set = set()
 
         for car in tracked_cars:
             bbox = car["bbox"]
@@ -824,7 +823,6 @@ class VehicleExtractionRule(BaseUsecaseRule):
 
             if matched:
                 slot_id = matched[0]
-                slots_with_yolo.add(slot_id)
                 key = slot_id
                 kind = "yolo_in_slot"
             else:
@@ -842,23 +840,6 @@ class VehicleExtractionRule(BaseUsecaseRule):
             }
             targets.append({"key": key, "x_center": _bbox_center_x(bbox)})
 
-        # CV-only logo-occluded slots (G-marker says "occluded" but YOLO has no car).
-        for roi_name, occluded in logo_occluded.items():
-            if not occluded or roi_name not in rois or roi_name in slots_with_yolo:
-                continue
-            key = roi_name
-            if key in target_meta:
-                continue
-            synthetic_track = f"cv:{camera_id}:{roi_name}"
-            target_meta[key] = {
-                "kind": "cv_only_logo", "track_id": synthetic_track,
-                "slot_id": roi_name, "bbox": None, "confidence": 1.0,
-            }
-            targets.append({
-                "key": key,
-                "x_center": _polygon_centroid_x(rois[roi_name]),
-            })
-
         if not targets:
             return {"triggered": False, "matched_objects": [], "vehicle_details": []}
 
@@ -870,7 +851,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
             slot = get_slot_state(camera_id, key)
             slot_states[key] = slot
             kind = target_meta[key]["kind"]
-            force = kind in ("yolo_unauthorized", "cv_only_logo")
+            force = kind == "yolo_unauthorized"
             if _wants_extraction(slot, force_occupied=force):
                 targets_needing_llm.append(t)
 
