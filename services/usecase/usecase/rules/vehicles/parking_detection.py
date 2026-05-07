@@ -25,18 +25,26 @@ Tracker state is persisted in Redis under ``tracker:{camera_id}``.
 Entry debounce buffers are persisted under ``parking:{camera_id}``.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Dict, List
 
 from shared.common.roi import which_rois
 from usecase.domain.vehicles.events import build_event, publish_sync
 from usecase.domain.vehicles.tracking import CentroidTracker
 from usecase.rules.base import BaseUsecaseRule
+from usecase.rules.vehicles.vehicle_extraction import llm_confirms_vehicle_in_slot
 from workers.redis_state import get_state, set_state, get_slot_state, set_slot_state, reset_slot_state
 
 logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
+
+# After the LLM rejects a CV-only intime (G-marker says occupied, YOLO sees
+# nothing, LLM confirms there's no vehicle in the slot), suppress further LLM
+# checks for this slot until this many seconds pass. Bounded re-check cost
+# during sustained false occlusion (sun-shadow on the painted G, debris, etc).
+import os as _os
+CV_LLM_SUPPRESS_SECONDS = int(_os.getenv("CV_ONLY_LLM_SUPPRESS_SECONDS", "300"))
 
 # Synthetic track_id for slots where CV (logo-occlusion) reports a car but
 # YOLO does not. Deterministic per slot so vehicle_extraction can anchor to
@@ -302,10 +310,72 @@ class ParkingDetectionRule(BaseUsecaseRule):
                     publish_sync("violation_events", evt, task_id=task_id)
 
                 # Entry debounce — fire parking_intime only when slot was idle
+                cv_tid_for_gate = _cv_track_id(camera_id, roi_name)
+                snapshot_url    = detection_output.get("snapshot_url")
                 for tid in occupant_ids:
                     entry_buf[roi_name][tid] = entry_buf[roi_name].get(tid, 0) + 1
 
                     if not slot["occupied"] and entry_buf[roi_name][tid] >= ENTRY_FRAMES:
+                        # ── LLM-as-arbiter gate for CV-only entries ───────
+                        # If the only signal driving this intime is the G-marker
+                        # logo-occlusion check (synthetic cv:* track_id, no real
+                        # YOLO car in the same ROI), ask the strict-prompt LLM
+                        # to confirm there's actually a vehicle there before
+                        # opening a session. Cheap (cached per snapshot URL),
+                        # gated for 5 minutes after a False so a sustained
+                        # false occlusion costs at most one call per window.
+                        is_cv_only = (
+                            tid == cv_tid_for_gate
+                            and not any(t != cv_tid_for_gate for t in occupant_ids)
+                        )
+                        if is_cv_only:
+                            suppress_until = slot.get("cv_llm_suppress_until")
+                            now_dt_ = _now_dt()
+                            within_suppression = False
+                            if suppress_until:
+                                try:
+                                    until_dt = datetime.fromisoformat(suppress_until)
+                                    if until_dt.tzinfo is None:
+                                        until_dt = until_dt.replace(tzinfo=timezone.utc)
+                                    within_suppression = now_dt_ < until_dt
+                                except (ValueError, TypeError):
+                                    within_suppression = False
+                            if within_suppression:
+                                logger.info(
+                                    "[PARKING] CV-only intime suppressed (cached LLM=False) "
+                                    "camera=%s roi=%s until=%s",
+                                    camera_id, roi_name, suppress_until,
+                                )
+                                entry_buf[roi_name].pop(tid, None)
+                                continue
+                            verdict = llm_confirms_vehicle_in_slot(
+                                snapshot_url or "", rois, roi_name,
+                            )
+                            if verdict is False:
+                                # LLM saw the frame and there is no vehicle in
+                                # this slot. Suppress the phantom intime and
+                                # mark the slot so we don't re-check for a
+                                # window. (Fall back to existing behaviour on
+                                # None — call failure or no API key — so we
+                                # never regress versus today.)
+                                slot["cv_llm_suppress_until"] = (
+                                    now_dt_ + timedelta(seconds=CV_LLM_SUPPRESS_SECONDS)
+                                ).isoformat()
+                                set_slot_state(camera_id, roi_name, slot)
+                                entry_buf[roi_name].pop(tid, None)
+                                logger.warning(
+                                    "[PARKING] Phantom CV-only intime suppressed by LLM: "
+                                    "camera=%s roi=%s (suppressing for %ds)",
+                                    camera_id, roi_name, CV_LLM_SUPPRESS_SECONDS,
+                                )
+                                continue
+                            if verdict is True:
+                                logger.info(
+                                    "[PARKING] CV-only intime confirmed by LLM: camera=%s roi=%s",
+                                    camera_id, roi_name,
+                                )
+                            # verdict is None → fall through (existing behaviour)
+
                         intime = event_ts
                         # Mark slot occupied before publishing so re-entrant calls can't
                         # double-fire even within the same frame batch

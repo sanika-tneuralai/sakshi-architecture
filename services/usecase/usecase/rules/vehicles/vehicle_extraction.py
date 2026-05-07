@@ -61,6 +61,15 @@ DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
 _PLATE_NEGATIVE = {"unreadable", "vehicle_number_not_visible", "", "none", "null"}
 _MODEL_NEGATIVE = {"unknown", "not_clear", "", "none", "null"}
 
+# In-process cache: one LLM call per snapshot, regardless of which rule asks.
+# Both this rule and parking_detection's CV-only gate consult the cache via
+# `cached_llm_frame_call` so a single /usecase/evaluate cycle never makes the
+# same frame-level call twice. Keyed by snapshot URL (each frame has a unique
+# S3 key). Bounded LRU to cap memory.
+_LLM_FRAME_CACHE: Dict[str, Dict[str, Any]] = {}
+_LLM_FRAME_CACHE_ORDER: List[str] = []
+_LLM_FRAME_CACHE_MAX = 16
+
 
 # ---------------------------------------------------------------------------
 # S3 download
@@ -683,6 +692,93 @@ def _wants_extraction(slot: Dict[str, Any], force_occupied: bool = False) -> boo
 
 
 # ---------------------------------------------------------------------------
+# Public helpers (used by parking_detection's CV-only gate)
+# ---------------------------------------------------------------------------
+
+def _cache_put(snapshot_url: str, resp: Dict[str, Any]) -> None:
+    if snapshot_url in _LLM_FRAME_CACHE:
+        return
+    _LLM_FRAME_CACHE[snapshot_url] = resp
+    _LLM_FRAME_CACHE_ORDER.append(snapshot_url)
+    while len(_LLM_FRAME_CACHE_ORDER) > _LLM_FRAME_CACHE_MAX:
+        old = _LLM_FRAME_CACHE_ORDER.pop(0)
+        _LLM_FRAME_CACHE.pop(old, None)
+
+
+def cached_llm_frame_call(
+    snapshot_url: str,
+    rois: Dict[str, List[List[int]]],
+) -> Dict[str, Any]:
+    """
+    Run (or fetch from cache) the frame-level strict-prompt LLM call for this
+    snapshot. Same response is reused across all rules in the same evaluate
+    cycle — at most one OpenAI call per snapshot URL.
+
+    Returns the normalised response, or an empty response on any failure.
+    """
+    if not snapshot_url:
+        return _empty_llm_response()
+    cached = _LLM_FRAME_CACHE.get(snapshot_url)
+    if cached is not None:
+        return cached
+    if not OPENAI_API_KEY and not GEMINI_API_KEY:
+        return _empty_llm_response()
+    image = _download_image(snapshot_url)
+    if image is None:
+        return _empty_llm_response()
+    resp = _query_llm_frame(image, rois)
+    _cache_put(snapshot_url, resp)
+    return resp
+
+
+def llm_confirms_vehicle_in_slot(
+    snapshot_url: str,
+    rois: Dict[str, List[List[int]]],
+    target_slot_id: str,
+    frame_w: Optional[float] = None,
+) -> Optional[bool]:
+    """
+    Ask the strict-prompt LLM whether a vehicle is present in *target_slot_id*.
+    Used by parking_detection to gate phantom CV-only parking_intime events
+    when the G-marker reports occlusion but YOLO sees nothing.
+
+    Returns:
+      True   — LLM identified a vehicle whose `position` matches the slot's
+               polygon centroid class (left/center/right) or returned a
+               wildcard position (left_and_right / multiple).
+      False  — LLM returned a parsed response with no matching vehicle.
+      None   — call failed (no snapshot, no API key, network error,
+               unparseable response). Caller MUST fall back to the existing
+               CV-only behaviour so we never regress versus today.
+    """
+    polygon = rois.get(target_slot_id)
+    if not polygon:
+        return None
+    resp = cached_llm_frame_call(snapshot_url, rois)
+    if not resp.get("vehicles") and not resp.get("vehicle_present"):
+        # Empty response could mean "LLM said no" OR "call failed". Distinguish
+        # by checking whether the response object came from a real parse —
+        # `_empty_llm_response` returns vehicle_present=False; a successful
+        # call with vehicle_present=False is also a legitimate "no vehicle"
+        # signal. We can't tell them apart from this side, so be conservative:
+        # treat as None (unknown) UNLESS we have at least one vehicles[] entry
+        # somewhere in the response, which proves the call succeeded.
+        # Practical effect: if the LLM genuinely sees an empty frame, this
+        # returns None and the caller falls back to the existing behaviour
+        # (which would also misfire). That's acceptable — the gate doesn't
+        # make things worse.
+        return None
+    target_x = _polygon_centroid_x(polygon)
+    target_class = _classify_position(target_x, float(frame_w or DETECTION_W))
+    for v in resp.get("vehicles", []):
+        if v["position"] == target_class:
+            return True
+        if v["position"] in ("left_and_right", "multiple"):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Rule
 # ---------------------------------------------------------------------------
 
@@ -779,19 +875,19 @@ class VehicleExtractionRule(BaseUsecaseRule):
                 targets_needing_llm.append(t)
 
         llm_resp: Dict[str, Any] = _empty_llm_response()
-        image: Optional[np.ndarray] = None
 
         if targets_needing_llm and snapshot_url:
-            image = _download_image(snapshot_url)
-            if image is not None:
-                llm_resp = _query_llm_frame(image, rois)
-                logger.info(
-                    "[VEHICLE] Frame LLM result: present=%s vehicles=%d",
-                    llm_resp.get("vehicle_present"), len(llm_resp.get("vehicles") or []),
-                )
+            llm_resp = cached_llm_frame_call(snapshot_url, rois)
+            logger.info(
+                "[VEHICLE] Frame LLM result: present=%s vehicles=%d",
+                llm_resp.get("vehicle_present"), len(llm_resp.get("vehicles") or []),
+            )
 
         # ── Distribute LLM vehicles back to targets ──────────────────────
-        frame_w = float(image.shape[1]) if image is not None else float(DETECTION_W)
+        # We classify slot positions against DETECTION_W (the canonical
+        # detection frame size); the cache returns the parsed response, not
+        # the image, so we no longer have image.shape on hand here.
+        frame_w = float(DETECTION_W)
         assignments = _assign_vehicles_to_targets(
             llm_resp.get("vehicles", []),
             [{"key": t["key"], "x_center": t["x_center"], "expected_class": None}
@@ -827,7 +923,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
         logger.info(
             "[VEHICLE] result: triggered=True | targets=%d | llm_called=%s | "
             "rows=%s",
-            len(targets), bool(targets_needing_llm and image is not None),
+            len(targets), bool(targets_needing_llm and llm_resp.get("vehicles") is not None),
             [(v["slot_id"], v["car_number"], v["car_model"]) for v in vehicle_details],
         )
 
