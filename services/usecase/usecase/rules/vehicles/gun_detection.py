@@ -72,6 +72,15 @@ GUN_LLM_PLUGOUT_INTERVAL_S  = int(os.getenv("GUN_LLM_PLUGOUT_INTERVAL_S", "300")
 GUN_LLM_PLUGIN_MAX_POLLS    = int(os.getenv("GUN_LLM_PLUGIN_MAX_POLLS",   "20"))    # ~20 min cap
 GUN_LLM_PLUGIN_CONSECUTIVE  = int(os.getenv("GUN_LLM_PLUGIN_CONSECUTIVE", "2"))     # 2-of-N
 
+# Time-based inferred plug-in for the LLM backend. The visual model has
+# imperfect recall — some camera angles make the cable hard to see and Claude
+# returns "not_plugged_in" even when the OCPP energy meter shows the car is
+# charging. After this many seconds since parking_intime with no LLM-confirmed
+# plug, fire a synthetic gun_plugin so the dashboard isn't stuck on
+# "Plug In: Not yet" indefinitely. The fired event is marked source=inferred
+# so downstream knows it's a fallback, not a visual confirmation.
+GUN_LLM_INFERRED_PLUGIN_SECONDS = int(os.getenv("GUN_LLM_INFERRED_PLUGIN_SECONDS", "180"))  # 3 min
+
 # Provider selection mirrors vehicle_extraction. Set GUN_LLM_PROVIDER to
 # "claude" (default), "openai", or "gemini". All three call sites are kept so
 # switching back is an env-var change, not a code change.
@@ -468,30 +477,50 @@ class GunDetectionRule(BaseUsecaseRule):
                 ):
                     plugout_candidates.append(roi_name)
 
-        slots_to_poll = plugin_candidates + plugout_candidates
-        if not slots_to_poll:
-            return {"triggered": False, "matched_objects": [], "events": []}
+        # Time-based inference: occupied slots that haven't logged plug-in
+        # AND have been parked long enough that we should fire a synthetic
+        # plug_time even if the LLM never confirmed visually. Built here so
+        # we don't return early below when there's nothing to poll but
+        # inference is still due.
+        inference_candidates: List[str] = []
+        for roi_name in rois:
+            slot = get_slot_state(camera_id, roi_name)
+            if not slot.get("occupied") or slot.get("plugin_logged"):
+                continue
+            since_intime = _seconds_since(slot.get("in_time"), now_dt)
+            if since_intime >= GUN_LLM_INFERRED_PLUGIN_SECONDS:
+                inference_candidates.append(roi_name)
 
-        if not snapshot_url:
-            logger.info(
-                "[GUN-LLM] camera=%s no snapshot_url — skipping LLM call (slots=%s)",
-                camera_id, slots_to_poll,
-            )
+        slots_to_poll = plugin_candidates + plugout_candidates
+        if not slots_to_poll and not inference_candidates:
             return {"triggered": False, "matched_objects": [], "events": []}
 
         # ── One LLM call covering every polled slot ───────────────────────
-        slot_polygons = {sid: rois[sid] for sid in slots_to_poll}
-        image = _download_snapshot(snapshot_url)
-        if image is None:
-            logger.warning("[GUN-LLM] camera=%s snapshot download failed — skipping", camera_id)
-            return {"triggered": False, "matched_objects": [], "events": []}
-
-        annotated = _annotate_slots(image, slot_polygons)
-        verdicts  = _query_gun_llm(annotated, slots_to_poll)
-        logger.info(
-            "[GUN-LLM] camera=%s verdicts=%s plugin_targets=%s plugout_targets=%s",
-            camera_id, verdicts, plugin_candidates, plugout_candidates,
-        )
+        # The call is conditional — if slots_to_poll is empty (nothing due
+        # for a poll, only inference) or the snapshot is missing, we skip the
+        # LLM and still fall through to the inference pass below.
+        verdicts: Dict[str, str] = {}
+        if slots_to_poll:
+            if not snapshot_url:
+                logger.info(
+                    "[GUN-LLM] camera=%s no snapshot_url — skipping LLM call (slots=%s)",
+                    camera_id, slots_to_poll,
+                )
+            else:
+                image = _download_snapshot(snapshot_url)
+                if image is None:
+                    logger.warning(
+                        "[GUN-LLM] camera=%s snapshot download failed — skipping",
+                        camera_id,
+                    )
+                else:
+                    slot_polygons = {sid: rois[sid] for sid in slots_to_poll}
+                    annotated = _annotate_slots(image, slot_polygons)
+                    verdicts = _query_gun_llm(annotated, slots_to_poll)
+                    logger.info(
+                        "[GUN-LLM] camera=%s verdicts=%s plugin_targets=%s plugout_targets=%s",
+                        camera_id, verdicts, plugin_candidates, plugout_candidates,
+                    )
 
         # ── Apply verdicts to slot state and emit events ──────────────────
         for roi_name in slots_to_poll:
@@ -578,6 +607,62 @@ class GunDetectionRule(BaseUsecaseRule):
                         camera_id, roi_name,
                     )
 
+            set_slot_state(camera_id, roi_name, slot)
+
+        # ── Inferred plug-in fallback ────────────────────────────────────
+        # The LLM has imperfect recall on some camera angles — the cable can
+        # be hard to see even when the OCPP energy meter shows charging is
+        # happening. Fire a synthetic gun_plugin for any occupied slot that
+        # has been parked past the inference threshold without a confirmed
+        # plug-in. The event is marked source=inferred so downstream knows
+        # it's a fallback rather than a visual confirmation, and plug_time
+        # is anchored at parking_intime + threshold (a reasonable proxy for
+        # when charging actually started).
+        for roi_name in inference_candidates:
+            slot = get_slot_state(camera_id, roi_name)
+            if slot.get("plugin_logged"):
+                # The LLM call above may have just confirmed plug-in for
+                # this slot. Honor that real verdict over inference.
+                continue
+
+            in_time_dt = _parse_iso(slot.get("in_time"))
+            if in_time_dt is None:
+                continue
+            inferred_plug_dt = in_time_dt + timedelta(seconds=GUN_LLM_INFERRED_PLUGIN_SECONDS)
+            plug_time = inferred_plug_dt.isoformat()
+            track_id  = slot.get("track_id") or "unknown"
+            gun_name  = _gun_name_for_roi(roi_name)
+
+            slot["plugin_logged"]      = True
+            slot["plug_time"]          = plug_time
+            slot["plug_time_inferred"] = True
+            slot["gun_name"]           = gun_name
+            slot["last_gun_check_at"]  = now_dt.isoformat()
+            slot["gun_consecutive_pluggedin_count"] = 0
+
+            evt = build_event(
+                event_type="gun_plugin",
+                camera_id=camera_id,
+                timestamp=plug_time,
+                track_id=track_id,
+                metadata={
+                    "gun_name": gun_name,
+                    "roi":      roi_name,
+                    "slot_id":  roi_name,
+                    "source":   "inferred_llm",
+                    "reason":   (
+                        f"no LLM-confirmed plug-in within "
+                        f"{GUN_LLM_INFERRED_PLUGIN_SECONDS}s of parking_intime"
+                    ),
+                },
+            )
+            events.append(evt)
+            publish_sync("gun_events", evt, task_id=task_id)
+            logger.warning(
+                "[GUN-LLM] Plug-in inferred (no visual confirmation in %ds): "
+                "camera=%s roi=%s plug_time=%s",
+                GUN_LLM_INFERRED_PLUGIN_SECONDS, camera_id, roi_name, plug_time,
+            )
             set_slot_state(camera_id, roi_name, slot)
 
         triggered = bool(events)
