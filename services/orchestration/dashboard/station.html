@@ -1037,7 +1037,8 @@ function App() {
           </div>
         </div>
 
-        {/* ── Parking Compliance Violations ── */}
+        {/* ── Parking Compliance Violations (hidden) ── */}
+        {false && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -1066,6 +1067,7 @@ function App() {
             <ComplianceGallery violations={violations} todayOnly={violTodayOnly} />
           </div>
         </div>
+        )}
 
         {/* ── Energy Loss Analysis ── */}
         <div className="mb-8">
