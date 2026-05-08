@@ -7,10 +7,14 @@ position, plate, model, parking_quality. We then assign each LLM-returned
 vehicle to a slot by matching its `position` (left/center/right/...) to the
 slot polygon's centroid class.
 
-Provider selection (env-driven, OpenAI primary, Gemini fallback):
-- OPENAI_API_KEY → OpenAI (gpt-4o by default; override OPENAI_MODEL)
-- GEMINI_API_KEY → Gemini (gemini-2.5-flash; override GEMINI_MODEL)
-  Used as a second opinion when OpenAI returns "unknown"/"unreadable".
+Provider selection (env-driven). Set VEHICLE_LLM_PROVIDER to one of:
+- ``claude`` (default) — Anthropic SDK, claude-sonnet-4-6 by default (override
+  ANTHROPIC_MODEL). Requires ANTHROPIC_API_KEY.
+- ``openai`` — OpenAI primary, Gemini second-opinion fallback to fill negative
+  fields. Requires OPENAI_API_KEY (and optionally GEMINI_API_KEY).
+- ``gemini`` — Gemini only. Requires GEMINI_API_KEY.
+All three call sites are kept — switching providers is an env-var + restart,
+no code change.
 
 Per-slot retry budget is preserved via the shared slot state
 (``slot:{camera_id}:{slot_id}``):
@@ -44,11 +48,19 @@ from workers.redis_state import get_slot_state, set_slot_state
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+# Which provider to call for vehicle extraction. "claude" | "openai" | "gemini".
+# Defaults to claude. Switching back to openai or gemini is a one-line env change
+# — set VEHICLE_LLM_PROVIDER=openai (and OPENAI_API_KEY) and restart.
+VEHICLE_LLM_PROVIDER = os.getenv("VEHICLE_LLM_PROVIDER", "claude").strip().lower()
 
 # Per-slot retry backoff (frames) after a failed attempt.
 _BACKOFF = [10, 20, 9999]
@@ -394,6 +406,86 @@ def _normalise_llm_vehicles(parsed: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _query_claude_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> Dict[str, Any]:
+    """Send the annotated frame to Claude with the strict-prompt schema.
+
+    JSON output is constrained via output_config.format (json_schema), so the
+    response is guaranteed to match the shape _normalise_llm_vehicles expects.
+    Returns the empty response on any failure so callers degrade gracefully.
+    """
+    if not ANTHROPIC_API_KEY:
+        logger.warning("[VEHICLE] ANTHROPIC_API_KEY not set — skipping Claude frame call")
+        return _empty_llm_response()
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        annotated = _annotate_all_slots(image, rois)
+        frame_b64 = _b64_jpeg(annotated, quality=95)
+
+        logger.info("[VEHICLE] Sending frame-level request to Claude (model=%s)", ANTHROPIC_MODEL)
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _FRAME_PROMPT},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": frame_b64,
+                        },
+                    },
+                ],
+            }],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "vehicle_present":   {"type": "boolean"},
+                            "vehicle_positions": {"type": "array", "items": {"type": "string"}},
+                            "vehicles": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "position":             {"type": "string"},
+                                        "car_model":            {"type": "string"},
+                                        "car_number":           {"type": "string"},
+                                        "number_plate_visible": {"type": "boolean"},
+                                        "parking_quality":      {"type": "string"},
+                                    },
+                                    "required": ["position", "car_model", "car_number",
+                                                 "number_plate_visible", "parking_quality"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["vehicle_present", "vehicle_positions", "vehicles"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+
+        text = next(
+            (b.text for b in response.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
+        logger.info("[VEHICLE] Claude raw response: %s", text)
+        if not text:
+            return _empty_llm_response()
+        return _normalise_llm_vehicles(json.loads(text))
+    except Exception as exc:
+        logger.warning("[VEHICLE] Claude frame extraction failed: %s", exc, exc_info=True)
+        return _empty_llm_response()
+
+
 def _query_openai_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
         logger.warning("[VEHICLE] OPENAI_API_KEY not set — skipping OpenAI frame call")
@@ -514,22 +606,43 @@ def _merge_llm(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, 
 
 
 def _query_llm_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> Dict[str, Any]:
-    """OpenAI primary, Gemini second-opinion to fill negative fields."""
-    if OPENAI_API_KEY:
-        primary = _query_openai_frame(image, rois)
-        needs_help = (
-            not primary.get("vehicle_present")
-            or any(v["car_model"] in _MODEL_NEGATIVE or v["car_number"] in _PLATE_NEGATIVE
-                   for v in primary.get("vehicles", []))
-        )
-        if needs_help and GEMINI_API_KEY:
-            logger.info("[VEHICLE] Asking Gemini for second opinion")
-            secondary = _query_gemini_frame(image, rois)
-            primary = _merge_llm(primary, secondary)
-        return primary
-    if GEMINI_API_KEY:
-        return _query_gemini_frame(image, rois)
-    logger.warning("[VEHICLE] No LLM API keys configured")
+    """Dispatch to the provider configured via VEHICLE_LLM_PROVIDER.
+
+    - ``claude`` (default): single Claude call.
+    - ``openai``: OpenAI primary; Gemini second-opinion to fill negative fields
+      (preserves the previous dual-provider behaviour for callers that switch back).
+    - ``gemini``: Gemini only.
+    """
+    if VEHICLE_LLM_PROVIDER == "claude":
+        if ANTHROPIC_API_KEY:
+            return _query_claude_frame(image, rois)
+        logger.warning("[VEHICLE] VEHICLE_LLM_PROVIDER=claude but ANTHROPIC_API_KEY not set")
+        return _empty_llm_response()
+
+    if VEHICLE_LLM_PROVIDER == "openai":
+        if OPENAI_API_KEY:
+            primary = _query_openai_frame(image, rois)
+            needs_help = (
+                not primary.get("vehicle_present")
+                or any(v["car_model"] in _MODEL_NEGATIVE or v["car_number"] in _PLATE_NEGATIVE
+                       for v in primary.get("vehicles", []))
+            )
+            if needs_help and GEMINI_API_KEY:
+                logger.info("[VEHICLE] Asking Gemini for second opinion")
+                secondary = _query_gemini_frame(image, rois)
+                primary = _merge_llm(primary, secondary)
+            return primary
+        logger.warning("[VEHICLE] VEHICLE_LLM_PROVIDER=openai but OPENAI_API_KEY not set")
+        return _empty_llm_response()
+
+    if VEHICLE_LLM_PROVIDER == "gemini":
+        if GEMINI_API_KEY:
+            return _query_gemini_frame(image, rois)
+        logger.warning("[VEHICLE] VEHICLE_LLM_PROVIDER=gemini but GEMINI_API_KEY not set")
+        return _empty_llm_response()
+
+    logger.warning("[VEHICLE] Unknown VEHICLE_LLM_PROVIDER=%r — falling back to empty response",
+                   VEHICLE_LLM_PROVIDER)
     return _empty_llm_response()
 
 

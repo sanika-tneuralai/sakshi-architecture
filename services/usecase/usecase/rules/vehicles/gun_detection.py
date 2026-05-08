@@ -72,7 +72,14 @@ GUN_LLM_PLUGOUT_INTERVAL_S  = int(os.getenv("GUN_LLM_PLUGOUT_INTERVAL_S", "300")
 GUN_LLM_PLUGIN_MAX_POLLS    = int(os.getenv("GUN_LLM_PLUGIN_MAX_POLLS",   "20"))    # ~20 min cap
 GUN_LLM_PLUGIN_CONSECUTIVE  = int(os.getenv("GUN_LLM_PLUGIN_CONSECUTIVE", "2"))     # 2-of-N
 
-# OpenAI primary, Gemini fallback (mirrors vehicle_extraction's selection).
+# Provider selection mirrors vehicle_extraction. Set GUN_LLM_PROVIDER to
+# "claude" (default), "openai", or "gemini". All three call sites are kept so
+# switching back is an env-var change, not a code change.
+GUN_LLM_PROVIDER = os.getenv("GUN_LLM_PROVIDER", "claude").strip().lower()
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -239,6 +246,64 @@ def _build_gun_prompt(slot_ids: List[str]) -> str:
     )
 
 
+def _query_gun_llm_claude(annotated_frame: np.ndarray, slot_ids: List[str]) -> Dict[str, str]:
+    """One Claude vision call. Returns {slot_id: status} for every slot.
+
+    JSON shape is constrained via output_config — the schema is built from
+    slot_ids so Claude returns one key per slot.
+    """
+    if not ANTHROPIC_API_KEY:
+        return {sid: "unclear" for sid in slot_ids}
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        prompt = _build_gun_prompt(slot_ids)
+        b64 = _frame_to_b64(annotated_frame)
+
+        logger.info("[GUN-LLM] Claude request slots=%s", slot_ids)
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=512,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64,
+                        },
+                    },
+                ],
+            }],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {sid: {"type": "string"} for sid in slot_ids},
+                        "required": list(slot_ids),
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+        text = next(
+            (b.text for b in response.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
+        logger.info("[GUN-LLM] Claude response: %s", text)
+        if not text:
+            return {sid: "unclear" for sid in slot_ids}
+        parsed = json.loads(text)
+        return {sid: str(parsed.get(sid, "unclear")).strip().lower() for sid in slot_ids}
+    except Exception as exc:
+        logger.warning("[GUN-LLM] Claude call failed: %s", exc, exc_info=True)
+        return {sid: "unclear" for sid in slot_ids}
+
+
 def _query_gun_llm_openai(annotated_frame: np.ndarray, slot_ids: List[str]) -> Dict[str, str]:
     """One OpenAI vision call. Returns {slot_id: status} for every slot.
 
@@ -315,13 +380,36 @@ def _query_gun_llm_gemini(annotated_frame: np.ndarray, slot_ids: List[str]) -> D
 
 
 def _query_gun_llm(annotated_frame: np.ndarray, slot_ids: List[str]) -> Dict[str, str]:
-    """OpenAI primary; Gemini fallback only if OpenAI returned all-unclear."""
-    if OPENAI_API_KEY:
-        result = _query_gun_llm_openai(annotated_frame, slot_ids)
-        if any(v in ("plugged_in", "not_plugged_in") for v in result.values()):
-            return result
-    if GEMINI_API_KEY:
-        return _query_gun_llm_gemini(annotated_frame, slot_ids)
+    """Dispatch to the provider configured via GUN_LLM_PROVIDER.
+
+    - ``claude`` (default): single Claude call.
+    - ``openai``: OpenAI primary; Gemini fallback only if OpenAI returns
+      all-unclear (preserves the previous behaviour for callers switching back).
+    - ``gemini``: Gemini only.
+    """
+    if GUN_LLM_PROVIDER == "claude":
+        if ANTHROPIC_API_KEY:
+            return _query_gun_llm_claude(annotated_frame, slot_ids)
+        logger.warning("[GUN-LLM] GUN_LLM_PROVIDER=claude but ANTHROPIC_API_KEY not set")
+        return {sid: "unclear" for sid in slot_ids}
+
+    if GUN_LLM_PROVIDER == "openai":
+        if OPENAI_API_KEY:
+            result = _query_gun_llm_openai(annotated_frame, slot_ids)
+            if any(v in ("plugged_in", "not_plugged_in") for v in result.values()):
+                return result
+        if GEMINI_API_KEY:
+            return _query_gun_llm_gemini(annotated_frame, slot_ids)
+        return {sid: "unclear" for sid in slot_ids}
+
+    if GUN_LLM_PROVIDER == "gemini":
+        if GEMINI_API_KEY:
+            return _query_gun_llm_gemini(annotated_frame, slot_ids)
+        logger.warning("[GUN-LLM] GUN_LLM_PROVIDER=gemini but GEMINI_API_KEY not set")
+        return {sid: "unclear" for sid in slot_ids}
+
+    logger.warning("[GUN-LLM] Unknown GUN_LLM_PROVIDER=%r — returning all-unclear",
+                   GUN_LLM_PROVIDER)
     return {sid: "unclear" for sid in slot_ids}
 
 
