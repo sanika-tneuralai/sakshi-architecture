@@ -1759,22 +1759,40 @@ def dashboard_energy_comparison_upload(
 @app.post("/dashboard/energy-analysis", tags=["dashboard"])
 def dashboard_energy_analysis(request: dict):
     """
-    Accept matched energy-comparison results and use OpenAI to generate
-    a natural-language insight report identifying:
+    Accept matched energy-comparison results and use an LLM to generate a
+    natural-language insight report identifying:
       - Cars consuming the most energy
       - Cars with the highest energy loss vs client OCPP data
       - Unusual or repeated patterns
       - Summary recommendations
 
+    Provider is env-driven (DASHBOARD_LLM_PROVIDER):
+    - "claude" (default) — Anthropic SDK, claude-sonnet-4-6 by default
+      (override ANTHROPIC_MODEL). Requires ANTHROPIC_API_KEY.
+    - "openai"           — gpt-4o. Requires OPENAI_API_KEY.
+
+    Both call sites are kept so switching back is one env-var change.
+
     Request body: { "results": [...], "summary": {...} }
-    Returns: { "insight": "<markdown text>" }
+    Returns: { "insight": "<json object>" }
     """
     import os
     import json
 
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    if not OPENAI_API_KEY:
+    DASHBOARD_LLM_PROVIDER = os.getenv("DASHBOARD_LLM_PROVIDER", "claude").strip().lower()
+    ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_MODEL        = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    OPENAI_API_KEY         = os.getenv("OPENAI_API_KEY", "")
+
+    if DASHBOARD_LLM_PROVIDER == "claude" and not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured on server")
+    if DASHBOARD_LLM_PROVIDER == "openai" and not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
+    if DASHBOARD_LLM_PROVIDER not in ("claude", "openai"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unknown DASHBOARD_LLM_PROVIDER={DASHBOARD_LLM_PROVIDER!r}; expected 'claude' or 'openai'",
+        )
 
     results  = request.get("results", [])
     summary  = request.get("summary", {})
@@ -1826,21 +1844,61 @@ def dashboard_energy_analysis(request: dict):
 Be concise. Use actual VRNs and numbers from the data.
 """
 
+    raw = ""
+    structured = None
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content.strip()
-        structured = json.loads(raw)
+        if DASHBOARD_LLM_PROVIDER == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "top_consumer":    {"type": "string"},
+                                "highest_loss":    {"type": "string"},
+                                "patterns":        {"type": "array", "items": {"type": "string"}},
+                                "unmatched_note":  {"type": "string"},
+                                "recommendations": {"type": "array", "items": {"type": "string"}},
+                                "risk_level":      {"type": "string"},
+                            },
+                            "required": [
+                                "top_consumer", "highest_loss", "patterns",
+                                "unmatched_note", "recommendations", "risk_level",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            )
+            raw = next(
+                (b.text for b in response.content if getattr(b, "type", None) == "text"),
+                "",
+            ).strip()
+        else:  # openai
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content.strip()
+
+        structured = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
         structured = {"raw": raw}
     except Exception as e:
-        logger.warning(f"[OPENAI] Energy analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+        logger.warning(f"[{DASHBOARD_LLM_PROVIDER.upper()}] Energy analysis failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{DASHBOARD_LLM_PROVIDER} API error: {str(e)}",
+        )
 
     return {"insight": structured}
 
