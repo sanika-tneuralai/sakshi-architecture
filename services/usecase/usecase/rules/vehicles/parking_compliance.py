@@ -28,6 +28,7 @@ The orchestrator injects them via detection_output["rois"]:
     }
 """
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, List
 
@@ -53,6 +54,16 @@ WRONG_PARKING_OVERLAP = 0.50
 # false unauthorized_parking. Dwell time eliminates the in-transit case.
 UNAUTH_DWELL_SECONDS = 60
 
+# Containment threshold for the "duplicate-detection" filter. When YOLO
+# multi-detects a single physical car (a fragment like a bumper or hood gets
+# its own bbox + track_id), the fragment's bbox is mostly contained within the
+# main car's bbox even if its centroid happens to lie outside every ROI. We
+# measure intersection_area / min(bbox_area_a, bbox_area_b) and skip the
+# unauthorized-parking branch when this is above the threshold — the "outside"
+# track is almost certainly a duplicate of an in-slot car. 0.5 = the smaller
+# bbox is at least half-inside the larger one.
+DUPLICATE_DETECTION_CONTAINMENT = float(os.getenv("UNAUTH_DUPLICATE_CONTAINMENT", "0.5"))
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -71,6 +82,36 @@ def _event_ts(detection_output: Dict[str, Any]) -> str:
             ts = ts.replace(tzinfo=timezone.utc)
         return ts.isoformat()
     return _now()
+
+
+def _bbox_containment(a: dict, b: dict) -> float:
+    """Intersection area divided by the smaller bbox's area.
+
+    Returns a value in [0, 1]. 1.0 means the smaller bbox is entirely inside
+    the larger one. Used to detect YOLO multi-detections of the same physical
+    car: a fragment bbox (bumper, hood) is mostly contained within the main
+    car's bbox even when its centroid happens to fall outside every ROI.
+    """
+    if not a or not b:
+        return 0.0
+    keys = ("x1", "y1", "x2", "y2")
+    if not all(k in a for k in keys) or not all(k in b for k in keys):
+        return 0.0
+    ix1 = max(float(a["x1"]), float(b["x1"]))
+    iy1 = max(float(a["y1"]), float(b["y1"]))
+    ix2 = min(float(a["x2"]), float(b["x2"]))
+    iy2 = min(float(a["y2"]), float(b["y2"]))
+    iw  = max(0.0, ix2 - ix1)
+    ih  = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    a_area = max(0.0, float(a["x2"]) - float(a["x1"])) * max(0.0, float(a["y2"]) - float(a["y1"]))
+    b_area = max(0.0, float(b["x2"]) - float(b["x1"])) * max(0.0, float(b["y2"]) - float(b["y1"]))
+    smaller = min(a_area, b_area)
+    if smaller <= 0:
+        return 0.0
+    return inter / smaller
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -142,6 +183,21 @@ class ParkingComplianceRule(BaseUsecaseRule):
         # Track which track_ids are active this frame (outside all ROIs)
         active_unauthorized: set = set()
 
+        # Pre-pass: collect bboxes of any car that overlaps a slot this frame.
+        # YOLO can multi-detect a single physical car (one bbox in the slot,
+        # a second fragment bbox outside the slot). The unauthorized-parking
+        # branch below uses these to skip phantom "outside" tracks that are
+        # spatially the same vehicle.
+        in_slot_bboxes: List[dict] = []
+        for c in cars:
+            bb = c.get("bbox") or {}
+            if not all(k in bb for k in ("x1", "y1", "x2", "y2")):
+                continue
+            if which_rois(bb, rois) or which_rois_bbox_overlap(
+                bb, rois, overlap_threshold=WRONG_PARKING_OVERLAP,
+            ):
+                in_slot_bboxes.append(bb)
+
         if not cars:
             print(f"[COMPLIANCE] no cars — skipping violation check")
         else:
@@ -171,6 +227,31 @@ class ParkingComplianceRule(BaseUsecaseRule):
                 })
 
                 if len(all_matched_rois) == 0:
+                    # ── Duplicate-detection guard ─────────────────────────────
+                    # If this "outside" bbox is mostly contained within an
+                    # in-slot car's bbox, it's almost certainly a YOLO
+                    # multi-detection of the same physical car (a bumper or
+                    # hood fragment that happens to have a centroid outside
+                    # every ROI). Skip the unauthorized branch entirely so we
+                    # don't open a parallel ChargingSession row for a phantom
+                    # track. Reset the dwell counter so an actual exit later
+                    # still gets a clean window.
+                    bb = car.get("bbox") or {}
+                    best_containment = max(
+                        (_bbox_containment(bb, slot_bb) for slot_bb in in_slot_bboxes),
+                        default=0.0,
+                    )
+                    if best_containment >= DUPLICATE_DETECTION_CONTAINMENT:
+                        logger.info(
+                            "[COMPLIANCE] Skipping unauthorized for track=%s — "
+                            "duplicate of in-slot car (containment=%.2f)",
+                            track_id, best_containment,
+                        )
+                        slot["outside_since"] = None
+                        slot["wrong_buf"] = 0
+                        slot["exit_buf"] = 0
+                        continue
+
                     # ── Unauthorized parking (dwell-gated) ────────────────────
                     # The violation only fires after the same tracked car has
                     # been outside every ROI for UNAUTH_DWELL_SECONDS of
