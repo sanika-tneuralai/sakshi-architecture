@@ -498,6 +498,13 @@ function ComplianceGallery({ violations, todayOnly }) {
 }
 
 /* ── Energy Loss Table ── */
+const CONFIDENCE_LABEL = {
+  HIGH:      'Reliable',
+  MEDIUM:    'Approximate',
+  LOW:       'Weak',
+  UNMATCHED: 'No match',
+};
+
 function ConfidenceBadge({ level }) {
   const styles = {
     HIGH:      'bg-success-100 text-success-700',
@@ -506,9 +513,44 @@ function ConfidenceBadge({ level }) {
     UNMATCHED: 'bg-slate-100 text-slate-500',
   };
   return (
-    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${styles[level] || styles.UNMATCHED}`}>
-      {level}
+    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${styles[level] || styles.UNMATCHED}`}>
+      {CONFIDENCE_LABEL[level] || level}
     </span>
+  );
+}
+
+/* Map raw matcher reasons → plain-English signal chips.
+   Collapse duplicates (e.g. "duration" + "time" both mean a time-based signal). */
+function humaniseReasons(reasons) {
+  if (!reasons || !reasons.length) return [];
+  const chips = [];
+  const seen = new Set();
+  const add = (label) => { if (!seen.has(label)) { seen.add(label); chips.push(label); } };
+  for (const r of reasons) {
+    if (r === 'VRN') add('Plate');
+    else if (r === 'model') add('Model');
+    else if (r === 'gun') add('Gun');
+    else if (r.startsWith('duration±') || r.startsWith('time±')) add('Time');
+    // Skip 'date' (always true within a day), conflicts, and debug penalties.
+  }
+  return chips;
+}
+
+function MatchQualityCell({ confidence, reasons }) {
+  const chips = humaniseReasons(reasons);
+  return (
+    <div className="flex flex-col gap-1">
+      <ConfidenceBadge level={confidence} />
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1" title={`Matched on ${chips.join(' · ')}`}>
+          {chips.map(c => (
+            <span key={c} className="inline-block px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-medium">
+              {c}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -523,7 +565,27 @@ function fmtDurationSecs(secs) {
 }
 
 function EnergyLossTable({ results, summary }) {
-  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)', 'Match', 'Why'];
+  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)'];
+  const [dateFilter, setDateFilter] = React.useState('all');
+
+  // Distinct OCPP dates from the current upload (sorted newest-first).
+  const availableDates = React.useMemo(() => {
+    if (!results) return [];
+    const set = new Set();
+    for (const r of results) if (r.ocpp_date) set.add(r.ocpp_date);
+    return Array.from(set).sort().reverse();
+  }, [results]);
+
+  // Reset filter when a fresh upload changes the available date set.
+  React.useEffect(() => {
+    if (dateFilter !== 'all' && !availableDates.includes(dateFilter)) setDateFilter('all');
+  }, [availableDates]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filteredResults = React.useMemo(() => {
+    if (!results) return results;
+    if (dateFilter === 'all') return results;
+    return results.filter(r => r.ocpp_date === dateFilter);
+  }, [results, dateFilter]);
 
   if (!results || !results.length) {
     return (
@@ -533,18 +595,52 @@ function EnergyLossTable({ results, summary }) {
     );
   }
 
+  // Recompute summary metrics over the filtered rows so the strip reflects
+  // exactly what's on screen.
+  const visibleSummary = React.useMemo(() => {
+    if (dateFilter === 'all' || !summary) return summary;
+    const rows = filteredResults || [];
+    let matched = 0, client = 0, loss = 0, hasLoss = false;
+    for (const r of rows) {
+      if (r.matched_session_id != null) matched += 1;
+      if (typeof r.client_kwh === 'number') client += r.client_kwh;
+      if (typeof r.loss_kwh === 'number') { loss += r.loss_kwh; hasLoss = true; }
+    }
+    return {
+      ...summary,
+      total: rows.length,
+      matched,
+      unmatched: rows.length - matched,
+      total_client_kwh: client,
+      total_loss_kwh: hasLoss ? loss : null,
+    };
+  }, [filteredResults, dateFilter, summary]);
+
   return (
     <div>
-      {summary && (
-        <div className="flex flex-wrap gap-4 px-4 py-3 bg-slate-50 border-b border-slate-100 text-xs text-slate-600">
-          <div><span className="font-semibold text-slate-700">{summary.total}</span> rows</div>
-          <div><span className="font-semibold text-success-700">{summary.matched}</span> matched</div>
-          <div><span className="font-semibold text-slate-500">{summary.unmatched}</span> unmatched</div>
-          {summary.total_client_kwh != null && (
-            <div>Client total: <span className="font-semibold text-slate-700">{summary.total_client_kwh.toFixed(2)} kWh</span></div>
+      {visibleSummary && (
+        <div className="flex flex-wrap items-center gap-4 px-4 py-3 bg-slate-50 border-b border-slate-100 text-xs text-slate-600">
+          {availableDates.length > 1 && (
+            <label className="flex items-center gap-2">
+              <span className="font-semibold text-slate-500 uppercase tracking-wider text-[10px]">Date</span>
+              <select
+                value={dateFilter}
+                onChange={e => setDateFilter(e.target.value)}
+                className="px-2 py-1 rounded border border-slate-200 bg-white text-xs text-slate-700 focus:outline-none focus:border-brand-400"
+              >
+                <option value="all">All ({availableDates.length})</option>
+                {availableDates.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </label>
           )}
-          {summary.total_loss_kwh != null && (
-            <div>Total loss: <span className={`font-semibold ${summary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{summary.total_loss_kwh.toFixed(2)} kWh</span></div>
+          <div><span className="font-semibold text-slate-700">{visibleSummary.total}</span> rows</div>
+          <div><span className="font-semibold text-success-700">{visibleSummary.matched}</span> matched</div>
+          <div><span className="font-semibold text-slate-500">{visibleSummary.unmatched}</span> unmatched</div>
+          {visibleSummary.total_client_kwh != null && (
+            <div>Client total: <span className="font-semibold text-slate-700">{visibleSummary.total_client_kwh.toFixed(2)} kWh</span></div>
+          )}
+          {visibleSummary.total_loss_kwh != null && (
+            <div>Total loss: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{visibleSummary.total_loss_kwh.toFixed(2)} kWh</span></div>
           )}
         </div>
       )}
@@ -560,7 +656,7 @@ function EnergyLossTable({ results, summary }) {
             </tr>
           </thead>
           <tbody>
-            {results.map((r, i) => {
+            {(filteredResults || []).map((r, i) => {
               const loss = r.loss_kwh;
               const hasLoss = loss != null;
               return (
@@ -569,6 +665,9 @@ function EnergyLossTable({ results, summary }) {
                   <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(r.vrn) || <NA />}</td>
                   <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
                     {display([r.make, r.model].filter(Boolean).join(' ')) || <NA />}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap align-top">
+                    <MatchQualityCell confidence={r.confidence} reasons={r.match_reasons} />
                   </td>
                   <td className="px-4 py-3 text-slate-600 text-xs">{r.connector_id ?? <NA text="—" />}</td>
                   <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{fmtDurationSecs(r.duration_seconds) || <NA text="—" />}</td>
@@ -580,10 +679,6 @@ function EnergyLossTable({ results, summary }) {
                         {loss.toFixed(3)}
                       </span>
                     ) : <NA text="—" />}
-                  </td>
-                  <td className="px-4 py-3 whitespace-nowrap"><ConfidenceBadge level={r.confidence} /></td>
-                  <td className="px-4 py-3 text-slate-500 text-xs" title={(r.match_reasons || []).join(', ')}>
-                    {(r.match_reasons || []).join(', ') || <NA text="—" />}
                   </td>
                 </tr>
               );
@@ -656,25 +751,21 @@ function BarChart({ labels, datasets, title }) {
 }
 
 /* ── Insight Panel ── */
-function InsightPanel({ insight, results, onDismiss }) {
+function InsightPanel({ insight, aggregates, results, onDismiss }) {
   const isRaw = !!insight.raw;
 
-  // ── Build chart data from raw lossResults ──────────────────────────────
-  const chartData = React.useMemo(() => {
-    if (!results || !results.length) return null;
-    const rows = results
-      .filter(r => r.client_kwh != null)
-      .sort((a, b) => (b.client_kwh || 0) - (a.client_kwh || 0))
-      .slice(0, 8);
-    if (!rows.length) return null;
-    const labels = rows.map(r => r.vrn || r.make || `Row ${r.excel_row}`);
+  // The one chart that's actually actionable: loss by vehicle model.
+  // (Hour-of-day stays as a narrative card if the LLM finds a correlation;
+  // a separate chart for it adds visual noise without action items.)
+  const modelChart = React.useMemo(() => {
+    const rows = aggregates && aggregates.by_model;
+    if (!rows || !rows.length) return null;
+    const top = rows.slice(0, 8);
     return {
-      labels,
-      clientKwh: rows.map(r => r.client_kwh || 0),
-      meterKwh:  rows.map(r => r.meter_kwh  || 0),
-      lossKwh:   rows.map(r => r.loss_kwh   || 0),
+      labels:  top.map(m => m.model),
+      lossKwh: top.map(m => m.loss_kwh),
     };
-  }, [results]);
+  }, [aggregates]);
 
   const riskColors = {
     HIGH:   { bg: 'bg-rose-50',   text: 'text-rose-700',   ring: 'ring-rose-200',   dot: 'bg-rose-500' },
@@ -684,6 +775,14 @@ function InsightPanel({ insight, results, onDismiss }) {
   const risk = insight.risk_level || 'LOW';
   const rc   = riskColors[risk] || riskColors.LOW;
 
+  // Sub-insights: render only those the model populated.
+  const subInsights = [
+    { key: 'model_pattern',     label: 'By Model',          text: insight.model_pattern },
+    { key: 'connector_pattern', label: 'By Connector',      text: insight.connector_pattern },
+    { key: 'parallel_pattern',  label: 'Solo vs Parallel',  text: insight.parallel_pattern },
+    { key: 'hour_pattern',      label: 'By Hour',           text: insight.hour_pattern },
+  ].filter(s => s.text);
+
   return (
     <div className="mt-5 space-y-4">
       {/* Header */}
@@ -692,7 +791,7 @@ function InsightPanel({ insight, results, onDismiss }) {
           <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4 text-violet-600">
             <path d="M12 2L9 9H2L7.5 13.5L5.5 21L12 17L18.5 21L16.5 13.5L22 9H15L12 2Z" fill="currentColor"/>
           </svg>
-          <span className="text-sm font-bold text-slate-700">AI Energy Insight</span>
+          <span className="text-sm font-bold text-slate-700">AI Energy Loss Analysis</span>
           {!isRaw && (
             <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ring-1 ring-inset ${rc.bg} ${rc.text} ${rc.ring}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${rc.dot}`} />
@@ -707,46 +806,41 @@ function InsightPanel({ insight, results, onDismiss }) {
         <div className="bg-white rounded-2xl shadow-card px-5 py-4 text-sm text-slate-700 whitespace-pre-wrap">{insight.raw}</div>
       ) : (
         <>
-          {/* Top 2 highlight cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {insight.top_consumer && (
-              <div className="bg-white rounded-2xl shadow-card p-4 border-l-4 border-brand-500">
-                <p className="text-xs font-bold text-brand-600 uppercase tracking-wider mb-1">Top Energy Consumer</p>
-                <p className="text-sm text-slate-700">{insight.top_consumer}</p>
-              </div>
-            )}
-            {insight.highest_loss && (
-              <div className="bg-white rounded-2xl shadow-card p-4 border-l-4 border-rose-500">
-                <p className="text-xs font-bold text-rose-600 uppercase tracking-wider mb-1">Highest Energy Loss</p>
-                <p className="text-sm text-slate-700">{insight.highest_loss}</p>
-              </div>
-            )}
-          </div>
+          {/* Headline: where is the loss concentrated */}
+          {insight.loss_breakdown && (
+            <div className="bg-white rounded-2xl shadow-card p-4 border-l-4 border-rose-500">
+              <p className="text-xs font-bold text-rose-600 uppercase tracking-wider mb-1">Where The Loss Is</p>
+              <p className="text-sm text-slate-700">{insight.loss_breakdown}</p>
+            </div>
+          )}
 
-          {/* Charts */}
-          {chartData && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-white rounded-2xl shadow-card p-4">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Client vs Meter kWh</p>
-                <BarChart
-                  labels={chartData.labels}
-                  datasets={[
-                    { label: 'Client kWh', data: chartData.clientKwh, backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 },
-                    { label: 'Meter kWh',  data: chartData.meterKwh,  backgroundColor: 'rgba(34,197,94,0.7)',  borderRadius: 4 },
-                  ]}
-                />
-              </div>
-              <div className="bg-white rounded-2xl shadow-card p-4">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Energy Loss per Car (kWh)</p>
-                <BarChart
-                  labels={chartData.labels}
-                  datasets={[
-                    { label: 'Loss kWh', data: chartData.lossKwh,
-                      backgroundColor: chartData.lossKwh.map(v => v > 1 ? 'rgba(244,63,94,0.75)' : 'rgba(100,116,139,0.4)'),
-                      borderRadius: 4 },
-                  ]}
-                />
-              </div>
+          {/* Sub-dimension narratives */}
+          {subInsights.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {subInsights.map(s => (
+                <div key={s.key} className="bg-white rounded-xl shadow-card px-4 py-3">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">{s.label}</p>
+                  <p className="text-sm text-slate-700">{s.text}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Single chart: loss by model — clearest action signal */}
+          {modelChart && (
+            <div className="bg-white rounded-2xl shadow-card p-4">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Loss by Vehicle Model (top 8 by absolute loss)</p>
+              <BarChart
+                labels={modelChart.labels}
+                datasets={[
+                  { label: 'Loss kWh', data: modelChart.lossKwh,
+                    backgroundColor: modelChart.lossKwh.map(v =>
+                      v > 5 ? 'rgba(244,63,94,0.75)'
+                      : v > 1 ? 'rgba(245,158,11,0.7)'
+                      : 'rgba(100,116,139,0.4)'),
+                    borderRadius: 4 },
+                ]}
+              />
             </div>
           )}
 
@@ -779,14 +873,6 @@ function InsightPanel({ insight, results, onDismiss }) {
               </div>
             )}
           </div>
-
-          {/* Unmatched note */}
-          {insight.unmatched_note && (
-            <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 flex gap-2 text-sm text-amber-700">
-              <IconWarning />
-              <span>{insight.unmatched_note}</span>
-            </div>
-          )}
         </>
       )}
     </div>
@@ -838,9 +924,10 @@ function App() {
   const [uploadName,  setUploadName]  = React.useState(null);
   const [filterDate,  setFilterDate]  = React.useState(todayIST());
   const [violTodayOnly, setViolTodayOnly] = React.useState(true);
-  const [insight,     setInsight]     = React.useState(null);
-  const [analysing,   setAnalysing]   = React.useState(false);
-  const [analyseError,setAnalyseError]= React.useState(null);
+  const [insight,            setInsight]            = React.useState(null);
+  const [insightAggregates,  setInsightAggregates]  = React.useState(null);
+  const [analysing,          setAnalysing]          = React.useState(false);
+  const [analyseError,       setAnalyseError]       = React.useState(null);
 
   const handleExcelUpload = async (file) => {
     if (!file) return;
@@ -887,6 +974,7 @@ function App() {
       }
       const data = await res.json();
       setInsight(data.insight || 'No insight returned.');
+      setInsightAggregates(data.aggregates || null);
     } catch (e) {
       setAnalyseError(e.message);
     } finally {
@@ -1137,7 +1225,7 @@ function App() {
               <IconWarning /><span className="font-medium">Analysis failed:</span> {analyseError}
             </div>
           )}
-          {insight && <InsightPanel insight={insight} results={lossResults} onDismiss={() => setInsight(null)} />}
+          {insight && <InsightPanel insight={insight} aggregates={insightAggregates} results={lossResults} onDismiss={() => { setInsight(null); setInsightAggregates(null); }} />}
         </div>
 
 

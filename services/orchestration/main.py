@@ -1772,25 +1772,31 @@ def dashboard_energy_comparison_upload(
 @app.post("/dashboard/energy-analysis", tags=["dashboard"])
 def dashboard_energy_analysis(request: dict):
     """
-    Accept matched energy-comparison results and use an LLM to generate a
-    natural-language insight report identifying:
-      - Cars consuming the most energy
-      - Cars with the highest energy loss vs client OCPP data
-      - Unusual or repeated patterns
-      - Summary recommendations
+    Diagnose where the client's per-session energy loss is concentrated.
+
+    For each matched session we have `loss_kwh = client_kwh − meter_kwh`. The
+    operator wants to know which dimension explains most of that loss:
+      - Car model (Excel-side, authoritative — CCTV model is unreliable)
+      - Connector
+      - Solo vs parallel charging (parallel = other connector active during
+        this session's OCPP window; the shared meter double-counts in those
+        windows, so per-session loss is most trustworthy on solo sessions)
+      - Hour-of-day (correlated with parallel — peak hours typically overlap)
+
+    Aggregates are computed in Python BEFORE the LLM call so the model can
+    narrate solid numbers instead of guessing arithmetic across many rows.
 
     Provider is env-driven (DASHBOARD_LLM_PROVIDER):
     - "claude" (default) — Anthropic SDK, claude-sonnet-4-6 by default
       (override ANTHROPIC_MODEL). Requires ANTHROPIC_API_KEY.
     - "openai"           — gpt-4o. Requires OPENAI_API_KEY.
 
-    Both call sites are kept so switching back is one env-var change.
-
     Request body: { "results": [...], "summary": {...} }
-    Returns: { "insight": "<json object>" }
+    Returns: { "insight": <json>, "aggregates": <json> }
     """
     import os
     import json
+    from collections import defaultdict
 
     DASHBOARD_LLM_PROVIDER = os.getenv("DASHBOARD_LLM_PROVIDER", "claude").strip().lower()
     ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
@@ -1813,48 +1819,222 @@ def dashboard_energy_analysis(request: dict):
     if not results:
         raise HTTPException(status_code=400, detail="No results provided for analysis")
 
-    # Build a compact data table for the prompt
-    table_lines = ["VRN | Make | Model | Connector | Duration(min) | Client kWh | Meter kWh | Loss kWh | Match"]
-    table_lines.append("----|------|-------|-----------|---------------|------------|-----------|----------|------")
-    for r in results:
-        vrn      = r.get("vrn") or "—"
-        make     = r.get("make") or "—"
-        model    = r.get("model") or "—"
-        conn     = r.get("connector_id") or "—"
-        dur_min  = round(r.get("duration_seconds", 0) / 60, 1) if r.get("duration_seconds") else "—"
-        c_kwh    = r.get("client_kwh")
-        m_kwh    = r.get("meter_kwh")
-        loss     = r.get("loss_kwh")
-        conf     = r.get("confidence", "UNMATCHED")
-        table_lines.append(
-            f"{vrn} | {make} | {model} | {conn} | {dur_min} | "
-            f"{c_kwh if c_kwh is not None else '—'} | "
-            f"{m_kwh if m_kwh is not None else '—'} | "
-            f"{loss if loss is not None else '—'} | {conf}"
-        )
+    # ── Aggregates ──────────────────────────────────────────────────────────
+    def _parse_dt(s):
+        if not s:
+            return None
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return None
 
-    prompt = f"""You are an EV charging station energy analyst. Analyse the charging session data below and return ONLY a valid JSON object — no markdown, no code fences, no extra text.
+    def _pct(num, denom):
+        return (num / denom * 100.0) if denom else 0.0
 
-## Summary
-- Total sessions: {summary.get('total', '?')}
-- Matched: {summary.get('matched', '?')}, Unmatched: {summary.get('unmatched', '?')}
-- Total client kWh: {summary.get('total_client_kwh', '?')}
-- Total energy loss (client − meter): {summary.get('total_loss_kwh', '?')} kWh
+    matched = [
+        r for r in results
+        if r.get("matched_session_id") is not None
+        and r.get("client_kwh") is not None
+        and r.get("meter_kwh") is not None
+    ]
 
-## Session Data
-{chr(10).join(table_lines)}
+    # Per-model — Excel make+model is authoritative even when CCTV missed
+    # the vehicle, because matching pulled in the right session via VRN /
+    # duration / gun / time.
+    by_model = defaultdict(lambda: {"sessions": 0, "client_kwh": 0.0, "meter_kwh": 0.0, "loss_kwh": 0.0})
+    for r in matched:
+        key = " ".join(filter(None, [r.get("make"), r.get("model")])).strip() or "Unknown"
+        by_model[key]["sessions"]   += 1
+        by_model[key]["client_kwh"] += r["client_kwh"]
+        by_model[key]["meter_kwh"]  += r["meter_kwh"]
+        by_model[key]["loss_kwh"]   += r.get("loss_kwh") or 0.0
+    model_list = sorted(
+        [
+            {
+                "model": m,
+                "sessions": v["sessions"],
+                "client_kwh": round(v["client_kwh"], 2),
+                "meter_kwh":  round(v["meter_kwh"],  2),
+                "loss_kwh":   round(v["loss_kwh"],   2),
+                "loss_pct":   round(_pct(v["loss_kwh"], v["client_kwh"]), 1),
+            }
+            for m, v in by_model.items()
+        ],
+        key=lambda d: -abs(d["loss_kwh"]),
+    )
 
-## Required JSON shape (return exactly this, filled in):
+    # Per-connector.
+    by_connector = defaultdict(lambda: {"sessions": 0, "client_kwh": 0.0, "meter_kwh": 0.0, "loss_kwh": 0.0})
+    for r in matched:
+        c = r.get("connector_id")
+        if c is None:
+            continue
+        by_connector[c]["sessions"]   += 1
+        by_connector[c]["client_kwh"] += r["client_kwh"]
+        by_connector[c]["meter_kwh"]  += r["meter_kwh"]
+        by_connector[c]["loss_kwh"]   += r.get("loss_kwh") or 0.0
+    connector_list = [
+        {
+            "connector": c,
+            "sessions": v["sessions"],
+            "client_kwh": round(v["client_kwh"], 2),
+            "meter_kwh":  round(v["meter_kwh"],  2),
+            "loss_kwh":   round(v["loss_kwh"],   2),
+            "loss_pct":   round(_pct(v["loss_kwh"], v["client_kwh"]), 1),
+        }
+        for c, v in sorted(by_connector.items())
+    ]
+
+    # Solo vs parallel — a session is "parallel" when another matched session
+    # on the OTHER connector overlapped its OCPP window. Pre-flag once per
+    # matched row so the hourly breakdown can reuse it.
+    parallel_flag: dict[int, bool] = {}
+    intervals = []
+    for idx, r in enumerate(matched):
+        st = _parse_dt(r.get("ocpp_start_time"))
+        et = _parse_dt(r.get("ocpp_end_time"))
+        if st is None or et is None or r.get("connector_id") is None:
+            continue
+        intervals.append((idx, st, et, r["connector_id"]))
+    for i, (idx_i, st_i, et_i, c_i) in enumerate(intervals):
+        is_parallel = False
+        for j, (idx_j, st_j, et_j, c_j) in enumerate(intervals):
+            if i == j or c_j == c_i:
+                continue
+            if st_j < et_i and st_i < et_j:
+                is_parallel = True
+                break
+        parallel_flag[idx_i] = is_parallel
+
+    solo  = {"sessions": 0, "client_kwh": 0.0, "loss_kwh": 0.0}
+    para  = {"sessions": 0, "client_kwh": 0.0, "loss_kwh": 0.0}
+    for idx, r in enumerate(matched):
+        bucket = para if parallel_flag.get(idx) else solo
+        bucket["sessions"]   += 1
+        if r.get("client_kwh") is not None:
+            bucket["client_kwh"] += r["client_kwh"]
+        if r.get("loss_kwh") is not None:
+            bucket["loss_kwh"]   += r["loss_kwh"]
+    parallel_summary = {
+        "solo": {
+            "sessions":   solo["sessions"],
+            "client_kwh": round(solo["client_kwh"], 2),
+            "loss_kwh":   round(solo["loss_kwh"],   2),
+            "loss_pct":   round(_pct(solo["loss_kwh"], solo["client_kwh"]), 1),
+        },
+        "parallel": {
+            "sessions":   para["sessions"],
+            "client_kwh": round(para["client_kwh"], 2),
+            "loss_kwh":   round(para["loss_kwh"],   2),
+            "loss_pct":   round(_pct(para["loss_kwh"], para["client_kwh"]), 1),
+        },
+    }
+
+    # Hour-of-day — diagnostic dimension for loss, not a standalone metric.
+    hourly = defaultdict(lambda: {"sessions": 0, "client_kwh": 0.0, "loss_kwh": 0.0, "parallel": 0})
+    for idx, r in enumerate(matched):
+        dt = _parse_dt(r.get("ocpp_start_time"))
+        if dt is None:
+            continue
+        b = hourly[dt.hour]
+        b["sessions"]   += 1
+        b["client_kwh"] += r["client_kwh"]
+        b["loss_kwh"]   += r.get("loss_kwh") or 0.0
+        if parallel_flag.get(idx):
+            b["parallel"] += 1
+    hourly_list = [
+        {
+            "hour":       h,
+            "sessions":   v["sessions"],
+            "client_kwh": round(v["client_kwh"], 2),
+            "loss_kwh":   round(v["loss_kwh"],   2),
+            "parallel":   v["parallel"],
+        }
+        for h, v in sorted(hourly.items())
+    ]
+
+    aggregates = {
+        "by_model":     model_list,
+        "by_connector": connector_list,
+        "parallel":     parallel_summary,
+        "hourly":       hourly_list,
+        "matched_sessions": len(matched),
+    }
+
+    # ── Prompt: narrate the aggregates ──────────────────────────────────────
+    model_block = "\n".join(
+        f"  {m['model']:32s}  {m['sessions']:3d} sess  "
+        f"client {m['client_kwh']:7.2f}  meter {m['meter_kwh']:7.2f}  "
+        f"loss {m['loss_kwh']:+7.2f} ({m['loss_pct']:+5.1f}%)"
+        for m in model_list[:12]
+    ) or "  (no matched sessions)"
+
+    connector_block = "\n".join(
+        f"  Connector {c['connector']}: {c['sessions']} sess, client {c['client_kwh']:.2f} kWh, "
+        f"meter {c['meter_kwh']:.2f} kWh, loss {c['loss_kwh']:+.2f} ({c['loss_pct']:+.1f}%)"
+        for c in connector_list
+    ) or "  (no matched sessions)"
+
+    parallel_block = (
+        f"  Solo     : {parallel_summary['solo']['sessions']} sess, "
+        f"client {parallel_summary['solo']['client_kwh']:.2f} kWh, "
+        f"loss {parallel_summary['solo']['loss_kwh']:+.2f} ({parallel_summary['solo']['loss_pct']:+.1f}%)\n"
+        f"  Parallel : {parallel_summary['parallel']['sessions']} sess, "
+        f"client {parallel_summary['parallel']['client_kwh']:.2f} kWh, "
+        f"loss {parallel_summary['parallel']['loss_kwh']:+.2f} ({parallel_summary['parallel']['loss_pct']:+.1f}%)"
+    )
+
+    hourly_block = "\n".join(
+        f"  {h['hour']:02d}:00  {h['sessions']:3d} sess  "
+        f"client {h['client_kwh']:7.2f}  loss {h['loss_kwh']:+7.2f}  "
+        f"parallel {h['parallel']}/{h['sessions']}"
+        for h in hourly_list
+    ) or "  (no rows with a parseable OCPP start time)"
+
+    prompt = f"""You are an EV charging station energy analyst. The aggregates below
+are already correctly computed — do NOT recompute, just narrate them.
+
+loss = client_kWh − meter_kWh (per session, summed). Positive loss means the
+client billed MORE than the shared meter saw for that interval. The shared
+meter double-counts during parallel charging, so per-session loss is most
+trustworthy on SOLO sessions. Treat the parallel-session figures as indicative
+but acknowledge the double-counting caveat when relevant.
+
+The question to answer: WHERE is the energy loss concentrated? Use the four
+dimensions below — model, connector, solo-vs-parallel, hour-of-day — to
+identify the dominant driver(s). Call out correlations (e.g. loss-heavy
+models clustering on one connector, or parallel sessions clustered in
+specific hours) when the numbers support them. If signals are weak or
+mixed, say so plainly — do not invent patterns.
+
+## Top-level
+- Sessions: {summary.get('total', '?')} (matched {summary.get('matched', '?')}, unmatched {summary.get('unmatched', '?')})
+- Total client kWh (all rows): {summary.get('total_client_kwh', '?')}
+- Total per-session loss (matched only): {summary.get('total_loss_kwh', '?')} kWh
+
+## Per-model (top 12 by |loss|)
+{model_block}
+
+## Per-connector
+{connector_block}
+
+## Solo vs parallel
+{parallel_block}
+
+## Hour-of-day (matched sessions only; parallel = N/total at that hour)
+{hourly_block}
+
+Return ONLY this JSON shape, filled in:
 {{
-  "top_consumer": "VRN or car that consumed the most — one sentence",
-  "highest_loss": "VRN or car with biggest client−meter gap — one sentence",
-  "patterns": ["bullet 1", "bullet 2", "bullet 3"],
-  "unmatched_note": "one sentence about the unmatched sessions",
-  "recommendations": ["action 1", "action 2", "action 3"],
-  "risk_level": "LOW | MEDIUM | HIGH"
+  "loss_breakdown":   "1-2 sentences naming the dominant driver(s) of loss with numbers",
+  "model_pattern":    "1 sentence on per-model loss; say 'no clear pattern' if so",
+  "connector_pattern":"1 sentence comparing connectors; say so if balanced",
+  "parallel_pattern": "1 sentence comparing solo vs parallel loss %; 'sample too small' is acceptable",
+  "hour_pattern":     "1 sentence on hours that concentrate loss, noting any parallel correlation",
+  "patterns":         ["bullet", "bullet", "bullet"],
+  "recommendations":  ["action", "action", "action"],
+  "risk_level":       "LOW | MEDIUM | HIGH"
 }}
-
-Be concise. Use actual VRNs and numbers from the data.
 """
 
     raw = ""
@@ -1873,16 +2053,19 @@ Be concise. Use actual VRNs and numbers from the data.
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "top_consumer":    {"type": "string"},
-                                "highest_loss":    {"type": "string"},
-                                "patterns":        {"type": "array", "items": {"type": "string"}},
-                                "unmatched_note":  {"type": "string"},
-                                "recommendations": {"type": "array", "items": {"type": "string"}},
-                                "risk_level":      {"type": "string"},
+                                "loss_breakdown":    {"type": "string"},
+                                "model_pattern":     {"type": "string"},
+                                "connector_pattern": {"type": "string"},
+                                "parallel_pattern":  {"type": "string"},
+                                "hour_pattern":      {"type": "string"},
+                                "patterns":          {"type": "array", "items": {"type": "string"}},
+                                "recommendations":   {"type": "array", "items": {"type": "string"}},
+                                "risk_level":        {"type": "string"},
                             },
                             "required": [
-                                "top_consumer", "highest_loss", "patterns",
-                                "unmatched_note", "recommendations", "risk_level",
+                                "loss_breakdown", "model_pattern", "connector_pattern",
+                                "parallel_pattern", "hour_pattern",
+                                "patterns", "recommendations", "risk_level",
                             ],
                             "additionalProperties": False,
                         },
@@ -1913,7 +2096,7 @@ Be concise. Use actual VRNs and numbers from the data.
             detail=f"{DASHBOARD_LLM_PROVIDER} API error: {str(e)}",
         )
 
-    return {"insight": structured}
+    return {"insight": structured, "aggregates": aggregates}
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])

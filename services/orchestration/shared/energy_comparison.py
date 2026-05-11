@@ -8,12 +8,18 @@ sessions + MySQL meter are unreliable per-gun because:
   - Meter only gives cumulative kWh across both guns
 
 Strategy: weighted scoring across every signal available. Strong signals
-(VRN, duration) dominate when present; weak signals (gun, model) keep pulling
-in the right direction when strong ones are missing. Ordinal-within-day is a
-fallback when all per-row signals are weak.
+(VRN, OCPP-start vs CCTV plug_time, duration) dominate when present; weak
+signals (gun, model) keep pulling in the right direction when strong ones
+are missing.
 
-Excel "OCPP Start/End Time" is date-only in the client sample; duration is the
-only intra-day time signal. We do NOT rely on wall-clock time from Excel.
+Gate: a candidate must clear the numeric score threshold AND have at least
+one strong signal (exact VRN, a duration band, or a time band). Without
+this, model + gun + same-day alone is enough to score 4 and produces
+spurious matches between unrelated sessions of the same common model
+(Tata TIAGO on Connector 1, etc.).
+
+Excel "OCPP Start/End Time" — full timestamps when present. We compare
+them to CCTV plug_time / in_time (both normalised to naive IST).
 """
 
 from __future__ import annotations
@@ -34,6 +40,10 @@ WEIGHT_MODEL_MATCH      = 2
 WEIGHT_GUN_MATCH        = 1
 WEIGHT_DURATION_TIGHT   = 2   # within ±3 min
 WEIGHT_DURATION_LOOSE   = 1   # within ±10 min
+WEIGHT_DURATION_CONFLICT = -3 # > 10 min apart — likely different sessions
+WEIGHT_TIME_TIGHT       = 3   # OCPP start within ±5 min of CCTV plug_time
+WEIGHT_TIME_LOOSE       = 2   # within ±15 min
+WEIGHT_TIME_CONFLICT    = -3  # > 30 min apart
 WEIGHT_SAME_DATE        = 1
 WEIGHT_DATE_CONFLICT    = -3
 
@@ -41,6 +51,9 @@ SCORE_THRESHOLD         = 3   # below → UNMATCHED
 
 DURATION_TIGHT_SECONDS  = 3 * 60
 DURATION_LOOSE_SECONDS  = 10 * 60
+TIME_TIGHT_SECONDS      = 5 * 60
+TIME_LOOSE_SECONDS      = 15 * 60
+TIME_CONFLICT_SECONDS   = 30 * 60
 
 # Station-specific slot→connector mapping. Flip this constant if wiring differs.
 SLOT_TO_CONNECTOR: dict[str, int] = {
@@ -57,7 +70,8 @@ class ExcelRow:
     row_index: int
     transaction_id: str | None
     session_id_ocpp: str | None
-    date: datetime | None          # OCPP Start Time (date-only)
+    start_dt: datetime | None      # OCPP Start Time (full timestamp, naive IST)
+    end_dt: datetime | None        # OCPP End Time   (full timestamp, naive IST)
     duration_seconds: int | None   # from Session Duration(hh:mm:ss)
     connector_id: int | None
     vrn_raw: str | None
@@ -68,6 +82,13 @@ class ExcelRow:
     meter_start: float | None
     meter_end: float | None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def date(self) -> datetime | None:
+        """Day (midnight) of the OCPP start timestamp, for day-level pre-filter."""
+        if self.start_dt is None:
+            return None
+        return self.start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 @dataclass
@@ -157,14 +178,23 @@ def parse_duration(s: Any) -> int | None:
     return None
 
 
-def parse_ocpp_date(v: Any) -> datetime | None:
-    """Excel 'OCPP Start Time' is date-only in the client sample (dd/mm/yyyy or a datetime)."""
+def parse_ocpp_datetime(v: Any) -> datetime | None:
+    """Excel 'OCPP Start/End Time' — accepts datetime objects (openpyxl) or
+    strings like 'dd/mm/yyyy HH:MM:SS' / 'dd/mm/yyyy'. Returns a naive datetime
+    in IST (the client export is already IST)."""
     if v is None or v == "":
         return None
     if isinstance(v, datetime):
-        return v.replace(hour=0, minute=0, second=0, microsecond=0)
+        return v.replace(tzinfo=None) if v.tzinfo else v
     txt = str(v).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+    fmts = (
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y",
+    )
+    for fmt in fmts:
         try:
             return datetime.strptime(txt, fmt)
         except ValueError:
@@ -172,12 +202,22 @@ def parse_ocpp_date(v: Any) -> datetime | None:
     return None
 
 
-def _to_ist_date(dt: datetime) -> datetime:
-    """Date of `dt` expressed in IST, as a naive midnight datetime for comparison."""
+def _to_ist_naive(dt: datetime | None) -> datetime | None:
+    """Normalise a (possibly tz-aware UTC) datetime to a naive IST datetime."""
+    if dt is None:
+        return None
     from zoneinfo import ZoneInfo
     if dt.tzinfo is not None:
-        dt = dt.astimezone(ZoneInfo("Asia/Kolkata"))
-    return dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+        dt = dt.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    return dt
+
+
+def _to_ist_date(dt: datetime) -> datetime:
+    """Date of `dt` expressed in IST, as a naive midnight datetime for comparison."""
+    naive = _to_ist_naive(dt)
+    if naive is None:
+        return None  # type: ignore[return-value]
+    return naive.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 # ── Parser ──────────────────────────────────────────────────────────────────
@@ -238,7 +278,8 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
 
         vrn_raw = get("_vrn")
         duration_s = parse_duration(get("_duration"))
-        start_date = parse_ocpp_date(get("_start"))
+        start_dt = parse_ocpp_datetime(get("_start"))
+        end_dt = parse_ocpp_datetime(get("_end"))
         connector_raw = get("_connector")
         try:
             connector_id = int(connector_raw) if connector_raw not in (None, "") else None
@@ -257,7 +298,8 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
             row_index=row_num,
             transaction_id=str(get("transaction_id")) if get("transaction_id") is not None else None,
             session_id_ocpp=str(get("session_id_ocpp")) if get("session_id_ocpp") is not None else None,
-            date=start_date,
+            start_dt=start_dt,
+            end_dt=end_dt,
             duration_seconds=duration_s,
             connector_id=connector_id,
             vrn_raw=str(vrn_raw).strip() if vrn_raw else None,
@@ -335,7 +377,7 @@ def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
             score += WEIGHT_GUN_MATCH
             reasons.append("gun")
 
-    # Duration proximity.
+    # Duration proximity (or penalty when both are known and far apart).
     cctv_dur = cctv.duration_seconds
     if excel.duration_seconds is not None and cctv_dur is not None:
         diff = abs(excel.duration_seconds - cctv_dur)
@@ -345,16 +387,52 @@ def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
         elif diff <= DURATION_LOOSE_SECONDS:
             score += WEIGHT_DURATION_LOOSE
             reasons.append(f"duration±10m({diff}s)")
+        else:
+            score += WEIGHT_DURATION_CONFLICT
+            reasons.append(f"duration-conflict({diff}s)")
+
+    # Wall-clock proximity: OCPP start vs CCTV plug_time (fallback in_time).
+    # Strongest single non-VRN signal — same gun at the same minute is decisive.
+    excel_start = _to_ist_naive(excel.start_dt)
+    cctv_anchor = _to_ist_naive(cctv.plug_time) or _to_ist_naive(cctv.in_time)
+    if excel_start is not None and cctv_anchor is not None:
+        time_diff = abs(int((excel_start - cctv_anchor).total_seconds()))
+        if time_diff <= TIME_TIGHT_SECONDS:
+            score += WEIGHT_TIME_TIGHT
+            reasons.append(f"time±5m({time_diff}s)")
+        elif time_diff <= TIME_LOOSE_SECONDS:
+            score += WEIGHT_TIME_LOOSE
+            reasons.append(f"time±15m({time_diff}s)")
+        elif time_diff > TIME_CONFLICT_SECONDS:
+            score += WEIGHT_TIME_CONFLICT
+            reasons.append(f"time-conflict({time_diff}s)")
 
     return score, reasons
+
+
+def _has_strong_signal(reasons: list[str]) -> bool:
+    """A candidate must clear at least one of: exact VRN, a duration band, or
+    a time band. Without any of these, model+gun+date alone is too weak —
+    that combination produced the spurious LOW matches in the client sample."""
+    if "VRN" in reasons:
+        return True
+    for r in reasons:
+        if r.startswith("duration±") or r.startswith("time±"):
+            return True
+    return False
 
 
 def _confidence(score: int, reasons: list[str]) -> str:
     if score < SCORE_THRESHOLD:
         return "UNMATCHED"
-    if "VRN" in reasons and any(r.startswith("duration") for r in reasons):
+    has_vrn = "VRN" in reasons
+    has_time_tight = any(r.startswith("time±5m") for r in reasons)
+    has_dur_tight = any(r.startswith("duration±3m") for r in reasons)
+    if has_vrn and (has_time_tight or has_dur_tight):
         return "HIGH"
-    if score >= 5:
+    if has_time_tight and has_dur_tight:
+        return "HIGH"
+    if score >= 6:
         return "HIGH"
     if score >= 4:
         return "MEDIUM"
@@ -373,7 +451,11 @@ def match_excel_to_cctv(excel_rows: list[ExcelRow], cctv_sessions: list[CctvSess
     for ei, ex in enumerate(excel_rows):
         for ci, cc in enumerate(cctv_sessions):
             score, reasons = _score_pair(ex, cc)
-            if score >= SCORE_THRESHOLD:
+            # Two-stage filter: numeric threshold + at least one strong signal.
+            # Without the strong-signal gate, common-model + same-gun + same-day
+            # bundles score 4 and produce nonsense pairings (e.g. an 11-second
+            # OCPP cancel matched to an unrelated half-hour TIAGO session).
+            if score >= SCORE_THRESHOLD and _has_strong_signal(reasons):
                 candidates.append((ei, ci, score, reasons))
 
     candidates.sort(key=lambda t: (-t[2], t[0]))
@@ -419,6 +501,8 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "excel_row": ex.row_index,
         "transaction_id": ex.transaction_id,
         "ocpp_date": ex.date.strftime("%Y-%m-%d") if ex.date else None,
+        "ocpp_start_time": ex.start_dt.strftime("%Y-%m-%d %H:%M:%S") if ex.start_dt else None,
+        "ocpp_end_time":   ex.end_dt.strftime("%Y-%m-%d %H:%M:%S")   if ex.end_dt   else None,
         "duration_seconds": ex.duration_seconds,
         "connector_id": ex.connector_id,
         "vrn": ex.vrn_raw,
