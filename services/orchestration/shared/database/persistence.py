@@ -373,6 +373,39 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 .first()
             )
 
+            # Stale-predecessor guard: if the open session's in_time is older
+            # than the current event's in_time by at least MIN_SESSION_MINUTES,
+            # the row belongs to a previous car whose departure was missed by
+            # detection (gun_plugout / parking_outtime never fired). Close it
+            # at the new arrival's in_time and let the block below create a
+            # fresh row for the actual new car. Without this, first-write-wins
+            # silently merges the new car's events into the stale row.
+            if (
+                session is not None
+                and in_time is not None
+                and session.in_time is not None
+                and (in_time - session.in_time) >= timedelta(minutes=MIN_SESSION_MINUTES)
+            ):
+                if session.out_time is None:
+                    session.out_time = in_time
+                if session.plug_time is not None and session.plug_out_time is None:
+                    session.plug_out_time = session.out_time
+                # Sessions that reached "charging" are real visits — don't
+                # discard them based on the (synthesized) closure timestamp.
+                if session.plug_time is not None:
+                    session.session_status = "completed"
+                elif _is_below_min_duration(session.in_time, session.out_time):
+                    session.session_status = "discarded"
+                else:
+                    session.session_status = "completed"
+                _persistence_logger.warning(
+                    f"[DB] Force-closed stale predecessor session_id={session.session_id} "
+                    f"slot={slot_id} predecessor_in={session.in_time} new_in={in_time} "
+                    f"(gap >= {MIN_SESSION_MINUTES} min) — opening fresh row for new arrival"
+                )
+                db.flush()
+                session = None
+
             # Create a new session only when in_time is present.
             # The UNIQUE(camera_id, slot_id, in_time) constraint at the DB level
             # ensures that even if parking_intime fires twice (e.g. after a full
@@ -795,21 +828,44 @@ def close_stale_sessions(stale_hours: int = SESSION_STALE_HOURS) -> int:
         )
         for session in stale:
             if session.out_time is None:
-                # Prefer created_at + stale_hours over now() so the inferred window
-                # stays anchored to the session's own timeline rather than wall clock.
-                created = session.created_at
-                if created is not None and created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                session.out_time = (created + timedelta(hours=stale_hours)) if created else now
+                # Anchor inferred out_time to updated_at — the last time the
+                # pipeline had evidence of this session (last event fired for
+                # this slot). For a car that silently left without producing
+                # parking_outtime, updated_at is roughly when detection lost
+                # the track, which is tighter and more truthful than a flat
+                # created_at + stale_hours. Falls back to created_at + stale_hours
+                # when updated_at is unavailable.
+                last_seen = session.updated_at
+                if last_seen is not None and last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
+                if last_seen is None:
+                    created = session.created_at
+                    if created is not None and created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    inferred_out = (created + timedelta(hours=stale_hours)) if created else now
+                else:
+                    inferred_out = last_seen
+                # Clamp out_time >= plug_time so the window doesn't go negative
+                # for sessions that reached "charging" before going silent.
+                if session.plug_time is not None:
+                    plug_t = session.plug_time
+                    if plug_t.tzinfo is None:
+                        plug_t = plug_t.replace(tzinfo=timezone.utc)
+                    if inferred_out < plug_t:
+                        inferred_out = plug_t
+                session.out_time = inferred_out
             # Mirror the upsert path: if the session was charging but never produced
             # a gun_plugout, anchor plug_out_time to the (now-inferred) out_time so
             # downstream energy/duration math has a closed window.
             if session.plug_time is not None and session.plug_out_time is None:
                 session.plug_out_time = session.out_time
-            # Stale sweep always synthesizes out_time above, so by the time we reach
-            # this line both in_time and out_time are set. Same min-duration floor
-            # as upsert_charging_session — sub-floor visits become 'discarded'.
-            if _is_below_min_duration(session.in_time, session.out_time):
+            # Sessions that reached "charging" are real charging visits even if
+            # the synthesized out_time leaves the window short — the sweep itself
+            # is admitting we lost track of the true out_time, so the min-duration
+            # filter (designed for active short visits) doesn't apply here.
+            if session.plug_time is not None:
+                session.session_status = "completed"
+            elif _is_below_min_duration(session.in_time, session.out_time):
                 session.session_status = "discarded"
             else:
                 session.session_status = "completed"
