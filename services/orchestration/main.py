@@ -1573,10 +1573,23 @@ def dashboard_sessions(
 
         sessions = []
         for r in rows:
+            # Dashboard sessions table: anchor energy to car in/out times,
+            # not plug times. Keeps the per-row kWh consistent with the live
+            # slot card and immune to spurious plug-out events while the car
+            # is still parked & charging.
+            #
+            # Original (plug-time based) call retained for easy revert:
+            # energy_kwh = compute_kwh_from_readings(
+            #     readings,
+            #     plug_time=r.plug_time,
+            #     plug_out_time=r.plug_out_time,
+            #     in_time=r.in_time,
+            #     out_time=r.out_time,
+            # )
             energy_kwh = compute_kwh_from_readings(
                 readings,
-                plug_time=r.plug_time,
-                plug_out_time=r.plug_out_time,
+                plug_time=None,
+                plug_out_time=None,
                 in_time=r.in_time,
                 out_time=r.out_time,
             )
@@ -2061,10 +2074,23 @@ def dashboard_station(
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.isoformat()
 
-            # Live energy: kWh consumed so far (plug_out_time=None for active sessions)
+            # Live energy: kWh consumed so far. Anchored to car_in / car_out
+            # (not plug_in / plug_out) — gun-detection occasionally flips to
+            # "unplugged" while the car is still parked & charging, which would
+            # otherwise freeze the live kWh reading prematurely. Passing
+            # plug_time=None forces get_energy_consumed() onto the car-time
+            # fallback branch.
+            #
+            # Original (plug-time based) call retained for easy revert:
+            # energy_kwh = get_energy_consumed(
+            #     plug_time=session.plug_time,
+            #     plug_out_time=session.plug_out_time,
+            #     in_time=session.in_time,
+            #     out_time=session.out_time,
+            # )
             energy_kwh = get_energy_consumed(
-                plug_time=session.plug_time,
-                plug_out_time=session.plug_out_time,
+                plug_time=None,
+                plug_out_time=None,
                 in_time=session.in_time,
                 out_time=session.out_time,
             )
