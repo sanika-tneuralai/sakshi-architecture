@@ -587,16 +587,9 @@ function EnergyLossTable({ results, summary }) {
     return results.filter(r => r.ocpp_date === dateFilter);
   }, [results, dateFilter]);
 
-  if (!results || !results.length) {
-    return (
-      <div className="py-12 text-center text-slate-400 text-sm">
-        Upload the client OCPP Excel to compare per-gun energy against our meter estimate.
-      </div>
-    );
-  }
-
   // Recompute summary metrics over the filtered rows so the strip reflects
-  // exactly what's on screen.
+  // exactly what's on screen. Must run BEFORE any early-return — React's
+  // rules-of-hooks require the same hook order on every render.
   const visibleSummary = React.useMemo(() => {
     if (dateFilter === 'all' || !summary) return summary;
     const rows = filteredResults || [];
@@ -615,6 +608,14 @@ function EnergyLossTable({ results, summary }) {
       total_loss_kwh: hasLoss ? loss : null,
     };
   }, [filteredResults, dateFilter, summary]);
+
+  if (!results || !results.length) {
+    return (
+      <div className="py-12 text-center text-slate-400 text-sm">
+        Upload the client OCPP Excel to compare per-gun energy against our meter estimate.
+      </div>
+    );
+  }
 
   return (
     <div>
