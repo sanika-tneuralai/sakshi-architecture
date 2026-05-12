@@ -3,7 +3,7 @@ Vehicle domain event queues and helpers.
 
 Queues:
     parking_events   — parking_intime, parking_outtime
-    violation_events — unauthorized_parking, wrong_parking, multiple_cars_in_roi
+    violation_events — unauthorized_parking, wrong_parking, non_ev_parking, multiple_cars_in_roi
     gun_events       — gun_plugin, gun_plugout
 
 Adding a new vehicle event type: just publish to the relevant queue with

@@ -1,17 +1,28 @@
 """
 Parking Compliance Rule
 ========================
-Checks for two compliance violations per car:
+Checks for three compliance violations per car:
 
-  A. Unauthorized parking — car centroid is outside ALL defined ROIs
-  B. Wrong parking        — car centroid is inside MORE THAN ONE ROI simultaneously
+  A. Unauthorized parking — car parked outside any designated charging slot.
+  B. Wrong parking        — car straddles two slots (double-slot occupancy).
+  C. Non-EV parking       — non-EV vehicle occupying an EV charging slot.
+
+Source-of-truth hierarchy:
+
+  1. The frame-level LLM verdict (parking_quality + is_ev) wins when present.
+     vehicle_extraction's cached_llm_frame_call gives one normalised response
+     per snapshot, shared with every rule via an in-process cache — so
+     consulting it here is free after the first call.
+  2. Geometric ROI overlap is the fallback when the LLM produced no verdict
+     for this track (no snapshot URL, no API key, or LLM saw nothing in the
+     vehicle's position).
 
 For unauthorized parking, this rule also fires parking session events so the
 full session lifecycle (in_time → out_time) is captured even when the car
 never enters a legitimate ROI:
 
   - parking_intime  fired once when an unauthorized car is confirmed present
-                    for ENTRY_FRAMES consecutive frames
+                    for UNAUTH_DWELL_SECONDS of wall-clock time
   - parking_outtime fired once when the same car has been absent for
                     EXIT_FRAMES consecutive frames
 
@@ -35,6 +46,12 @@ from typing import Any, ClassVar, Dict, List
 from shared.common.roi import which_rois, which_rois_bbox_overlap
 from usecase.domain.vehicles.events import build_event, publish_sync
 from usecase.rules.base import BaseUsecaseRule
+from usecase.rules.vehicles.vehicle_extraction import (
+    DETECTION_W,
+    _assign_vehicles_to_targets,
+    _bbox_center_x,
+    cached_llm_frame_call,
+)
 from workers.redis_state import get_state, set_state
 
 logger = logging.getLogger(__name__)
@@ -171,10 +188,28 @@ class ParkingComplianceRule(BaseUsecaseRule):
         #     "occupied":      bool, intime has been fired
         #     "violated":      bool, unauthorized_parking violation already fired
         #     "wrong_fired":   bool, wrong_parking violation already fired
+        #     "non_ev_fired":  bool, non_ev_parking violation already fired
         #     "intime":        str,  ISO timestamp of intime event
         #   }
         # }
         event_dt = _parse_iso(event_ts)
+
+        # ── LLM verdicts (one frame call, cached and shared with vehicle_extraction)
+        # When ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY is unset, or
+        # the snapshot URL is missing, llm_vehicles ends up empty and assignments
+        # is {} — every car falls through to the geometric fallback below.
+        snapshot_url = detection_output.get("snapshot_url")
+        llm_resp = cached_llm_frame_call(snapshot_url, rois) if snapshot_url else None
+        llm_vehicles = (llm_resp or {}).get("vehicles", [])
+        llm_targets = [
+            {"key": c.get("track_id"),
+             "x_center": _bbox_center_x(c.get("bbox") or {})}
+            for c in cars if c.get("track_id")
+        ]
+        llm_assignments = (
+            _assign_vehicles_to_targets(llm_vehicles, llm_targets, float(DETECTION_W))
+            if (llm_vehicles and llm_targets) else {}
+        )
 
         violations: List[dict] = []
         events: List[dict] = []
@@ -203,54 +238,69 @@ class ParkingComplianceRule(BaseUsecaseRule):
         else:
             for car in cars:
                 track_id = car.get("track_id", "unknown")
-                # Centroid-based check: which ROI the car's centre is in
+                # Centroid-based check: which ROI the car's centre is in.
                 matched_rois = which_rois(car["bbox"], rois)
-                # Overlap-based check: ALWAYS run, so a car whose centroid sits
-                # in ROI_1 but whose body is genuinely half in ROI_2 still
-                # qualifies as wrong-parking. Threshold is high (50 %) — a car
-                # parked askew but mostly in its own slot won't alert; only a
-                # car genuinely straddling the boundary will.
+                # Overlap-based check: a car whose centroid sits in ROI_1 but
+                # whose body is genuinely half in ROI_2 still qualifies as
+                # wrong-parking under the geometric fallback. 50 % threshold —
+                # a car parked askew but mostly in its own slot won't alert.
                 overlap_rois = which_rois_bbox_overlap(
                     car["bbox"], rois, overlap_threshold=WRONG_PARKING_OVERLAP,
                 )
+                all_matched_rois = list(dict.fromkeys(matched_rois + overlap_rois))
+
+                llm_vehicle = llm_assignments.get(track_id)
+                llm_quality = (llm_vehicle or {}).get("parking_quality")
+                llm_is_ev  = (llm_vehicle or {}).get("is_ev")
+
+                # ── Decide authoritative location verdict ────────────────
+                # LLM wins when it has a non-"unknown" parking_quality for
+                # this track. Otherwise fall back to geometric overlap.
+                if llm_quality in ("proper", "double_slot", "across_line", "outside_slot"):
+                    verdict = llm_quality
+                    verdict_source = "llm"
+                else:
+                    if len(all_matched_rois) == 0:
+                        verdict = "outside_slot"
+                    elif len(all_matched_rois) > 1:
+                        verdict = "double_slot"
+                    else:
+                        verdict = "proper"
+                    verdict_source = "geom"
+
                 print(
                     f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}"
-                    f" | overlap_rois={overlap_rois}"
+                    f" | overlap_rois={overlap_rois} | verdict={verdict}"
+                    f" ({verdict_source}) | is_ev={llm_is_ev}"
                 )
-
-                all_matched_rois = list(dict.fromkeys(matched_rois + overlap_rois))
 
                 slot = state.setdefault(track_id, {
                     "outside_since": None, "wrong_buf": 0, "exit_buf": 0,
                     "occupied": False, "violated": False, "wrong_fired": False,
-                    "intime": None,
+                    "non_ev_fired": False, "intime": None,
                 })
 
-                if len(all_matched_rois) == 0:
-                    # ── Duplicate-detection guard ─────────────────────────────
-                    # If this "outside" bbox is mostly contained within an
-                    # in-slot car's bbox, it's almost certainly a YOLO
-                    # multi-detection of the same physical car (a bumper or
-                    # hood fragment that happens to have a centroid outside
-                    # every ROI). Skip the unauthorized branch entirely so we
-                    # don't open a parallel ChargingSession row for a phantom
-                    # track. Reset the dwell counter so an actual exit later
-                    # still gets a clean window.
-                    bb = car.get("bbox") or {}
-                    best_containment = max(
-                        (_bbox_containment(bb, slot_bb) for slot_bb in in_slot_bboxes),
-                        default=0.0,
-                    )
-                    if best_containment >= DUPLICATE_DETECTION_CONTAINMENT:
-                        logger.info(
-                            "[COMPLIANCE] Skipping unauthorized for track=%s — "
-                            "duplicate of in-slot car (containment=%.2f)",
-                            track_id, best_containment,
+                if verdict == "outside_slot":
+                    # Duplicate-detection guard only runs in the geometric
+                    # fallback. When the LLM has identified a vehicle at this
+                    # position, the track is real by construction — no need
+                    # to filter YOLO fragments.
+                    if verdict_source == "geom":
+                        bb = car.get("bbox") or {}
+                        best_containment = max(
+                            (_bbox_containment(bb, slot_bb) for slot_bb in in_slot_bboxes),
+                            default=0.0,
                         )
-                        slot["outside_since"] = None
-                        slot["wrong_buf"] = 0
-                        slot["exit_buf"] = 0
-                        continue
+                        if best_containment >= DUPLICATE_DETECTION_CONTAINMENT:
+                            logger.info(
+                                "[COMPLIANCE] Skipping unauthorized for track=%s — "
+                                "duplicate of in-slot car (containment=%.2f)",
+                                track_id, best_containment,
+                            )
+                            slot["outside_since"] = None
+                            slot["wrong_buf"] = 0
+                            slot["exit_buf"] = 0
+                            continue
 
                     # ── Unauthorized parking (dwell-gated) ────────────────────
                     # The violation only fires after the same tracked car has
@@ -284,14 +334,15 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                 "reason": "car outside all ROIs",
                                 "description": "Car parked outside any designated charging slot.",
                                 "dwell_seconds": round(elapsed, 1),
+                                "verdict_source": verdict_source,
                             },
                         )
                         violations.append(evt)
                         flagged.append(car)
                         publish_sync("violation_events", evt)
                         logger.warning(
-                            "[COMPLIANCE] Unauthorized parking: camera=%s track=%s dwell=%.1fs",
-                            camera_id, track_id, elapsed,
+                            "[COMPLIANCE] Unauthorized parking: camera=%s track=%s dwell=%.1fs source=%s",
+                            camera_id, track_id, elapsed, verdict_source,
                         )
 
                         # Same threshold also gates the parking_intime so
@@ -313,8 +364,12 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                 camera_id, track_id,
                             )
 
-                elif len(all_matched_rois) > 1:
+                elif verdict == "double_slot":
                     # ── Wrong / Double-slot parking (debounced) ───────────────
+                    # When the LLM is the source we still apply the ENTRY_FRAMES
+                    # debounce. The LLM is per-frame and can flicker on edge
+                    # geometry; three consecutive agreeing frames keeps single
+                    # bad detections from firing a false wrong_parking.
                     slot["outside_since"] = None
                     slot["wrong_buf"] += 1
 
@@ -332,23 +387,68 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                 "reason": "car occupies multiple ROI slots (double parking)",
                                 "description": (
                                     f"Car straddles multiple charging slots ({', '.join(all_matched_rois)})."
+                                    if all_matched_rois else
+                                    "Car straddles multiple charging slots."
                                 ),
+                                "verdict_source": verdict_source,
                             },
                         )
                         violations.append(evt)
                         flagged.append(car)
                         publish_sync("violation_events", evt)
                         logger.warning(
-                            "[COMPLIANCE] Wrong parking: camera=%s track=%s rois=%s",
-                            camera_id, track_id, all_matched_rois,
+                            "[COMPLIANCE] Wrong parking: camera=%s track=%s rois=%s source=%s",
+                            camera_id, track_id, all_matched_rois, verdict_source,
                         )
 
                 else:
-                    # Car is cleanly inside exactly one ROI — not a violation.
-                    # Reset the violation buffers so a future drift outside
-                    # the ROI starts the debounce fresh.
+                    # "proper" or "across_line" — not a location violation.
+                    # Reset the violation buffers so a future drift outside the
+                    # ROI starts the debounce fresh.
                     slot["outside_since"] = None
                     slot["wrong_buf"] = 0
+
+                # ── Non-EV parking (LLM-only) ─────────────────────────────────
+                # A non-EV vehicle occupying any configured EV slot is a
+                # violation. We require:
+                #   - LLM is_ev verdict == "non_ev" (we never default to non_ev
+                #     when uncertain; "unknown" never fires)
+                #   - the vehicle overlaps any ROI (centroid in OR bbox-overlap
+                #     above WRONG_PARKING_OVERLAP) — i.e. it is occupying a
+                #     slot reserved for EVs. A non-EV parked outside every ROI
+                #     is just regular unauthorized parking.
+                # Fires once per track via slot["non_ev_fired"].
+                if (
+                    llm_is_ev == "non_ev"
+                    and all_matched_rois
+                    and not slot.get("non_ev_fired")
+                ):
+                    slot["non_ev_fired"] = True
+                    evt = build_event(
+                        event_type="non_ev_parking",
+                        camera_id=camera_id,
+                        timestamp=event_ts,
+                        track_id=track_id,
+                        metadata={
+                            "bbox": car.get("bbox"),
+                            "confidence": car.get("confidence"),
+                            "occupied_rois": all_matched_rois,
+                            "car_model": (llm_vehicle or {}).get("car_model"),
+                            "car_number": (llm_vehicle or {}).get("car_number"),
+                            "reason": "non-EV vehicle occupying EV charging slot",
+                            "description": (
+                                f"Non-EV vehicle parked in EV slot ({', '.join(all_matched_rois)})."
+                            ),
+                        },
+                    )
+                    violations.append(evt)
+                    if car not in flagged:
+                        flagged.append(car)
+                    publish_sync("violation_events", evt)
+                    logger.warning(
+                        "[COMPLIANCE] Non-EV parking: camera=%s track=%s rois=%s",
+                        camera_id, track_id, all_matched_rois,
+                    )
 
         # ── Check exit for unauthorized cars no longer visible ────────────────
         for track_id, slot in list(state.items()):

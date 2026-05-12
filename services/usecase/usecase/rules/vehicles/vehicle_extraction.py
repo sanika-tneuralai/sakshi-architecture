@@ -72,6 +72,7 @@ DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
 
 _PLATE_NEGATIVE = {"unreadable", "vehicle_number_not_visible", "", "none", "null"}
 _MODEL_NEGATIVE = {"unknown", "not_clear", "", "none", "null"}
+_IS_EV_NEGATIVE = {"unknown", "", "none", "null"}
 
 # In-process cache: one LLM call per snapshot, regardless of which rule asks.
 # Both this rule and parking_detection's CV-only gate consult the cache via
@@ -185,6 +186,7 @@ Your task:
    - Identify the vehicle make/model ONLY if visually supported.
    - Read the vehicle number plate ONLY if every character is clearly visible.
    - Judge the parking quality of that vehicle against its YELLOW slot outline.
+   - Classify the vehicle as electric (EV) or non-electric (non_ev).
 4. NEVER guess or hallucinate any vehicle number or model.
 
 ==================================================
@@ -204,14 +206,16 @@ Schema:
       "car_model": "Tata Tiago EV",
       "car_number": "KL44R6290",
       "number_plate_visible": true,
-      "parking_quality": "proper"
+      "parking_quality": "proper",
+      "is_ev": "ev"
     },
     {
       "position": "right",
       "car_model": "BYD Atto 3",
       "car_number": "unreadable",
       "number_plate_visible": false,
-      "parking_quality": "across_line"
+      "parking_quality": "across_line",
+      "is_ev": "ev"
     }
   ]
 }
@@ -309,6 +313,38 @@ For each vehicle, judge against the YELLOW slot outline(s):
 Report what you actually see; do NOT default to "proper" when uncertain.
 
 ==================================================
+STEP 7 — EV CLASSIFICATION
+==================================================
+Classify each vehicle as electric or non-electric using ONLY visible evidence.
+
+Allowed values:
+- "ev"      : strong EV evidence visible. The PRIMARY signal in Indian
+              registrations is the GREEN number plate (white text on green
+              background) — this is the legally-mandated EV plate and is the
+              single most reliable indicator. Other supporting signals: a
+              visible charging cable plugged into the vehicle, a visible
+              charging port on the vehicle body, or "EV"/electric badging.
+- "non_ev"  : strong non-EV evidence visible. The PRIMARY signal is a WHITE
+              or YELLOW number plate (white plate = private ICE vehicle,
+              yellow plate = commercial vehicle). Other supporting signals:
+              a visible fuel filler cap or visible exhaust pipe.
+- "unknown" : cannot determine confidently. Use this when the number plate
+              colour is not clearly visible (back-of-vehicle view, glare,
+              shadow, distance, occlusion) and no charging cable / port /
+              fuel cap is visible either.
+
+STRICT RULES:
+- NEVER infer EV vs non-EV from parking location — being parked in an EV
+  charging slot does NOT make a vehicle an EV.
+- NEVER infer EV vs non-EV from the vehicle model name, colour, size, or
+  body shape. Many EVs share their body with an ICE variant of the same
+  name (e.g. Tata Nexon, Tata Tiago, Mahindra XUV400). The plate colour is
+  the source of truth; do not override it based on the model.
+- When the plate colour is unclear or not visible AND no charging cable /
+  port / fuel cap is visible, ALWAYS return "unknown". Do NOT default to
+  "ev" and do NOT default to "non_ev".
+
+==================================================
 ADDITIONAL GUARDRAILS
 ==================================================
 - NEVER hallucinate.
@@ -367,6 +403,13 @@ def _validate_quality(value: Any) -> str:
     return "unknown"
 
 
+def _validate_is_ev(value: Any) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"ev", "non_ev", "unknown"}:
+        return s
+    return "unknown"
+
+
 def _normalise_llm_vehicles(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce raw LLM JSON into a canonical shape, filtering bad entries."""
     if not isinstance(parsed, dict):
@@ -394,6 +437,7 @@ def _normalise_llm_vehicles(parsed: Dict[str, Any]) -> Dict[str, Any]:
             "car_number":            _validate_plate(v.get("car_number")),
             "number_plate_visible":  bool(v.get("number_plate_visible", False)),
             "parking_quality":       _validate_quality(v.get("parking_quality")),
+            "is_ev":                 _validate_is_ev(v.get("is_ev")),
         })
 
     if not vehicles:
@@ -459,9 +503,11 @@ def _query_claude_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> 
                                         "car_number":           {"type": "string"},
                                         "number_plate_visible": {"type": "boolean"},
                                         "parking_quality":      {"type": "string"},
+                                        "is_ev":                {"type": "string"},
                                     },
                                     "required": ["position", "car_model", "car_number",
-                                                 "number_plate_visible", "parking_quality"],
+                                                 "number_plate_visible", "parking_quality",
+                                                 "is_ev"],
                                     "additionalProperties": False,
                                 },
                             },
@@ -546,9 +592,11 @@ def _query_gemini_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> 
                             "car_number":           {"type": "string"},
                             "number_plate_visible": {"type": "boolean"},
                             "parking_quality":      {"type": "string"},
+                            "is_ev":                {"type": "string"},
                         },
                         "required": ["position", "car_model", "car_number",
-                                     "number_plate_visible", "parking_quality"],
+                                     "number_plate_visible", "parking_quality",
+                                     "is_ev"],
                     },
                 },
             },
@@ -602,6 +650,8 @@ def _merge_llm(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, 
             logger.info("[VEHICLE] Gemini filled model at position=%s: %s", v["position"], v["car_model"])
         if v["parking_quality"] == "unknown" and sec["parking_quality"] != "unknown":
             v["parking_quality"] = sec["parking_quality"]
+        if v.get("is_ev", "unknown") in _IS_EV_NEGATIVE and sec.get("is_ev", "unknown") not in _IS_EV_NEGATIVE:
+            v["is_ev"] = sec["is_ev"]
     return primary
 
 
