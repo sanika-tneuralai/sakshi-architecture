@@ -1652,6 +1652,7 @@ def dashboard_energy_comparison_upload(
 
     from shared.energy_comparison import (
         parse_excel,
+        group_ocpp_transactions,
         match_excel_to_cctv,
         result_to_dict,
         CctvSession,
@@ -1664,6 +1665,18 @@ def dashboard_energy_comparison_upload(
 
     if not excel_rows:
         return {"results": [], "summary": {"total": 0, "matched": 0, "unmatched": 0}}
+
+    # Collapse OCPP rows that share a physical parking session (same id_tag +
+    # connector, meter continuity, < 30 min gap) before matching. Without this,
+    # balanceCutOff-and-resume cycles produce multiple rows that compete for
+    # the same CCTV session and the loss number reflects only one slice.
+    raw_row_count = len(excel_rows)
+    excel_rows = group_ocpp_transactions(excel_rows)
+    if len(excel_rows) != raw_row_count:
+        logger.info(
+            f"[ENERGY_COMPARE] OCPP grouping: {raw_row_count} raw rows → "
+            f"{len(excel_rows)} physical sessions"
+        )
 
     # Constrain CCTV lookup to the date range covered by the Excel so we don't
     # load thousands of irrelevant sessions.

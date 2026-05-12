@@ -25,6 +25,7 @@ them to CCTV plug_time / in_time (both normalised to naive IST).
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -66,7 +67,7 @@ SLOT_TO_CONNECTOR: dict[str, int] = {
 
 @dataclass
 class ExcelRow:
-    """One OCPP transaction from the client Excel."""
+    """One OCPP transaction from the client Excel (or a merged group thereof)."""
     row_index: int
     transaction_id: str | None
     session_id_ocpp: str | None
@@ -81,6 +82,19 @@ class ExcelRow:
     units_kwh: float | None        # Units Consumed(kWh) — authoritative
     meter_start: float | None
     meter_end: float | None
+    # Physical-bay grouping signals. id_tag + charge_point + connector_id is
+    # the only reliable "same physical visit" key: VRN is user-typed and noisy,
+    # model is LLM-extracted and hallucinates (Punch↔Tiago etc.), but id_tag
+    # is the user's app/RFID identity and the bay is hardware.
+    id_tag: str | None = None
+    charge_point: str | None = None
+    stop_reason: str | None = None   # Remote / EVDisconnected / ...
+    closed_by: str | None = None     # balanceCutOff / mobile / CP / ...
+    # Grouping bookkeeping. merged_count==1 means a raw OCPP row; >1 means
+    # group_ocpp_transactions collapsed several adjacent rows into this one.
+    merged_count: int = 1
+    merged_transaction_ids: list[str] = field(default_factory=list)
+    vrn_variants: list[str] = field(default_factory=list)   # distinct vrn_raw spellings in the group
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -236,6 +250,10 @@ _HEADER_MAP = {
     "units consumed":        "_units",             # matches "Units Consumed(kWh)"
     "meter start":           "_meter_start",
     "meter end":             "_meter_end",
+    "id tag":                "_id_tag",            # user identity — grouping key
+    "charge point":          "_charge_point",      # physical station — grouping key
+    "stop reason":           "_stop_reason",       # Remote / EVDisconnected
+    "closed by":             "_closed_by",         # balanceCutOff / mobile / CP
 }
 
 
@@ -294,6 +312,12 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
             except (TypeError, ValueError):
                 return None
 
+        def _str_or_none(v):
+            if v is None:
+                return None
+            s = str(v).strip()
+            return s or None
+
         parsed.append(ExcelRow(
             row_index=row_num,
             transaction_id=str(get("transaction_id")) if get("transaction_id") is not None else None,
@@ -309,8 +333,184 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
             units_kwh=_to_float(get("_units")),
             meter_start=_to_float(get("_meter_start")),
             meter_end=_to_float(get("_meter_end")),
+            id_tag=_str_or_none(get("_id_tag")),
+            charge_point=_str_or_none(get("_charge_point")),
+            stop_reason=_str_or_none(get("_stop_reason")),
+            closed_by=_str_or_none(get("_closed_by")),
         ))
     return parsed
+
+
+# ── Physical-session grouping ───────────────────────────────────────────────
+#
+# Why this exists:
+# A single physical parking session frequently produces multiple OCPP rows.
+# A user runs out of balance mid-charge (Stop Reason="Remote",
+# Closed By="balanceCutOff"), tops up via the app, and resumes within minutes.
+# Each restart is a fresh OCPP transaction but the car never moved. The CCTV
+# side sees one continuous ChargingSession, so per-row matching strands the
+# extra OCPP rows as "No match" and the matched one carries only a fraction
+# of the real kWh — making the loss number meaningless.
+#
+# The reliable grouping signal is the physical bay + the user identity:
+#   - VRN: user-typed, missing/typo'd often → cannot trust
+#   - Make/Model: extracted by LLM on the CCTV side, hallucinates between
+#     similar models (Tata Punch ↔ Tata Tiago) → cannot trust
+#   - id_tag + charge_point + connector_id: stable hardware/account identity
+#     → trust
+#
+# Plus two adjacency checks that must hold for a merge:
+#   - Time gap between rows < GROUP_TIME_GAP_MAX_SECONDS (came back quickly)
+#   - Meter continuity: B.meter_start ≈ A.meter_end (same physical plug)
+
+# Time cap is the sanity ceiling; meter continuity is the real proof. A
+# < 200 Wh drift between A.meter_end and B.meter_start means the connector
+# physically never released the car. 4h covers extended balance-top-up
+# breaks observed in the 2026-05-10 Volvo data (53 min + 1h 48m gaps with
+# 47 / 58 Wh meter drift across them).
+GROUP_TIME_GAP_MAX_SECONDS = 4 * 60 * 60   # 4 hours
+GROUP_METER_DRIFT_MAX_WH   = 200           # 0.2 kWh
+# Meter readings in this dataset are in Wh (e.g. 54336429 → 54348238 = 11.81 kWh).
+
+
+def _has_group_keys(r: ExcelRow) -> bool:
+    """A row can participate in grouping only when all physical keys are present."""
+    return (
+        r.id_tag is not None
+        and r.charge_point is not None
+        and r.connector_id is not None
+        and r.start_dt is not None
+    )
+
+
+def _can_merge(prev: ExcelRow, curr: ExcelRow) -> bool:
+    """True when prev and curr are adjacent OCPP rows of the same physical session."""
+    if (prev.charge_point, prev.connector_id, prev.id_tag) != \
+       (curr.charge_point, curr.connector_id, curr.id_tag):
+        return False
+    if prev.end_dt is None or curr.start_dt is None:
+        return False
+    gap_s = (curr.start_dt - prev.end_dt).total_seconds()
+    # Allow tiny negative drift (clock skew between OCPP server and charger)
+    # but reject real overlap — overlapping transactions on one connector are
+    # a data-quality problem, not a same-session signal.
+    if gap_s < -60 or gap_s >= GROUP_TIME_GAP_MAX_SECONDS:
+        return False
+    if prev.meter_end is None or curr.meter_start is None:
+        return False
+    meter_diff = curr.meter_start - prev.meter_end
+    # Meter is monotonic on a connector — non-negative diff only, within tolerance.
+    return 0 <= meter_diff < GROUP_METER_DRIFT_MAX_WH
+
+
+def _merge_group(group: list[ExcelRow]) -> ExcelRow:
+    """Collapse a list of adjacent OCPP rows into one merged ExcelRow."""
+    if len(group) == 1:
+        r = group[0]
+        # Even singletons carry their transaction_id in the merged list so
+        # the dashboard's drill-down has a uniform shape.
+        if not r.merged_transaction_ids and r.transaction_id:
+            r.merged_transaction_ids = [r.transaction_id]
+        if r.vrn_raw and not r.vrn_variants:
+            r.vrn_variants = [r.vrn_raw]
+        return r
+
+    first, last = group[0], group[-1]
+
+    def _mode(values: list[Any]) -> Any:
+        clean = [v for v in values if v not in (None, "")]
+        if not clean:
+            return None
+        return Counter(clean).most_common(1)[0][0]
+
+    # Sums (None when every row is None for that field).
+    units_vals    = [r.units_kwh        for r in group if r.units_kwh        is not None]
+    duration_vals = [r.duration_seconds for r in group if r.duration_seconds is not None]
+    total_units    = sum(units_vals)    if units_vals    else None
+    total_duration = sum(duration_vals) if duration_vals else None
+
+    # Mode-by-frequency on the normalized VRN (typo-tolerant). Pick a raw
+    # spelling that maps back to the mode; on tie, prefer the longest one
+    # so the dashboard surfaces the most plate detail (e.g. "KL 64 L 5395"
+    # over "KL64L5395").
+    vrn_norm_mode = _mode([r.vrn_norm for r in group])
+    raw_candidates = [r.vrn_raw for r in group if r.vrn_norm == vrn_norm_mode and r.vrn_raw]
+    vrn_raw_mode = max(raw_candidates, key=len) if raw_candidates else None
+
+    # Distinct raw spellings (input order preserved) — exposes user-typed
+    # variation for the dashboard / audit trail.
+    seen: dict[str, None] = {}
+    for r in group:
+        if r.vrn_raw and r.vrn_raw not in seen:
+            seen[r.vrn_raw] = None
+    vrn_variants = list(seen.keys())
+
+    tx_ids = [r.transaction_id for r in group if r.transaction_id]
+
+    return ExcelRow(
+        row_index=first.row_index,
+        transaction_id=first.transaction_id,     # canonical = first
+        session_id_ocpp=first.session_id_ocpp,
+        start_dt=min((r.start_dt for r in group if r.start_dt is not None), default=None),
+        end_dt  =max((r.end_dt   for r in group if r.end_dt   is not None), default=None),
+        duration_seconds=total_duration,
+        connector_id=first.connector_id,
+        vrn_raw=vrn_raw_mode,
+        vrn_norm=vrn_norm_mode,
+        make=_mode([r.make  for r in group]),
+        model=_mode([r.model for r in group]),
+        units_kwh=total_units,
+        meter_start=first.meter_start,
+        meter_end=last.meter_end,
+        id_tag=first.id_tag,
+        charge_point=first.charge_point,
+        # Last row's stop reason is the real exit signal. Intermediate
+        # balanceCutOffs are interruptions, not the final termination.
+        stop_reason=last.stop_reason,
+        closed_by=last.closed_by,
+        merged_count=len(group),
+        merged_transaction_ids=tx_ids,
+        vrn_variants=vrn_variants,
+    )
+
+
+def group_ocpp_transactions(rows: list[ExcelRow]) -> list[ExcelRow]:
+    """
+    Collapse adjacent OCPP transactions of the same physical session into one.
+
+    See module-level comment block above for the rule and rationale. Rows
+    that lack any grouping key (id_tag / charge_point / connector_id /
+    start_dt) pass through unchanged — they can't participate in a merge
+    safely without those signals.
+
+    Output preserves the original row_index ordering of the file so the
+    dashboard sees a stable layout.
+    """
+    if not rows:
+        return rows
+
+    sortable = [r for r in rows if _has_group_keys(r)]
+    passthrough = [r for r in rows if not _has_group_keys(r)]
+
+    sortable.sort(key=lambda r: (
+        r.charge_point or "",
+        r.connector_id if r.connector_id is not None else -1,
+        r.id_tag or "",
+        r.start_dt or datetime.min,
+    ))
+
+    groups: list[list[ExcelRow]] = []
+    for r in sortable:
+        if groups and _can_merge(groups[-1][-1], r):
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+
+    merged = [_merge_group(grp) for grp in groups]
+
+    out = merged + passthrough
+    out.sort(key=lambda r: r.row_index)
+    return out
 
 
 # ── Matcher ─────────────────────────────────────────────────────────────────
@@ -518,4 +718,15 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "match_score": r.score,
         "match_reasons": r.reasons,
         "confidence": r.confidence,
+        # Physical-session grouping metadata. merged_count > 1 means
+        # group_ocpp_transactions collapsed N raw OCPP rows into this one;
+        # the dashboard can show a "merged from N" badge and drill down via
+        # transaction_ids. vrn_variants lists every distinct user-typed
+        # spelling we saw in the group (typo evidence).
+        "merged_count": ex.merged_count,
+        "transaction_ids": ex.merged_transaction_ids,
+        "vrn_variants": ex.vrn_variants,
+        "stop_reason": ex.stop_reason,
+        "closed_by": ex.closed_by,
+        "id_tag": ex.id_tag,
     }
