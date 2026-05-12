@@ -1997,28 +1997,43 @@ def dashboard_energy_analysis(request: dict):
         f"loss {parallel_summary['parallel']['loss_kwh']:+.2f} ({parallel_summary['parallel']['loss_pct']:+.1f}%)"
     )
 
-    hourly_block = "\n".join(
-        f"  {h['hour']:02d}:00  {h['sessions']:3d} sess  "
-        f"client {h['client_kwh']:7.2f}  loss {h['loss_kwh']:+7.2f}  "
-        f"parallel {h['parallel']}/{h['sessions']}"
-        for h in hourly_list
-    ) or "  (no rows with a parseable OCPP start time)"
+    prompt = f"""You are writing a short, plain-English energy report for the
+operator of an EV charging station. The reader runs the station day-to-day
+and is NOT a data analyst — write so a non-technical person can follow it.
+Avoid jargon. No phrases like "shared-meter double-counting", "loss
+attribution", "indicative", "decompose", "structural driver", "metering
+discrepancy", etc. When a technical caveat is important, say it in everyday
+words.
 
-    prompt = f"""You are an EV charging station energy analyst. The aggregates below
-are already correctly computed — do NOT recompute, just narrate them.
+The aggregates below are already correctly computed — do NOT recompute, just
+narrate them clearly.
 
-loss = client_kWh − meter_kWh (per session, summed). Positive loss means the
-client billed MORE than the shared meter saw for that interval. The shared
-meter double-counts during parallel charging, so per-session loss is most
-trustworthy on SOLO sessions. Treat the parallel-session figures as indicative
-but acknowledge the double-counting caveat when relevant.
+What "loss" means (explain like this when it comes up):
+- Loss = the energy the customer was BILLED for, minus the energy the
+  station meter measured during that car's stay.
+- A positive loss means the customer paid for more energy than the meter
+  saw — possibly an over-bill or a meter problem.
+- IMPORTANT context to mention when discussing parallel sessions: this
+  station has ONE meter that covers BOTH connectors. When two cars are
+  charging at the same time, the meter reading gets split between them, so
+  the per-car "loss" number for parallel sessions can look bigger than it
+  really is. Solo sessions are more reliable for judging real loss.
 
-The question to answer: WHERE is the energy loss concentrated? Use the four
-dimensions below — model, connector, solo-vs-parallel, hour-of-day — to
-identify the dominant driver(s). Call out correlations (e.g. loss-heavy
-models clustering on one connector, or parallel sessions clustered in
-specific hours) when the numbers support them. If signals are weak or
-mixed, say so plainly — do not invent patterns.
+What to answer: in everyday words, WHERE is the loss coming from? Use the
+three dimensions below — model, connector, solo-vs-parallel — to find the
+main driver. If a pattern is weak or mixed, just say so plainly. Don't
+invent patterns and don't pad with caveats — keep it short and useful.
+
+For the "recommendations" list: each item should be ONE concrete thing the
+operator can actually do (or check) next. Plain action verbs. No technical
+terminology. Avoid words like "audit", "cross-reference", "decompose",
+"sub-metering", "attribution". Examples of good style:
+  - "Compare the customer's app bill with the station meter for the
+     Volvo session on May 10 to see if the customer was overbilled."
+  - "Add a small meter on each connector so you can tell which car used
+     how much energy without guessing."
+  - "Watch the Tata Tiago charging sessions next week — the loss number
+     for them is much higher than other cars."
 
 ## Top-level
 - Sessions: {summary.get('total', '?')} (matched {summary.get('matched', '?')}, unmatched {summary.get('unmatched', '?')})
@@ -2034,18 +2049,14 @@ mixed, say so plainly — do not invent patterns.
 ## Solo vs parallel
 {parallel_block}
 
-## Hour-of-day (matched sessions only; parallel = N/total at that hour)
-{hourly_block}
-
 Return ONLY this JSON shape, filled in:
 {{
-  "loss_breakdown":   "1-2 sentences naming the dominant driver(s) of loss with numbers",
-  "model_pattern":    "1 sentence on per-model loss; say 'no clear pattern' if so",
-  "connector_pattern":"1 sentence comparing connectors; say so if balanced",
-  "parallel_pattern": "1 sentence comparing solo vs parallel loss %; 'sample too small' is acceptable",
-  "hour_pattern":     "1 sentence on hours that concentrate loss, noting any parallel correlation",
-  "patterns":         ["bullet", "bullet", "bullet"],
-  "recommendations":  ["action", "action", "action"],
+  "loss_breakdown":   "1-2 plain sentences naming where most of the loss is coming from, with the numbers",
+  "model_pattern":    "1 plain sentence about which car models lose the most; 'no clear pattern' if so",
+  "connector_pattern":"1 plain sentence comparing connector 1 vs connector 2; say so if they're roughly equal",
+  "parallel_pattern": "1 plain sentence comparing solo vs parallel sessions; mention the one-meter caveat in everyday words; 'sample too small' is acceptable",
+  "patterns":         ["short plain-English bullet", "short plain-English bullet", "short plain-English bullet"],
+  "recommendations":  ["one concrete plain-English action", "one concrete plain-English action", "one concrete plain-English action"],
   "risk_level":       "LOW | MEDIUM | HIGH"
 }}
 """
@@ -2070,14 +2081,13 @@ Return ONLY this JSON shape, filled in:
                                 "model_pattern":     {"type": "string"},
                                 "connector_pattern": {"type": "string"},
                                 "parallel_pattern":  {"type": "string"},
-                                "hour_pattern":      {"type": "string"},
                                 "patterns":          {"type": "array", "items": {"type": "string"}},
                                 "recommendations":   {"type": "array", "items": {"type": "string"}},
                                 "risk_level":        {"type": "string"},
                             },
                             "required": [
                                 "loss_breakdown", "model_pattern", "connector_pattern",
-                                "parallel_pattern", "hour_pattern",
+                                "parallel_pattern",
                                 "patterns", "recommendations", "risk_level",
                             ],
                             "additionalProperties": False,
