@@ -36,7 +36,12 @@ from openpyxl import load_workbook
 # ── Config ──────────────────────────────────────────────────────────────────
 
 WEIGHT_VRN_MATCH        = 3
-WEIGHT_VRN_CONFLICT     = -5
+# VRN-conflict penalty is 0 by design: user-typed VRNs on the OCPP side are
+# noisy (typos, spacing variants, occasional wrong plates) and our CCTV-side
+# VRN is LLM-extracted (also fallible). A mismatch is therefore NOT trustworthy
+# negative evidence — only an exact normalized match is a positive signal.
+# Strong matches still happen via time/duration/model; VRN can no longer veto.
+WEIGHT_VRN_CONFLICT     = 0
 WEIGHT_MODEL_MATCH      = 2
 WEIGHT_GUN_MATCH        = 1
 WEIGHT_DURATION_TIGHT   = 2   # within ±3 min
@@ -578,9 +583,18 @@ def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
             reasons.append("gun")
 
     # Duration proximity (or penalty when both are known and far apart).
+    # Use the OCPP wall-clock span (end_dt - start_dt) rather than the
+    # reported duration_seconds. For ungrouped rows these are equal. For
+    # grouped rows, duration_seconds is the SUM of charging time across N
+    # transactions (e.g. 1h 55m for the Volvo's 3 sub-sessions) while the
+    # wall-clock span is start-of-first to end-of-last (4h 36m) — which is
+    # what lines up with CCTV's plug_time → plug_out_time window.
     cctv_dur = cctv.duration_seconds
-    if excel.duration_seconds is not None and cctv_dur is not None:
-        diff = abs(excel.duration_seconds - cctv_dur)
+    excel_wall_dur = None
+    if excel.start_dt is not None and excel.end_dt is not None:
+        excel_wall_dur = int((excel.end_dt - excel.start_dt).total_seconds())
+    if excel_wall_dur is not None and cctv_dur is not None:
+        diff = abs(excel_wall_dur - cctv_dur)
         if diff <= DURATION_TIGHT_SECONDS:
             score += WEIGHT_DURATION_TIGHT
             reasons.append(f"duration±3m({diff}s)")
