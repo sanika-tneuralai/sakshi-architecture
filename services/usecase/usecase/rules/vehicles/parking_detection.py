@@ -83,7 +83,7 @@ def _llm_track_id(camera_id: str, roi_name: str) -> str:
 # into multiple ChargingSession rows.
 CAR_MAYBE_GONE_SECONDS    = 30   # absent this long → enter MAYBE_GONE
 CAR_RETURN_GRACE_SECONDS  = 60   # in MAYBE_GONE; a return cancels (cleared in occupied branch)
-CAR_CONFIRM_GONE_SECONDS  = 60   # additional absence after grace → fire outtime
+CAR_CONFIRM_GONE_SECONDS  = 30   # additional absence after grace → fire outtime
 
 
 def _now_dt() -> datetime:
