@@ -86,6 +86,28 @@ def init_db():
         raise
 
 
+def ensure_schema():
+    """Apply idempotent column additions on an already-deployed schema.
+
+    `Base.metadata.create_all` only creates *missing tables*; it never alters
+    existing ones. Production already has the `camera` table populated, so new
+    columns added to the Camera model (rtsp_url, fps) have to be applied with
+    explicit ALTER TABLE statements. Postgres' `ADD COLUMN IF NOT EXISTS` keeps
+    this safe to run on every startup.
+
+    Add new ALTERs to the list below as the schema evolves; do not remove old
+    ones — they're cheap on a column that already exists.
+    """
+    from sqlalchemy import text
+    statements = [
+        "ALTER TABLE camera ADD COLUMN IF NOT EXISTS rtsp_url TEXT",
+        "ALTER TABLE camera ADD COLUMN IF NOT EXISTS fps INTEGER NOT NULL DEFAULT 5",
+    ]
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+
+
 def test_connection():
     """
     Test database connection.

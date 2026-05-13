@@ -28,6 +28,14 @@ class Camera(Base):
     camera_id = Column(String(255), primary_key=True)
     name = Column(String(255))
     location = Column(String(255))
+    # rtsp_url + fps let the orchestrator be the source of truth for the RTSP
+    # source. The orchestrator pushes these to decode-detect's POST /camera/start
+    # on its own startup and whenever decode-detect comes back from a restart,
+    # so the operator only registers a camera once. rtsp_url stays nullable for
+    # backwards compat with rows created before this column existed (existing
+    # cameras keep working until they're re-registered with an RTSP URL).
+    rtsp_url = Column(Text, nullable=True)
+    fps = Column(Integer, nullable=False, server_default="5")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

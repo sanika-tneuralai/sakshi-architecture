@@ -50,8 +50,17 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from shared.database.persistence import get_camera_rois, get_camera_usecases, get_class_thresholds, upsert_charging_session, persist_alerts_from_results, close_stale_sessions
-from shared.database.connection import SessionLocal
+from shared.database.persistence import (
+    get_camera_rois,
+    get_camera_usecases,
+    get_class_thresholds,
+    upsert_charging_session,
+    persist_alerts_from_results,
+    close_stale_sessions,
+    upsert_camera_rtsp,
+    list_registered_cameras,
+)
+from shared.database.connection import SessionLocal, ensure_schema
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -235,6 +244,22 @@ class CameraStats:
 class CameraConfig(BaseModel):
     """Configuration for a single camera pipeline"""
     camera_id: str = Field(..., description="Unique camera identifier")
+    rtsp_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "RTSP stream URL (or local video file path). If provided, the "
+            "orchestrator persists it and pushes /camera/start to decode-detect "
+            "automatically. If omitted, the existing rtsp_url stored in the "
+            "camera DB row is used; if there isn't one, decode-detect is "
+            "assumed to be already serving the stream."
+        ),
+    )
+    fps: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        description="Frame extraction rate sent to decode-detect /camera/start",
+    )
     usecases: List[str] = Field(
         default=["person_in_roi", "crowd_in_roi", "restricted_zone_breach"],
         description="List of usecases to evaluate"
@@ -475,6 +500,105 @@ async def send_alerts(camera_id: str, usecase_results: List[dict]) -> dict:
         data = response.json()
         logger.debug(f"[{camera_id}] alert response: {data}")
         return data
+
+
+# =============================================================================
+# DECODE-DETECT REGISTRATION
+# =============================================================================
+# Orchestrator is the source of truth for camera RTSP config. It pushes
+# /camera/start to decode-detect:
+#   1. On POST /pipeline/start (operator registered a new camera)
+#   2. On orchestrator startup (replay every Camera row with rtsp_url set)
+#   3. On decode-detect down→up transition (heartbeat detected recovery)
+# This means an operator only types the RTSP URL once; both services recover
+# on their own from restarts/reboots without manual re-entry.
+
+DECODE_DETECT_PUSH_TIMEOUT = float(os.getenv("DECODE_DETECT_PUSH_TIMEOUT", "15.0"))
+DECODE_DETECT_HEARTBEAT_INTERVAL = float(os.getenv("DECODE_DETECT_HEARTBEAT_INTERVAL", "15.0"))
+
+
+async def push_camera_to_decode_detect(camera_id: str, rtsp_url: str, fps: int) -> bool:
+    """POST /camera/start on decode-detect. Returns True on success or already-running.
+
+    Treats a 400 "already exists" response as success — decode-detect already
+    has the camera registered, which is exactly the desired end state.
+    Any other failure is logged and returns False; the caller decides whether
+    to abort or continue (the heartbeat will retry later either way).
+    """
+    try:
+        response = await http_client.post(
+            f"{CAMERA_DETECTION_URL}/camera/start",
+            json={"camera_id": camera_id, "rtsp_url": rtsp_url, "fps": fps},
+            timeout=DECODE_DETECT_PUSH_TIMEOUT,
+        )
+        if response.status_code == 200:
+            logger.info(f"[{camera_id}] Pushed /camera/start to decode-detect")
+            return True
+        # decode-detect raises 400 with "already exists" when the camera_id is
+        # already registered. That's the goal state — treat as success.
+        if response.status_code == 400 and "already exists" in response.text:
+            logger.info(f"[{camera_id}] decode-detect already has camera registered")
+            return True
+        logger.warning(
+            f"[{camera_id}] decode-detect /camera/start returned "
+            f"{response.status_code}: {response.text}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"[{camera_id}] Failed to push /camera/start: {e}")
+        return False
+
+
+async def replay_cameras_to_decode_detect() -> int:
+    """Re-push every camera row with an rtsp_url to decode-detect.
+
+    Called on orchestrator startup and from the heartbeat task whenever
+    decode-detect comes back online. Returns the number of successful pushes.
+    """
+    cameras = list_registered_cameras()
+    if not cameras:
+        return 0
+    logger.info(f"Replaying {len(cameras)} camera registration(s) to decode-detect")
+    successes = 0
+    for cam in cameras:
+        ok = await push_camera_to_decode_detect(cam["camera_id"], cam["rtsp_url"], cam["fps"])
+        if ok:
+            successes += 1
+    return successes
+
+
+async def decode_detect_heartbeat():
+    """Watch decode-detect /health and re-push cameras on down→up transition.
+
+    Why this exists: decode-detect runs on an edge box that can lose power,
+    crash, or reboot. When it comes back, its in-memory camera registry is
+    empty and nothing will produce frames until something re-POSTs
+    /camera/start. This task closes that gap automatically.
+    """
+    last_healthy: Optional[bool] = None
+    while True:
+        try:
+            response = await http_client.get(
+                f"{CAMERA_DETECTION_URL}/health",
+                timeout=5.0,
+            )
+            healthy = response.status_code == 200
+        except Exception:
+            healthy = False
+
+        if last_healthy is False and healthy:
+            logger.warning(
+                "decode-detect recovered (was unhealthy) — re-pushing camera registrations"
+            )
+            try:
+                await replay_cameras_to_decode_detect()
+            except Exception as e:
+                logger.error(f"Camera replay after decode-detect recovery failed: {e}")
+        elif last_healthy is True and not healthy:
+            logger.warning("decode-detect became unhealthy — will replay cameras on recovery")
+
+        last_healthy = healthy
+        await asyncio.sleep(DECODE_DETECT_HEARTBEAT_INTERVAL)
 
 
 # =============================================================================
@@ -873,7 +997,8 @@ async def lifespan(app: FastAPI):
     Application lifespan: initialize shared resources on startup, cleanup on shutdown.
     """
     global http_client, camera_detection_semaphore, usecase_semaphore, alert_semaphore, pipeline_manager
-    
+    heartbeat_task: Optional[asyncio.Task] = None
+
     # Startup
     logger.info("=" * 60)
     logger.info("Starting Async Orchestration Service")
@@ -929,19 +1054,51 @@ async def lifespan(app: FastAPI):
     # Initialize pipeline manager
     pipeline_manager = PipelineManager()
     logger.info("✓ Pipeline manager initialized")
-    
+
+    # Apply idempotent schema additions (rtsp_url, fps on camera table).
+    # Non-fatal: if the DB is unreachable the service can still run for
+    # dashboard reads from cache, etc.
+    try:
+        ensure_schema()
+        logger.info("✓ Schema synced (camera.rtsp_url, camera.fps)")
+    except Exception as e:
+        logger.warning(f"ensure_schema() failed (continuing): {e}")
+
+    # Replay persisted camera registrations to decode-detect so the operator
+    # doesn't have to re-POST /camera/start after an orchestrator restart.
+    try:
+        pushed = await replay_cameras_to_decode_detect()
+        if pushed:
+            logger.info(f"✓ Re-registered {pushed} camera(s) with decode-detect on startup")
+    except Exception as e:
+        logger.warning(f"Camera replay on startup failed (heartbeat will retry): {e}")
+
+    # Start the decode-detect heartbeat — handles the case where decode-detect
+    # is the one that restarts (edge box reboot). On down→up it re-pushes every
+    # registered camera so detection resumes without operator intervention.
+    heartbeat_task = asyncio.create_task(decode_detect_heartbeat(), name="decode-detect-heartbeat")
+    logger.info("✓ Decode-detect heartbeat task started")
+
     logger.info("Async Orchestration Service started successfully")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down Async Orchestration Service")
-    
+
+    # Cancel heartbeat task
+    if heartbeat_task and not heartbeat_task.done():
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
     # Stop all pipelines gracefully
     if pipeline_manager:
         stop_result = await pipeline_manager.stop_all()
         logger.info(f"Stopped {stop_result.get('count', 0)} pipeline(s)")
-    
+
     # Close HTTP client
     if http_client:
         await http_client.aclose()
@@ -1025,6 +1182,35 @@ async def start_camera_pipeline(camera_id: str, config: CameraConfig):
     """
     # Override camera_id from config with path parameter
     config.camera_id = camera_id
+
+    # Persist the RTSP URL + fps so this camera survives both an orchestrator
+    # restart (lifespan replay) and a decode-detect restart (heartbeat replay).
+    # If the caller omitted rtsp_url, fall back to whatever's already stored —
+    # this preserves the original ergonomics where the operator had registered
+    # the camera with decode-detect out-of-band.
+    rtsp_url = config.rtsp_url
+    if rtsp_url:
+        upsert_camera_rtsp(camera_id, rtsp_url, config.fps)
+    else:
+        stored = next(
+            (c for c in list_registered_cameras() if c["camera_id"] == camera_id),
+            None,
+        )
+        if stored:
+            rtsp_url = stored["rtsp_url"]
+            config.fps = stored["fps"]
+
+    # Push to decode-detect. A failure here doesn't block the pipeline from
+    # starting — the heartbeat task will retry on the next recovery. The polling
+    # loop will simply fail until decode-detect catches up.
+    if rtsp_url:
+        await push_camera_to_decode_detect(camera_id, rtsp_url, config.fps)
+    else:
+        logger.warning(
+            f"[{camera_id}] No rtsp_url provided and none stored — "
+            "skipping /camera/start push (assuming external registration)"
+        )
+
     return await pipeline_manager.start_pipeline(config)
 
 

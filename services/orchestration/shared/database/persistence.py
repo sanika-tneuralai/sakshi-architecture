@@ -13,7 +13,55 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 from shared.database.connection import SessionLocal
-from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert
+from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert, Camera
+
+
+# ---------------------------------------------------------------------------
+# Camera registration helpers
+# ---------------------------------------------------------------------------
+
+def upsert_camera_rtsp(camera_id: str, rtsp_url: str, fps: int) -> None:
+    """Persist the RTSP URL + fps for a camera_id.
+
+    Creates the row if it doesn't exist; otherwise updates rtsp_url/fps in place.
+    Called from POST /pipeline/start so the orchestrator can push /camera/start
+    to decode-detect on its own (now and again on every recovery).
+    """
+    session = SessionLocal()
+    try:
+        cam = session.query(Camera).filter(Camera.camera_id == camera_id).one_or_none()
+        if cam is None:
+            cam = Camera(camera_id=camera_id, rtsp_url=rtsp_url, fps=fps)
+            session.add(cam)
+        else:
+            cam.rtsp_url = rtsp_url
+            cam.fps = fps
+        session.commit()
+    finally:
+        session.close()
+
+
+def list_registered_cameras() -> List[Dict[str, Any]]:
+    """Return every camera row that has an rtsp_url set.
+
+    Used by the orchestrator on startup and by the decode-detect heartbeat to
+    re-push /camera/start. Rows without an rtsp_url (legacy rows created before
+    this column existed) are silently skipped — the orchestrator can't push
+    them, the operator must register one via /pipeline/start first.
+    """
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(Camera)
+            .filter(Camera.rtsp_url.isnot(None))
+            .all()
+        )
+        return [
+            {"camera_id": r.camera_id, "rtsp_url": r.rtsp_url, "fps": r.fps}
+            for r in rows
+        ]
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
