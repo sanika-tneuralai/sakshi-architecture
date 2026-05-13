@@ -543,6 +543,13 @@ class MatchResult:
             return None
         return round(c - m, 3)
 
+    @property
+    def loss_pct(self) -> float | None:
+        c, l = self.client_kwh, self.loss_kwh
+        if c is None or l is None or c == 0:
+            return None
+        return round((l / c) * 100, 1)
+
 
 def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
     score = 0
@@ -725,6 +732,7 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "client_kwh": ex.units_kwh,
         "meter_kwh": r.meter_kwh,
         "loss_kwh": r.loss_kwh,
+        "loss_pct": r.loss_pct,
         "matched_session_id": cc.session_id if cc else None,
         "matched_slot_id": cc.slot_id if cc else None,
         "matched_car_number": cc.car_number if cc else None,

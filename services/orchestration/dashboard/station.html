@@ -561,7 +561,7 @@ function fmtDurationSecs(secs) {
 }
 
 function EnergyLossTable({ results, summary }) {
-  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)'];
+  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)', 'Loss %'];
   const [dateFilter, setDateFilter] = React.useState('all');
 
   // Distinct OCPP dates from the current upload (sorted newest-first).
@@ -639,6 +639,9 @@ function EnergyLossTable({ results, summary }) {
           {visibleSummary.total_loss_kwh != null && (
             <div>Total loss: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{visibleSummary.total_loss_kwh.toFixed(2)} kWh</span></div>
           )}
+          {visibleSummary.total_loss_kwh != null && visibleSummary.total_client_kwh > 0 && (
+            <div>Loss %: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{((visibleSummary.total_loss_kwh / visibleSummary.total_client_kwh) * 100).toFixed(1)}%</span></div>
+          )}
         </div>
       )}
       <div className="overflow-x-auto">
@@ -674,6 +677,13 @@ function EnergyLossTable({ results, summary }) {
                     {hasLoss ? (
                       <span className={loss > 0.1 ? 'font-semibold text-rose-600' : loss < -0.1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
                         {loss.toFixed(3)}
+                      </span>
+                    ) : <NA text="—" />}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
+                    {r.loss_pct != null ? (
+                      <span className={r.loss_pct > 1 ? 'font-semibold text-rose-600' : r.loss_pct < -1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
+                        {r.loss_pct > 0 ? '+' : ''}{r.loss_pct.toFixed(1)}%
                       </span>
                     ) : <NA text="—" />}
                   </td>
