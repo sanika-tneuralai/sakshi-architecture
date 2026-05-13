@@ -561,7 +561,7 @@ function fmtDurationSecs(secs) {
 }
 
 function EnergyLossTable({ results, summary }) {
-  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)', 'Loss %'];
+  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)'/*, 'Loss %'*/];
   const [dateFilter, setDateFilter] = React.useState('all');
 
   // Distinct OCPP dates from the current upload (sorted newest-first).
@@ -639,9 +639,10 @@ function EnergyLossTable({ results, summary }) {
           {visibleSummary.total_loss_kwh != null && (
             <div>Total loss: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{visibleSummary.total_loss_kwh.toFixed(2)} kWh</span></div>
           )}
+          {/* Loss % summary hidden — parallel sessions skew total
           {visibleSummary.total_loss_kwh != null && visibleSummary.total_client_kwh > 0 && (
             <div>Loss %: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{((visibleSummary.total_loss_kwh / visibleSummary.total_client_kwh) * 100).toFixed(1)}%</span></div>
-          )}
+          )} */}
         </div>
       )}
       <div className="overflow-x-auto">
@@ -659,9 +660,9 @@ function EnergyLossTable({ results, summary }) {
             {(filteredResults || []).map((r, i) => {
               const loss = r.loss_kwh;
               const hasLoss = loss != null;
-              const lossPct = r.loss_pct != null
+              /* const lossPct = r.loss_pct != null
                 ? r.loss_pct
-                : (loss != null && r.client_kwh > 0 ? parseFloat(((loss / r.client_kwh) * 100).toFixed(1)) : null);
+                : (loss != null && r.client_kwh > 0 ? parseFloat(((loss / r.client_kwh) * 100).toFixed(1)) : null); */
               return (
                 <tr key={r.excel_row + '-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
                   <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
@@ -683,13 +684,14 @@ function EnergyLossTable({ results, summary }) {
                       </span>
                     ) : <NA text="—" />}
                   </td>
+                  {/* Loss % column hidden — parallel sessions inflate meter_kwh causing misleading negative %
                   <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
                     {lossPct != null ? (
                       <span className={lossPct > 1 ? 'font-semibold text-rose-600' : lossPct < -1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
                         {lossPct > 0 ? '+' : ''}{lossPct.toFixed(1)}%
                       </span>
                     ) : <NA text="—" />}
-                  </td>
+                  </td> */}
                 </tr>
               );
             })}
