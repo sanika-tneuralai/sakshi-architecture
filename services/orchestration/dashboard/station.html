@@ -323,9 +323,7 @@ function NA({ text }) {
 /* ── Sessions Table ── */
 function SessionsTable({ sessions }) {
   const ANOMALY_HOURS = 24;
-  // Gun / Plug In / Plug Out columns hidden — energy is derived from car in/out times.
-  // const cols = ['Session', 'Slot', 'Car Number', 'Car Model', 'Car In', 'Car Out', 'Park Duration', 'Gun', 'Plug In', 'Plug Out', 'Energy (kWh)', 'Status'];
-  const cols = ['Session', 'Slot', 'Car Number', 'Car Model', 'Car In', 'Car Out', 'Park Duration', 'Energy (kWh)', 'Status'];
+  const cols = ['Session', 'Slot', 'Car Number', 'Car Model', 'Car In', 'Car Out', 'Park Duration', 'Gun', 'Plug In', 'Plug Out', 'Energy (kWh)', 'Status'];
 
   if (!sessions.length) {
     return (
@@ -378,17 +376,15 @@ function SessionsTable({ sessions }) {
                   </span>
                 ) : <NA text="—" />}
               </td>
-              {/* Gun / Plug In / Plug Out cells hidden — energy is derived from car in/out times.
               <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">
-                {display(s.gun_number) || <NA text="—" />}
+                {display(s.gun_number) || <NA />}
               </td>
               <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
-                {fmtTime(s.plug_time) || <NA text="—" />}
+                {fmtTime(s.plug_time) || <NA />}
               </td>
               <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">
-                {fmtTime(s.plug_out_time) || <NA text="—" />}
+                {fmtTime(s.plug_out_time) || <NA />}
               </td>
-              */}
               <td className="px-4 py-3 whitespace-nowrap">
                 {s.session_status === 'completed' && s.energy_kwh != null && s.energy_kwh > 0 ? (
                   <span className="inline-flex items-center gap-1 text-xs font-semibold text-brand-700">
