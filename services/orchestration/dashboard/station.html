@@ -659,6 +659,9 @@ function EnergyLossTable({ results, summary }) {
             {(filteredResults || []).map((r, i) => {
               const loss = r.loss_kwh;
               const hasLoss = loss != null;
+              const lossPct = r.loss_pct != null
+                ? r.loss_pct
+                : (loss != null && r.client_kwh > 0 ? parseFloat(((loss / r.client_kwh) * 100).toFixed(1)) : null);
               return (
                 <tr key={r.excel_row + '-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
                   <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
@@ -681,9 +684,9 @@ function EnergyLossTable({ results, summary }) {
                     ) : <NA text="—" />}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
-                    {r.loss_pct != null ? (
-                      <span className={r.loss_pct > 1 ? 'font-semibold text-rose-600' : r.loss_pct < -1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
-                        {r.loss_pct > 0 ? '+' : ''}{r.loss_pct.toFixed(1)}%
+                    {lossPct != null ? (
+                      <span className={lossPct > 1 ? 'font-semibold text-rose-600' : lossPct < -1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
+                        {lossPct > 0 ? '+' : ''}{lossPct.toFixed(1)}%
                       </span>
                     ) : <NA text="—" />}
                   </td>
