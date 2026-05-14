@@ -487,7 +487,84 @@ class ParkingComplianceRule(BaseUsecaseRule):
                 in_slot_bboxes.append(bb)
 
         if not cars:
-            print(f"[COMPLIANCE] no cars — skipping violation check")
+            # YOLO is blind on this frame. Fall back to the cached LLM verdict
+            # so violations still fire on cars YOLO missed (the gun + occlusion
+            # case). For "proper" vehicles we do nothing — parking_detection's
+            # synthetic-car path handles the active-session attribution.
+            if llm_vehicles:
+                for v in llm_vehicles:
+                    raw_quality = v.get("parking_quality")
+                    position    = v.get("position") or "unknown"
+                    if raw_quality not in ("occupies_two_slots", "outside_all_slots", "partially_outside"):
+                        continue
+                    synth_tid = f"llm:{camera_id}:pos:{position}"
+                    slot = state.setdefault(synth_tid, {
+                        "outside_since": None, "wrong_buf": 0, "exit_buf": 0,
+                        "occupied": False, "violated": False, "wrong_fired": False,
+                        "non_ev_fired": False, "intime": None,
+                    })
+
+                    if raw_quality == "occupies_two_slots":
+                        slot["outside_since"] = None
+                        slot["wrong_buf"] += 1
+                        if slot["wrong_buf"] >= ENTRY_FRAMES and not slot["wrong_fired"]:
+                            slot["wrong_fired"] = True
+                            evt = build_event(
+                                event_type="wrong_parking",
+                                camera_id=camera_id,
+                                timestamp=event_ts,
+                                track_id=synth_tid,
+                                metadata={
+                                    "reason": "car occupies multiple ROI slots (LLM-only, YOLO blind)",
+                                    "description": _DESC_DOUBLE_SLOT,
+                                    "verdict_source": "llm_yolo_blind",
+                                    "llm_position": position,
+                                    "llm_car_number": v.get("car_number"),
+                                },
+                            )
+                            violations.append(evt)
+                            publish_sync("violation_events", evt)
+                            logger.warning(
+                                "[COMPLIANCE] Wrong parking (YOLO blind): camera=%s pos=%s",
+                                camera_id, position,
+                            )
+                    else:
+                        # outside_all_slots / partially_outside — unauthorized,
+                        # dwell-gated like the YOLO path.
+                        slot["exit_buf"] = 0
+                        slot["wrong_buf"] = 0
+                        if not slot.get("outside_since"):
+                            slot["outside_since"] = event_ts
+                        outside_since_dt = _parse_iso(slot.get("outside_since"))
+                        elapsed = (
+                            (event_dt - outside_since_dt).total_seconds()
+                            if event_dt and outside_since_dt else 0.0
+                        )
+                        if elapsed >= UNAUTH_DWELL_SECONDS and not slot["violated"]:
+                            slot["violated"] = True
+                            evt = build_event(
+                                event_type="unauthorized_parking",
+                                camera_id=camera_id,
+                                timestamp=event_ts,
+                                track_id=synth_tid,
+                                metadata={
+                                    "reason": "car outside all ROIs (LLM-only, YOLO blind)",
+                                    "description": _DESC_UNAUTHORIZED,
+                                    "dwell_seconds": round(elapsed, 1),
+                                    "verdict_source": "llm_yolo_blind",
+                                    "llm_position": position,
+                                    "llm_car_number": v.get("car_number"),
+                                },
+                            )
+                            violations.append(evt)
+                            publish_sync("violation_events", evt)
+                            logger.warning(
+                                "[COMPLIANCE] Unauthorized parking (YOLO blind): "
+                                "camera=%s pos=%s dwell=%.1fs",
+                                camera_id, position, elapsed,
+                            )
+            else:
+                print(f"[COMPLIANCE] no cars — skipping violation check")
         else:
             for car in cars:
                 track_id = car.get("track_id", "unknown")

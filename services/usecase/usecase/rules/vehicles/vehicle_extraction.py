@@ -143,6 +143,30 @@ def _classify_position(x_center: float, frame_w: float) -> str:
     return "center"
 
 
+def _position_label_to_x(position: str, frame_w: float) -> Optional[float]:
+    """Approximate inverse of _classify_position: maps a position label back
+    to the center x of its band. Returns None for non-band labels."""
+    if frame_w <= 0:
+        return None
+    if position == "left":
+        return frame_w / 6.0
+    if position == "center":
+        return frame_w / 2.0
+    if position == "right":
+        return 5.0 * frame_w / 6.0
+    return None
+
+
+def _polygon_x_range(polygon: List[List[int]]) -> Optional[tuple]:
+    """Return (min_x, max_x) of polygon vertices, or None if malformed."""
+    if not polygon:
+        return None
+    xs = [float(p[0]) for p in polygon if len(p) >= 2]
+    if not xs:
+        return None
+    return (min(xs), max(xs))
+
+
 def _annotate_all_slots(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> np.ndarray:
     """Draw every slot polygon in yellow on a copy of the frame."""
     annotated = image.copy()
@@ -931,13 +955,42 @@ def llm_confirms_vehicle_in_slot(
         # (which would also misfire). That's acceptable — the gate doesn't
         # make things worse.
         return None
+    fw = float(frame_w or DETECTION_W)
     target_x = _polygon_centroid_x(polygon)
-    target_class = _classify_position(target_x, float(frame_w or DETECTION_W))
-    for v in resp.get("vehicles", []):
+    target_class = _classify_position(target_x, fw)
+    vehicles = resp.get("vehicles", [])
+    for v in vehicles:
         if v["position"] == target_class:
             return True
         if v["position"] in ("left_and_right", "multiple"):
             return True
+
+    # Polygon-containment fallback for the single-vehicle properly-parked
+    # case. Close-in camera angles can put a slot's polygon partly across
+    # the visual centre band, so a slot-right car the LLM labels "center"
+    # gets rejected by the strict band match above even though its polygon
+    # actually contains the LLM's reported visual position. Attribute to
+    # the ROI whose x-range covers that visual position; if multiple ROIs
+    # qualify, prefer the one whose centroid is closest. Only applied when
+    # the LLM sees exactly one car and labels it as proper, so we don't
+    # accidentally attribute an unauthorised car to a slot.
+    if len(vehicles) == 1 and vehicles[0].get("parking_quality") == "proper":
+        v_pos_x = _position_label_to_x(vehicles[0].get("position", ""), fw)
+        if v_pos_x is not None and rois:
+            containing = []
+            for rid, poly in rois.items():
+                rng = _polygon_x_range(poly)
+                if rng and rng[0] <= v_pos_x <= rng[1]:
+                    containing.append(rid)
+            if containing:
+                if len(containing) == 1:
+                    return containing[0] == target_slot_id
+                best = min(
+                    containing,
+                    key=lambda rid: abs(_polygon_centroid_x(rois[rid]) - v_pos_x),
+                )
+                return best == target_slot_id
+
     return False
 
 
