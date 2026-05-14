@@ -1110,6 +1110,73 @@ function App() {
           </div>
         </div>
 
+        {/* ── OCPP Excel Upload (sits above the Energy Loss table it feeds) ── */}
+        <div className="flex items-center justify-end gap-3 mb-3">
+          {uploadName && (
+            <span className="text-xs text-slate-500 truncate max-w-[220px]" title={uploadName}>
+              {uploadName}
+            </span>
+          )}
+          <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer text-xs font-semibold transition-colors border ${uploading ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-wait' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:border-slate-300'}`}>
+            {uploading ? 'Processing…' : 'Upload OCPP Excel'}
+            <input
+              type="file"
+              accept=".xlsx,.xlsm"
+              disabled={uploading}
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files && e.target.files[0];
+                if (f) handleExcelUpload(f);
+                e.target.value = '';
+              }}
+            />
+          </label>
+        </div>
+        {uploadError && (
+          <div className="mb-4 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+            <IconWarning />
+            <span className="font-medium">Upload failed:</span> {uploadError}
+          </div>
+        )}
+
+        {/* ── Energy Loss Analysis ── */}
+        <div className="mb-8">
+          <div className="mb-3">
+            <SectionHeader
+              icon={<IconBolt />}
+              title="Energy Loss Analysis"
+              sub="Client OCPP Excel vs. meter-derived estimate"
+            />
+          </div>
+          <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+            <EnergyLossTable results={lossResults} summary={lossSummary} />
+          </div>
+
+          {/* ── AI Analyse Button ── */}
+          {lossResults && lossResults.length > 0 && (
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={handleAnalyse}
+                disabled={analysing}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors shadow-sm ${analysing ? 'bg-slate-200 text-slate-500 cursor-wait' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
+              >
+                <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+                  <path d="M12 2L9 9H2L7.5 13.5L5.5 21L12 17L18.5 21L16.5 13.5L22 9H15L12 2Z" fill="currentColor"/>
+                </svg>
+                {analysing ? 'Analysing…' : 'Analyse with AI'}
+              </button>
+            </div>
+          )}
+
+          {/* ── AI Insight Panel ── */}
+          {analyseError && (
+            <div className="mt-4 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+              <IconWarning /><span className="font-medium">Analysis failed:</span> {analyseError}
+            </div>
+          )}
+          {insight && <InsightPanel insight={insight} aggregates={insightAggregates} results={lossResults} onDismiss={() => { setInsight(null); setInsightAggregates(null); }} />}
+        </div>
+
         {/* ── Sessions Table ── */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
@@ -1173,72 +1240,6 @@ function App() {
             <ComplianceGallery violations={violations} todayOnly={violTodayOnly} />
           </div>
         </div>
-
-        {/* ── Energy Loss Analysis ── */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-3">
-            <SectionHeader
-              icon={<IconBolt />}
-              title="Energy Loss Analysis"
-              sub="Client OCPP Excel vs. meter-derived estimate"
-            />
-            <div className="flex items-center gap-3">
-              {uploadName && (
-                <span className="text-xs text-slate-500 truncate max-w-[200px]" title={uploadName}>
-                  {uploadName}
-                </span>
-              )}
-              <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer text-sm font-semibold transition-colors ${uploading ? 'bg-slate-200 text-slate-500 cursor-wait' : 'bg-brand-600 hover:bg-brand-700 text-white'}`}>
-                {uploading ? 'Processing…' : 'Upload Excel'}
-                <input
-                  type="file"
-                  accept=".xlsx,.xlsm"
-                  disabled={uploading}
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files && e.target.files[0];
-                    if (f) handleExcelUpload(f);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-            </div>
-          </div>
-          {uploadError && (
-            <div className="mb-3 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
-              <IconWarning />
-              <span className="font-medium">Upload failed:</span> {uploadError}
-            </div>
-          )}
-          <div className="bg-white rounded-2xl shadow-card overflow-hidden">
-            <EnergyLossTable results={lossResults} summary={lossSummary} />
-          </div>
-
-          {/* ── AI Analyse Button ── */}
-          {lossResults && lossResults.length > 0 && (
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={handleAnalyse}
-                disabled={analysing}
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors shadow-sm ${analysing ? 'bg-slate-200 text-slate-500 cursor-wait' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
-                  <path d="M12 2L9 9H2L7.5 13.5L5.5 21L12 17L18.5 21L16.5 13.5L22 9H15L12 2Z" fill="currentColor"/>
-                </svg>
-                {analysing ? 'Analysing…' : 'Analyse with AI'}
-              </button>
-            </div>
-          )}
-
-          {/* ── AI Insight Panel ── */}
-          {analyseError && (
-            <div className="mt-4 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
-              <IconWarning /><span className="font-medium">Analysis failed:</span> {analyseError}
-            </div>
-          )}
-          {insight && <InsightPanel insight={insight} aggregates={insightAggregates} results={lossResults} onDismiss={() => { setInsight(null); setInsightAggregates(null); }} />}
-        </div>
-
 
       </main>
     </div>
