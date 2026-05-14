@@ -1997,7 +1997,7 @@ def dashboard_energy_analysis(request: dict):
     import json
     from collections import defaultdict
 
-    DASHBOARD_LLM_PROVIDER = os.getenv("DASHBOARD_LLM_PROVIDER", "claude").strip().lower()
+    DASHBOARD_LLM_PROVIDER = os.getenv("DASHBOARD_LLM_PROVIDER", "openai").strip().lower()
     ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
     ANTHROPIC_MODEL        = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     OPENAI_API_KEY         = os.getenv("OPENAI_API_KEY", "")
