@@ -44,7 +44,11 @@ import os
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, List, Optional
 
-from shared.common.roi import which_rois, which_rois_bbox_overlap
+from shared.common.roi import (
+    is_point_in_roi,
+    which_rois,
+    which_rois_bbox_overlap,
+)
 from usecase.domain.vehicles.events import build_event, publish_sync
 from usecase.rules.base import BaseUsecaseRule
 from usecase.rules.vehicles.vehicle_extraction import (
@@ -209,6 +213,42 @@ _DESC_UNAUTHORIZED_NONEV = "Unauthorised non-EV"
 
 def _empty_compliance_response() -> Dict[str, Any]:
     return {"vehicles": [], "slot_occupancy": {}}
+
+
+def _primary_slot_by_overlap(
+    bbox: Dict[str, float],
+    rois: Dict[str, List[List[int]]],
+) -> Optional[str]:
+    """Return the ROI whose polygon contains the most bbox-grid sample points.
+    Used for wrong-parking attribution: a car straddling two slots is
+    associated with whichever slot covers more of its body, so the matching
+    gun (Gun 1 for ROI_1, Gun 2 for ROI_2, etc.) is a sensible default."""
+    if not bbox or not rois:
+        return None
+    try:
+        x1, y1 = float(bbox["x1"]), float(bbox["y1"])
+        x2, y2 = float(bbox["x2"]), float(bbox["y2"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    steps = 5
+    xs = [x1 + (x2 - x1) * i / (steps - 1) for i in range(steps)]
+    ys = [y1 + (y2 - y1) * i / (steps - 1) for i in range(steps)]
+    best_name, best_hits = None, 0
+    for name, polygon in rois.items():
+        if not polygon:
+            continue
+        hits = sum(1 for x in xs for y in ys if is_point_in_roi(x, y, polygon))
+        if hits > best_hits:
+            best_name, best_hits = name, hits
+    return best_name
+
+
+def _gun_name_for_slot(roi_name: str) -> str:
+    """Mirror of gun_detection._gun_name_for_roi without the cross-module
+    import: 'ROI_2' -> 'Gun 2', 'ROI_left' -> 'Gun ROI_left'."""
+    parts = roi_name.rsplit("_", 1)
+    suffix = parts[-1] if len(parts) == 2 and parts[-1].isdigit() else roi_name
+    return f"Gun {suffix}"
 
 
 def _query_claude_compliance(
@@ -798,6 +838,39 @@ class ParkingComplianceRule(BaseUsecaseRule):
                             "[COMPLIANCE] Wrong parking: camera=%s track=%s rois=%s source=%s",
                             camera_id, track_id, all_matched_rois, verdict_source,
                         )
+
+                        # Also open a charging session for this car so the
+                        # dashboard tracks duration + kWh for the wrong-parked
+                        # vehicle. Attribute to the slot whose polygon covers
+                        # most of the bbox; gun_detection will overwrite
+                        # gun_number if the actual cable is on the other gun.
+                        primary_slot = (
+                            _primary_slot_by_overlap(car.get("bbox") or {}, rois)
+                            or (all_matched_rois[0] if all_matched_rois else None)
+                        )
+                        if primary_slot and not slot["occupied"]:
+                            slot["occupied"] = True
+                            slot["intime"]   = event_ts
+                            primary_gun = _gun_name_for_slot(primary_slot)
+                            intime_evt = build_event(
+                                event_type="parking_intime",
+                                camera_id=camera_id,
+                                timestamp=event_ts,
+                                track_id=track_id,
+                                metadata={
+                                    "source":   "wrong_parking",
+                                    "slot_id":  primary_slot,
+                                    "roi":      primary_slot,
+                                    "gun_name": primary_gun,
+                                    "wrong_parking": True,
+                                },
+                            )
+                            events.append(intime_evt)
+                            publish_sync("parking_events", intime_evt)
+                            logger.info(
+                                "[COMPLIANCE] Wrong-parking session: camera=%s track=%s primary_slot=%s gun=%s",
+                                camera_id, track_id, primary_slot, primary_gun,
+                            )
 
                 else:
                     # "proper" or "across_line" — not a location violation.
