@@ -64,7 +64,7 @@ from usecase.rules.vehicles.vehicle_extraction import (
     _download_image,
     cached_llm_frame_call,
 )
-from workers.redis_state import get_state, set_state
+from workers.redis_state import get_state, get_slot_state, set_state
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,38 @@ def _primary_slot_by_overlap(
         if hits > best_hits:
             best_name, best_hits = name, hits
     return best_name
+
+
+def _session_already_open(
+    camera_id: str,
+    track_id: str,
+    rois: Dict[str, List[List[int]]],
+) -> bool:
+    """Return True when parking_detection already has an active session for
+    this car. Two cases count as "already open":
+
+      1. The track_id starts with "llm:" — those are synthetic LLM-poll
+         tracks that parking_detection itself emits, and parking_detection
+         is the natural owner of that session. parking_compliance must not
+         re-open it from its unauthorized / wrong_parking branches.
+
+      2. Any ROI's Redis state has occupied=True with track_id matching this
+         car's id. parking_detection sets that when it fires parking_intime,
+         so a re-open from parking_compliance would create a duplicate
+         charging_sessions row keyed by the same (camera_id, track_id).
+
+    Used to gate the parking_intime emission inside both violation branches —
+    the violation alert still fires either way, but the session lifecycle
+    stays single-owner."""
+    if not track_id:
+        return False
+    if str(track_id).startswith("llm:"):
+        return True
+    for roi_name in rois.keys():
+        st = get_slot_state(camera_id, roi_name)
+        if st.get("occupied") and st.get("track_id") == track_id:
+            return True
+    return False
 
 
 def _gun_name_for_slot(roi_name: str) -> str:
@@ -787,22 +819,36 @@ class ParkingComplianceRule(BaseUsecaseRule):
 
                         # Same threshold also gates the parking_intime so
                         # session lifecycle stays aligned with the violation.
+                        # Skip when parking_detection already owns a session
+                        # for this track (synthetic LLM tracks, or any track
+                        # with slot.occupied=True) — the alert still fires
+                        # but we don't open a duplicate charging_sessions row.
                         if not slot["occupied"]:
-                            slot["occupied"] = True
-                            slot["intime"] = event_ts
-                            intime_evt = build_event(
-                                event_type="parking_intime",
-                                camera_id=camera_id,
-                                timestamp=slot["intime"],
-                                track_id=track_id,
-                                metadata={"source": "unauthorized_parking"},
-                            )
-                            events.append(intime_evt)
-                            publish_sync("parking_events", intime_evt)
-                            logger.info(
-                                "[COMPLIANCE] Unauthorized car intime: camera=%s track=%s",
-                                camera_id, track_id,
-                            )
+                            if _session_already_open(camera_id, track_id, rois):
+                                slot["occupied"] = True
+                                slot["intime"] = event_ts
+                                logger.info(
+                                    "[COMPLIANCE] Unauthorized intime skipped "
+                                    "(parking_detection session already open): "
+                                    "camera=%s track=%s",
+                                    camera_id, track_id,
+                                )
+                            else:
+                                slot["occupied"] = True
+                                slot["intime"] = event_ts
+                                intime_evt = build_event(
+                                    event_type="parking_intime",
+                                    camera_id=camera_id,
+                                    timestamp=slot["intime"],
+                                    track_id=track_id,
+                                    metadata={"source": "unauthorized_parking"},
+                                )
+                                events.append(intime_evt)
+                                publish_sync("parking_events", intime_evt)
+                                logger.info(
+                                    "[COMPLIANCE] Unauthorized car intime: camera=%s track=%s",
+                                    camera_id, track_id,
+                                )
 
                 elif verdict == "double_slot":
                     # ── Wrong / Double-slot parking (debounced) ───────────────
@@ -844,33 +890,45 @@ class ParkingComplianceRule(BaseUsecaseRule):
                         # vehicle. Attribute to the slot whose polygon covers
                         # most of the bbox; gun_detection will overwrite
                         # gun_number if the actual cable is on the other gun.
+                        # Skip when parking_detection already owns a session
+                        # for this track — alert still fires; no duplicate row.
                         primary_slot = (
                             _primary_slot_by_overlap(car.get("bbox") or {}, rois)
                             or (all_matched_rois[0] if all_matched_rois else None)
                         )
                         if primary_slot and not slot["occupied"]:
-                            slot["occupied"] = True
-                            slot["intime"]   = event_ts
-                            primary_gun = _gun_name_for_slot(primary_slot)
-                            intime_evt = build_event(
-                                event_type="parking_intime",
-                                camera_id=camera_id,
-                                timestamp=event_ts,
-                                track_id=track_id,
-                                metadata={
-                                    "source":   "wrong_parking",
-                                    "slot_id":  primary_slot,
-                                    "roi":      primary_slot,
-                                    "gun_name": primary_gun,
-                                    "wrong_parking": True,
-                                },
-                            )
-                            events.append(intime_evt)
-                            publish_sync("parking_events", intime_evt)
-                            logger.info(
-                                "[COMPLIANCE] Wrong-parking session: camera=%s track=%s primary_slot=%s gun=%s",
-                                camera_id, track_id, primary_slot, primary_gun,
-                            )
+                            if _session_already_open(camera_id, track_id, rois):
+                                slot["occupied"] = True
+                                slot["intime"]   = event_ts
+                                logger.info(
+                                    "[COMPLIANCE] Wrong-parking intime skipped "
+                                    "(parking_detection session already open): "
+                                    "camera=%s track=%s",
+                                    camera_id, track_id,
+                                )
+                            else:
+                                slot["occupied"] = True
+                                slot["intime"]   = event_ts
+                                primary_gun = _gun_name_for_slot(primary_slot)
+                                intime_evt = build_event(
+                                    event_type="parking_intime",
+                                    camera_id=camera_id,
+                                    timestamp=event_ts,
+                                    track_id=track_id,
+                                    metadata={
+                                        "source":   "wrong_parking",
+                                        "slot_id":  primary_slot,
+                                        "roi":      primary_slot,
+                                        "gun_name": primary_gun,
+                                        "wrong_parking": True,
+                                    },
+                                )
+                                events.append(intime_evt)
+                                publish_sync("parking_events", intime_evt)
+                                logger.info(
+                                    "[COMPLIANCE] Wrong-parking session: camera=%s track=%s primary_slot=%s gun=%s",
+                                    camera_id, track_id, primary_slot, primary_gun,
+                                )
 
                 else:
                     # "proper" or "across_line" — not a location violation.
