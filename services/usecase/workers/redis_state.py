@@ -151,6 +151,7 @@ def _default_slot_state() -> dict:
         "last_gun_check_at": None,                 # ISO ts of most recent LLM call for this slot
         "gun_check_attempts": 0,                   # plug-in attempts; capped by GUN_LLM_PLUGIN_MAX_POLLS
         "gun_consecutive_pluggedin_count": 0,      # 2-of-N counter for plug-in confirmation
+        "gun_consecutive_notpluggedin_count": 0,   # 2-of-N counter for plug-out confirmation
 
         # Monotonically increasing frame counter — survives restarts via Redis
         "frame_counter": 0,

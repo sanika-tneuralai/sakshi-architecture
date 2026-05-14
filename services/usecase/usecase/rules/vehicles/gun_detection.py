@@ -71,6 +71,10 @@ GUN_LLM_PLUGIN_INTERVAL_S   = int(os.getenv("GUN_LLM_PLUGIN_INTERVAL_S",  "60"))
 GUN_LLM_PLUGOUT_INTERVAL_S  = int(os.getenv("GUN_LLM_PLUGOUT_INTERVAL_S", "300"))   # 5 min
 GUN_LLM_PLUGIN_MAX_POLLS    = int(os.getenv("GUN_LLM_PLUGIN_MAX_POLLS",   "20"))    # ~20 min cap
 GUN_LLM_PLUGIN_CONSECUTIVE  = int(os.getenv("GUN_LLM_PLUGIN_CONSECUTIVE", "2"))     # 2-of-N
+# Plug-out is symmetric with plug-in: a single not_plugged_in verdict isn't
+# enough to close a session, because the LLM can flicker on occluded views.
+# Need this many consecutive not_plugged_in verdicts before firing gun_plugout.
+GUN_LLM_PLUGOUT_CONSECUTIVE = int(os.getenv("GUN_LLM_PLUGOUT_CONSECUTIVE", "2"))     # 2-of-N
 
 # Time-based inferred plug-in for the LLM backend. The visual model has
 # imperfect recall — some camera angles make the cable hard to see and Claude
@@ -580,11 +584,19 @@ class GunDetectionRule(BaseUsecaseRule):
                     )
 
             elif not slot["plugout_logged"]:
-                # Plug-out watch: one-shot. First not_plugged_in fires.
+                # Plug-out watch: 2-of-N to suppress single-frame flicker (the
+                # LLM can mis-read the cable on occluded views; one false
+                # not_plugged_in used to close the session prematurely).
                 if verdict == "not_plugged_in":
+                    slot["gun_consecutive_notpluggedin_count"] += 1
+                else:
+                    slot["gun_consecutive_notpluggedin_count"] = 0
+
+                if slot["gun_consecutive_notpluggedin_count"] >= GUN_LLM_PLUGOUT_CONSECUTIVE:
                     plugout_time = event_ts
                     slot["plug_out_time"]  = plugout_time
                     slot["plugout_logged"] = True
+                    slot["gun_consecutive_notpluggedin_count"] = 0
 
                     evt = build_event(
                         event_type="gun_plugout",
@@ -603,8 +615,8 @@ class GunDetectionRule(BaseUsecaseRule):
                     events.append(evt)
                     publish_sync("gun_events", evt, task_id=task_id)
                     logger.info(
-                        "[GUN-LLM] Plugout confirmed (one-shot): camera=%s roi=%s",
-                        camera_id, roi_name,
+                        "[GUN-LLM] Plugout confirmed (2-of-%d): camera=%s roi=%s",
+                        GUN_LLM_PLUGOUT_CONSECUTIVE, camera_id, roi_name,
                     )
 
             set_slot_state(camera_id, roi_name, slot)
