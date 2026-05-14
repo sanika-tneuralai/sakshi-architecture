@@ -2754,6 +2754,31 @@ def dashboard_compliance_violations(
         db.close()
 
 
+@app.delete("/dashboard/compliance-violations/{alert_id}", tags=["dashboard"])
+def delete_compliance_violation(alert_id: int):
+    """Delete one parking_compliance alert row. Used by the dashboard's
+    per-card delete button when an operator marks a violation as wrong."""
+    db = SessionLocal()
+    try:
+        from shared.database.models import Alert
+        row = (
+            db.query(Alert)
+            .filter(Alert.alert_id == alert_id)
+            .filter(Alert.usecase_name == "parking_compliance")
+            .first()
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"compliance alert {alert_id} not found",
+            )
+        db.delete(row)
+        db.commit()
+        return {"deleted": alert_id}
+    finally:
+        db.close()
+
+
 @app.get("/health", tags=["health"])
 async def health_check():
     """

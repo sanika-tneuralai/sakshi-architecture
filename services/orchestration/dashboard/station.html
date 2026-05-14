@@ -422,7 +422,7 @@ function groupIncidents(violations) {
 
     const existing = groups.get(key);
     if (!existing) {
-      groups.set(key, { ...v, _firstTs: ts });
+      groups.set(key, { ...v, _firstTs: ts, _alertIds: v.alert_id ? [v.alert_id] : [] });
     } else {
       // Keep the first (earliest) snapshot — when the violation began.
       if (ts < existing._firstTs) {
@@ -432,6 +432,7 @@ function groupIncidents(violations) {
       }
       if (!existing.car_number && v.car_number) existing.car_number = v.car_number;
       if (!existing.car_model  && v.car_model)  existing.car_model  = v.car_model;
+      if (v.alert_id) existing._alertIds.push(v.alert_id);
     }
   }
   return Array.from(groups.values()).sort((a, b) => b._firstTs - a._firstTs);
@@ -446,7 +447,7 @@ function fmtTimeIST(iso) {
   } catch { return ''; }
 }
 
-function ComplianceGallery({ violations, todayOnly }) {
+function ComplianceGallery({ violations, todayOnly, onDelete }) {
   const todayStr = todayIST();
   const filtered = todayOnly
     ? violations.filter(v => (v.timestamp || '').startsWith(todayStr))
@@ -461,10 +462,34 @@ function ComplianceGallery({ violations, todayOnly }) {
     );
   }
 
+  async function handleDelete(ids) {
+    if (!ids || !ids.length) return;
+    if (!window.confirm(`Delete ${ids.length} violation entr${ids.length === 1 ? 'y' : 'ies'}? This cannot be undone.`)) return;
+    const failed = [];
+    await Promise.all(ids.map(async (id) => {
+      try {
+        const r = await fetch(`${BASE}/dashboard/compliance-violations/${id}`, { method: 'DELETE' });
+        if (!r.ok) failed.push(id);
+      } catch { failed.push(id); }
+    }));
+    if (failed.length) {
+      window.alert(`Failed to delete ${failed.length} of ${ids.length}. The rest were removed.`);
+    }
+    if (onDelete) onDelete(ids.filter(id => !failed.includes(id)));
+  }
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
       {incidents.map((v, i) => (
-        <div key={i} className="bg-white border border-slate-100 rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+        <div key={i} className="relative bg-white border border-slate-100 rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+          <button
+            type="button"
+            onClick={() => handleDelete(v._alertIds || [])}
+            title="Delete this violation"
+            className="absolute top-2 right-2 z-10 w-7 h-7 rounded-full bg-white/90 hover:bg-rose-50 border border-slate-200 hover:border-rose-300 text-slate-500 hover:text-rose-600 text-sm leading-none flex items-center justify-center shadow-sm transition-colors"
+          >
+            ×
+          </button>
           <a href={v.snapshot_url} target="_blank" rel="noopener noreferrer" className="block">
             <img
               src={v.snapshot_url}
@@ -1237,7 +1262,14 @@ function App() {
             </div>
           </div>
           <div className="bg-white rounded-2xl shadow-card overflow-hidden">
-            <ComplianceGallery violations={violations} todayOnly={violTodayOnly} />
+            <ComplianceGallery
+              violations={violations}
+              todayOnly={violTodayOnly}
+              onDelete={(ids) => {
+                const removed = new Set(ids);
+                setViolations(prev => prev.filter(v => !removed.has(v.alert_id)));
+              }}
+            />
           </div>
         </div>
 
