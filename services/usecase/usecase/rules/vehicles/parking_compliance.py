@@ -38,18 +38,24 @@ The orchestrator injects them via detection_output["rois"]:
         "ROI_2": [[x, y], ...]
     }
 """
+import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Optional
 
 from shared.common.roi import which_rois, which_rois_bbox_overlap
 from usecase.domain.vehicles.events import build_event, publish_sync
 from usecase.rules.base import BaseUsecaseRule
 from usecase.rules.vehicles.vehicle_extraction import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_MODEL,
     DETECTION_W,
+    _annotate_all_slots,
     _assign_vehicles_to_targets,
+    _b64_jpeg,
     _bbox_center_x,
+    _download_image,
     cached_llm_frame_call,
 )
 from workers.redis_state import get_state, set_state
@@ -80,6 +86,198 @@ UNAUTH_DWELL_SECONDS = 60
 # track is almost certainly a duplicate of an in-slot car. 0.5 = the smaller
 # bbox is at least half-inside the larger one.
 DUPLICATE_DETECTION_CONTAINMENT = float(os.getenv("UNAUTH_DUPLICATE_CONTAINMENT", "0.5"))
+
+# Merged-bbox guard. When two physical cars park close together, YOLO can emit
+# a single bbox covering both — the centroid lands inside whichever ROI
+# happens to win, and the rule then labels the merged blob as "proper". We
+# detect this by comparing the track's bbox width to the narrowest slot's
+# width: a properly-parked car sits inside one slot (ratio < ~1.0), a
+# merged-pair bbox spans ≥ this ratio of the slot width. Default 1.15 was
+# tuned against a real merged-pair frame at ratio 1.28 while clean single-car
+# bboxes in the same camera came in at 0.77–1.04. When tripped we force the
+# verdict to double_slot so wrong_parking fires through the existing
+# debounce path.
+MERGED_BBOX_SLOT_RATIO = float(os.getenv("MERGED_BBOX_SLOT_RATIO", "1.15"))
+
+# Use the dedicated Claude compliance call as an arbiter when the geometric
+# path or the merge-guard flags a suspect verdict. On by default; set to 0
+# to disable and fall back to geometry only.
+COMPLIANCE_LLM_ENABLED = os.getenv("COMPLIANCE_LLM_ENABLED", "1") == "1"
+
+# Compliance prompt. The frame has yellow polygon outlines overlaid by
+# _annotate_all_slots; the LLM does not see slot ID labels. Vehicles are
+# referenced by visual position (left / center / right) and the code maps
+# position -> ROI ID before emitting violations.
+_COMPLIANCE_PROMPT = """You are a STRICT parking-compliance auditor for an EV charging station.
+
+You are given ONE CCTV frame. Parking slots are outlined as YELLOW polygons. There are NO slot ID labels in the image — refer to each slot only by its visual position (left, center, right).
+
+Your job is to judge — for EACH visible vehicle — whether it is parked correctly inside a single slot, occupying two slots, or outside every slot.
+
+==================================================
+VERDICTS
+==================================================
+- "proper" — the vehicle's body is FULLY inside ONE yellow polygon. The car may be slightly askew, but no part of its body crosses a yellow line.
+- "occupies_two_slots" — ONE vehicle's body overlaps TWO yellow polygons. ALL of these cases qualify:
+    * a forward-parked car straddling the divider between two slots,
+    * a car parked horizontally (sideways / perpendicular) covering two slots end-to-end,
+    * a car parked diagonally across two slots.
+  Orientation does not matter. If any part of the body lies in one slot and any other part lies in another slot, the verdict is "occupies_two_slots".
+- "outside_all_slots" — the vehicle's body is entirely OUTSIDE every yellow polygon (parked in the driveway, blocking access, etc.).
+- "partially_outside" — the vehicle is partly inside ONE slot and partly outside every slot (e.g. tail sticking into driveway).
+- "insufficient_evidence" — the vehicle is heavily occluded by people, other cars, or the frame edge such that you cannot judge its position with confidence. NEVER GUESS.
+
+==================================================
+RULES
+==================================================
+1. List EVERY visible vehicle, including those that look properly parked. The downstream system needs occupancy counts to detect when YOLO has merged two cars into one detection.
+2. If you see TWO distinct vehicles whose bodies both overlap the SAME yellow polygon, BOTH must be reported, and `slot_occupancy` for that position must be 2. Two cars in one slot is a compliance failure even when each looks "proper" individually.
+3. Count carefully: do not collapse two adjacent vehicles into one "occupies_two_slots" verdict. If you can see two distinct vehicles (two roofs, two number plates, two pairs of wheels), report two vehicles each with their own verdict.
+
+==================================================
+OUTPUT FORMAT
+==================================================
+Return ONLY valid JSON matching this schema:
+
+{
+  "vehicles": [
+    {
+      "position": "left" | "center" | "right" | "left_and_right" | "multiple",
+      "verdict": "proper" | "occupies_two_slots" | "outside_all_slots" | "partially_outside" | "insufficient_evidence",
+      "confidence": 0.0-1.0
+    }
+  ],
+  "slot_occupancy": {
+    "left":  0,
+    "right": 0
+  }
+}
+
+`slot_occupancy` is keyed by visual position (left / right / center) and gives the integer count of distinct vehicles whose body overlaps that slot's yellow polygon. Only include keys for slots that are visible in the frame.
+
+If no vehicle is visible:
+{ "vehicles": [], "slot_occupancy": {} }
+"""
+
+_COMPLIANCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "vehicles": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "position":   {"type": "string"},
+                    "verdict":    {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["position", "verdict", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+        "slot_occupancy": {
+            "type": "object",
+            "additionalProperties": {"type": "integer"},
+        },
+    },
+    "required": ["vehicles", "slot_occupancy"],
+    "additionalProperties": False,
+}
+
+_COMPLIANCE_CACHE: Dict[str, Dict[str, Any]] = {}
+_COMPLIANCE_CACHE_ORDER: List[str] = []
+_COMPLIANCE_CACHE_MAX = 16
+
+# Short-label descriptions surfaced on the dashboard and forwarded to the
+# client's fine system. Two or three words; slot IDs live in metadata.
+_DESC_UNAUTHORIZED       = "Unauthorised parking"
+_DESC_DOUBLE_SLOT        = "Double slot parking"
+_DESC_NON_EV             = "Non-EV vehicle"
+_DESC_UNAUTHORIZED_NONEV = "Unauthorised non-EV"
+
+
+def _empty_compliance_response() -> Dict[str, Any]:
+    return {"vehicles": [], "slot_occupancy": {}}
+
+
+def _query_claude_compliance(
+    image, rois: Dict[str, List[List[int]]],
+) -> Dict[str, Any]:
+    """Send the annotated frame to Claude with the compliance prompt. Returns
+    the empty response on any failure so callers degrade gracefully."""
+    if not ANTHROPIC_API_KEY:
+        return _empty_compliance_response()
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        annotated = _annotate_all_slots(image, rois)
+        frame_b64 = _b64_jpeg(annotated, quality=95)
+        logger.info("[COMPLIANCE-LLM] Sending frame to Claude (model=%s)", ANTHROPIC_MODEL)
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _COMPLIANCE_PROMPT},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": frame_b64,
+                        },
+                    },
+                ],
+            }],
+            output_config={"format": {"type": "json_schema", "schema": _COMPLIANCE_SCHEMA}},
+        )
+        text = next(
+            (b.text for b in response.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
+        logger.info("[COMPLIANCE-LLM] Claude raw response: %s", text)
+        if not text:
+            return _empty_compliance_response()
+        parsed = json.loads(text)
+        if not isinstance(parsed.get("vehicles"), list):
+            return _empty_compliance_response()
+        return parsed
+    except Exception as exc:
+        logger.warning("[COMPLIANCE-LLM] Claude call failed: %s", exc)
+        return _empty_compliance_response()
+
+
+def cached_compliance_llm_call(
+    snapshot_url: str,
+    rois: Dict[str, List[List[int]]],
+) -> Dict[str, Any]:
+    """One Claude compliance call per snapshot URL, shared across all cars in
+    the same evaluate cycle."""
+    if not snapshot_url or not COMPLIANCE_LLM_ENABLED:
+        return _empty_compliance_response()
+    cached = _COMPLIANCE_CACHE.get(snapshot_url)
+    if cached is not None:
+        return cached
+    image = _download_image(snapshot_url)
+    if image is None:
+        return _empty_compliance_response()
+    resp = _query_claude_compliance(image, rois)
+    _COMPLIANCE_CACHE[snapshot_url] = resp
+    _COMPLIANCE_CACHE_ORDER.append(snapshot_url)
+    while len(_COMPLIANCE_CACHE_ORDER) > _COMPLIANCE_CACHE_MAX:
+        old = _COMPLIANCE_CACHE_ORDER.pop(0)
+        _COMPLIANCE_CACHE.pop(old, None)
+    return resp
+
+
+def _polygon_x_extent(polygon: List) -> float:
+    """Return max_x - min_x of a polygon's vertices, or 0 if malformed."""
+    try:
+        xs = [float(p[0]) for p in polygon if len(p) >= 2]
+    except (TypeError, ValueError):
+        return 0.0
+    return (max(xs) - min(xs)) if xs else 0.0
 
 
 def _now() -> str:
@@ -218,6 +416,13 @@ class ParkingComplianceRule(BaseUsecaseRule):
         # Track which track_ids are active this frame (outside all ROIs)
         active_unauthorized: set = set()
 
+        # Narrowest slot width in pixels — used to detect YOLO bboxes that
+        # have merged two adjacent cars into one detection. Falls back to 0
+        # (disabling the merged-bbox check) when ROI polygons are malformed.
+        slot_widths = [_polygon_x_extent(poly) for poly in rois.values()]
+        slot_widths = [w for w in slot_widths if w > 0]
+        min_slot_w = min(slot_widths) if slot_widths else 0.0
+
         # Pre-pass: collect bboxes of any car that overlaps a slot this frame.
         # YOLO can multi-detect a single physical car (one bbox in the slot,
         # a second fragment bbox outside the slot). The unauthorized-parking
@@ -268,10 +473,63 @@ class ParkingComplianceRule(BaseUsecaseRule):
                         verdict = "proper"
                     verdict_source = "geom"
 
+                # ── Merged-bbox override ─────────────────────────────────
+                # If the track's bbox is wider than MERGED_BBOX_SLOT_RATIO ×
+                # the narrowest slot, YOLO has almost certainly merged two
+                # adjacent cars into one detection. Both LLM and geometry
+                # then mislabel the merged blob as "proper" in whichever slot
+                # its centroid happens to fall in. Force double_slot so the
+                # wrong_parking debounce path fires.
+                bb = car.get("bbox") or {}
+                bbox_w = (
+                    float(bb["x2"]) - float(bb["x1"])
+                    if all(k in bb for k in ("x1", "x2")) else 0.0
+                )
+                slot_ratio = (bbox_w / min_slot_w) if min_slot_w > 0 else 0.0
+                if min_slot_w > 0 and slot_ratio >= MERGED_BBOX_SLOT_RATIO:
+                    verdict = "double_slot"
+                    verdict_source = "merged_bbox"
+
+                # ── Claude compliance arbiter ─────────────────────────────
+                # When the verdict is non-proper (or the merge-guard tripped),
+                # consult the dedicated Claude compliance call. Its verdict
+                # wins because it can reason about both painted slot lines AND
+                # vehicle orientation in ways the geometric path cannot.
+                # `insufficient_evidence` falls back to the geometric verdict.
+                arbiter_verdict = None
+                arbiter_confidence = None
+                if (
+                    COMPLIANCE_LLM_ENABLED
+                    and snapshot_url
+                    and verdict != "proper"
+                ):
+                    comp_resp = cached_compliance_llm_call(snapshot_url, rois)
+                    comp_vehicles = comp_resp.get("vehicles", [])
+                    comp_assignments = (
+                        _assign_vehicles_to_targets(
+                            comp_vehicles, llm_targets, float(DETECTION_W),
+                        ) if (comp_vehicles and llm_targets) else {}
+                    )
+                    comp_vehicle = comp_assignments.get(track_id)
+                    raw = (comp_vehicle or {}).get("verdict")
+                    arbiter_confidence = (comp_vehicle or {}).get("confidence")
+                    mapped = {
+                        "proper": "proper",
+                        "occupies_two_slots": "double_slot",
+                        "outside_all_slots": "outside_slot",
+                        "partially_outside": "outside_slot",
+                    }.get(raw)
+                    if mapped is not None:
+                        verdict = mapped
+                        verdict_source = "compliance_llm"
+                        arbiter_verdict = raw
+
                 print(
                     f"[COMPLIANCE] car track={track_id} | matched_rois={matched_rois}"
-                    f" | overlap_rois={overlap_rois} | verdict={verdict}"
-                    f" ({verdict_source}) | is_ev={llm_is_ev}"
+                    f" | overlap_rois={overlap_rois} | bbox_w={bbox_w:.0f}"
+                    f" | slot_ratio={slot_ratio:.2f} | verdict={verdict}"
+                    f" ({verdict_source}) | arbiter={arbiter_verdict}"
+                    f" conf={arbiter_confidence} | is_ev={llm_is_ev}"
                 )
 
                 slot = state.setdefault(track_id, {
@@ -332,9 +590,11 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                 "bbox": car.get("bbox"),
                                 "confidence": car.get("confidence"),
                                 "reason": "car outside all ROIs",
-                                "description": "Car parked outside any designated charging slot.",
+                                "description": _DESC_UNAUTHORIZED,
                                 "dwell_seconds": round(elapsed, 1),
                                 "verdict_source": verdict_source,
+                                "arbiter_verdict": arbiter_verdict,
+                                "arbiter_confidence": arbiter_confidence,
                             },
                         )
                         violations.append(evt)
@@ -385,12 +645,10 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                 "confidence": car.get("confidence"),
                                 "overlapping_rois": all_matched_rois,
                                 "reason": "car occupies multiple ROI slots (double parking)",
-                                "description": (
-                                    f"Car straddles multiple charging slots ({', '.join(all_matched_rois)})."
-                                    if all_matched_rois else
-                                    "Car straddles multiple charging slots."
-                                ),
+                                "description": _DESC_DOUBLE_SLOT,
                                 "verdict_source": verdict_source,
+                                "arbiter_verdict": arbiter_verdict,
+                                "arbiter_confidence": arbiter_confidence,
                             },
                         )
                         violations.append(evt)
@@ -436,9 +694,8 @@ class ParkingComplianceRule(BaseUsecaseRule):
                             "car_model": (llm_vehicle or {}).get("car_model"),
                             "car_number": (llm_vehicle or {}).get("car_number"),
                             "reason": "non-EV vehicle occupying EV charging slot",
-                            "description": (
-                                f"Non-EV vehicle parked in EV slot ({', '.join(all_matched_rois)})."
-                            ),
+                            "description": _DESC_NON_EV,
+                            "occupied_rois_summary": ", ".join(all_matched_rois),
                         },
                     )
                     violations.append(evt)
