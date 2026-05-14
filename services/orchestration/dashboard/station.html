@@ -411,31 +411,19 @@ function SessionsTable({ sessions }) {
    their own cards. The grouping key is alert_id-stable (track_id when
    present, falling back to violation_type + 60s bucket).               */
 function groupIncidents(violations) {
-  const groups = new Map();
-  const BUCKET_SEC = 60;
-
-  for (const v of violations) {
-    const ts = v.timestamp ? new Date(v.timestamp).getTime() : 0;
-    const key = v.track_id
-      ? `${v.violation_type}::trk:${v.track_id}`
-      : `${v.violation_type}::ts:${Math.floor(ts / 1000 / BUCKET_SEC)}`;
-
-    const existing = groups.get(key);
-    if (!existing) {
-      groups.set(key, { ...v, _firstTs: ts, _alertIds: v.alert_id ? [v.alert_id] : [] });
-    } else {
-      // Keep the first (earliest) snapshot — when the violation began.
-      if (ts < existing._firstTs) {
-        existing.snapshot_url = v.snapshot_url;
-        existing.timestamp    = v.timestamp;
-        existing._firstTs     = ts;
-      }
-      if (!existing.car_number && v.car_number) existing.car_number = v.car_number;
-      if (!existing.car_model  && v.car_model)  existing.car_model  = v.car_model;
-      if (v.alert_id) existing._alertIds.push(v.alert_id);
-    }
-  }
-  return Array.from(groups.values()).sort((a, b) => b._firstTs - a._firstTs);
+  // The /dashboard/compliance-violations endpoint dedupes server-side and
+  // returns one row per incident with the full alert_ids list. So this is
+  // just a pass-through that normalises fields the gallery + delete button
+  // expect (_firstTs for sort, _alertIds for bulk delete).
+  return violations
+    .map(v => ({
+      ...v,
+      _firstTs: v.timestamp ? new Date(v.timestamp).getTime() : 0,
+      _alertIds: Array.isArray(v.alert_ids) && v.alert_ids.length
+        ? v.alert_ids
+        : (v.alert_id ? [v.alert_id] : []),
+    }))
+    .sort((a, b) => b._firstTs - a._firstTs);
 }
 
 function fmtTimeIST(iso) {

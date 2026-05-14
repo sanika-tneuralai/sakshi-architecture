@@ -2623,12 +2623,19 @@ def dashboard_compliance_violations(
         from shared.database.models import Alert, ChargingSession
         from datetime import datetime, timezone
 
+        # Pull a wide raw window so we can dedupe by incident (track_id +
+        # violation_type) on the server side. Without this, a single
+        # straddling car emitting wrong_parking every poll saturates a
+        # narrow limit and crowds out older real incidents — the dashboard
+        # ends up showing the same car as 100 alerts collapsed to one card
+        # while a different earlier violation drops off entirely.
+        raw_limit = max(limit * 50, 2000)
         rows = (
             db.query(Alert)
             .filter(Alert.camera_id == camera_id)
             .filter(Alert.usecase_name == "parking_compliance")
             .order_by(Alert.timestamp.desc())
-            .limit(limit)
+            .limit(raw_limit)
             .all()
         )
 
@@ -2719,8 +2726,46 @@ def dashboard_compliance_violations(
                 .first()
             )
 
-        violations = []
+        # Server-side incident dedup. Same key the dashboard JS uses:
+        # (violation_type, track_id) if track_id is known, else
+        # (violation_type, 60s timestamp bucket). For each incident, keep
+        # the earliest alert — that's when the violation began, so the
+        # snapshot tells the operator what triggered it. The list returned
+        # to the dashboard then has up to `limit` *distinct incidents*,
+        # not raw rows, so a stuck straddling car won't crowd out older
+        # auto-rickshaw or non_ev events. We also collect every alert_id
+        # in each group so the dashboard's per-card delete button can
+        # remove the whole incident atomically — without the list it would
+        # only delete the representative row and the next fetch would
+        # surface another raw row from the same group.
+        BUCKET_SEC = 60
+        groups: dict = {}
+        group_alert_ids: dict = {}
         for row in rows:
+            vtype = resolve_violation_type(row)
+            tid   = extract_track_id(row)
+            ts    = row.timestamp
+            if tid:
+                key = f"{vtype}::trk:{tid}"
+            elif ts is not None:
+                key = f"{vtype}::ts:{int(ts.timestamp() // BUCKET_SEC)}"
+            else:
+                continue
+            group_alert_ids.setdefault(key, []).append(row.alert_id)
+            existing = groups.get(key)
+            if existing is None or (
+                ts is not None and existing.timestamp is not None and ts < existing.timestamp
+            ):
+                groups[key] = row
+
+        deduped = sorted(
+            groups.values(),
+            key=lambda r: r.timestamp or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )[:limit]
+
+        violations = []
+        for row in deduped:
             session = resolve_session(row)
             car_number = session.car_number if session else None
             car_model  = session.car_model  if session else None
@@ -2729,14 +2774,24 @@ def dashboard_compliance_violations(
                 session.out_time if session else None,
             )
             vmeta = resolve_violation_meta(row)
+            vtype = resolve_violation_type(row)
+            tid   = extract_track_id(row)
+            ts    = row.timestamp
+            if tid:
+                key = f"{vtype}::trk:{tid}"
+            elif ts is not None:
+                key = f"{vtype}::ts:{int(ts.timestamp() // BUCKET_SEC)}"
+            else:
+                key = None
             violations.append({
                 "alert_id":           row.alert_id,
+                "alert_ids":          group_alert_ids.get(key, [row.alert_id]),
                 "station":            station_id,
                 "slot_id":            row.slot_id,
-                "track_id":           extract_track_id(row),
+                "track_id":           tid,
                 "car_number":         car_number,
                 "car_model":          car_model,
-                "violation_type":     resolve_violation_type(row),
+                "violation_type":     vtype,
                 "description":        vmeta["description"],
                 "arbiter_verdict":    vmeta["arbiter_verdict"],
                 "arbiter_confidence": vmeta["arbiter_confidence"],
