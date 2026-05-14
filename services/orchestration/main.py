@@ -2656,17 +2656,40 @@ def dashboard_compliance_violations(
             except Exception:
                 return None
 
+        KNOWN_VIOLATION_TYPES = (
+            "unauthorized_parking",
+            "wrong_parking",
+            "non_ev_parking",
+            "multiple_cars_in_roi",
+        )
+
         def resolve_violation_type(row):
             """Extract the specific violation type from alert_type or extras."""
             atype = row.alert_type or ""
-            if atype in ("multiple_cars_in_roi", "unauthorized_parking", "wrong_parking"):
+            if atype in KNOWN_VIOLATION_TYPES:
                 return atype
             extras = row.extras or {}
             for v in extras.get("violations", []):
                 et = v.get("event_type", "")
-                if et in ("unauthorized_parking", "wrong_parking", "multiple_cars_in_roi"):
+                if et in KNOWN_VIOLATION_TYPES:
                     return et
             return atype or "unknown"
+
+        def resolve_violation_meta(row):
+            """Pull the short label, arbiter verdict, and confidence from the
+            triggering violation event's metadata. Forwards what the fining
+            workflow needs without re-rendering it here."""
+            extras = row.extras or {}
+            for v in extras.get("violations", []):
+                if v.get("event_type") not in KNOWN_VIOLATION_TYPES:
+                    continue
+                meta = v.get("metadata") or {}
+                return {
+                    "description":        meta.get("description"),
+                    "arbiter_verdict":    meta.get("arbiter_verdict"),
+                    "arbiter_confidence": meta.get("arbiter_confidence"),
+                }
+            return {"description": None, "arbiter_verdict": None, "arbiter_confidence": None}
 
         def extract_track_id(row):
             """Pull track_id from the alert extras."""
@@ -2705,17 +2728,21 @@ def dashboard_compliance_violations(
                 session.in_time  if session else None,
                 session.out_time if session else None,
             )
+            vmeta = resolve_violation_meta(row)
             violations.append({
-                "alert_id":       row.alert_id,
-                "station":        station_id,
-                "slot_id":        row.slot_id,
-                "track_id":       extract_track_id(row),
-                "car_number":     car_number,
-                "car_model":      car_model,
-                "violation_type": resolve_violation_type(row),
-                "timestamp":      row.timestamp.isoformat() if row.timestamp else None,
-                "duration":       duration,
-                "snapshot_url":   presign_snapshot(row.snapshot_url),
+                "alert_id":           row.alert_id,
+                "station":            station_id,
+                "slot_id":            row.slot_id,
+                "track_id":           extract_track_id(row),
+                "car_number":         car_number,
+                "car_model":          car_model,
+                "violation_type":     resolve_violation_type(row),
+                "description":        vmeta["description"],
+                "arbiter_verdict":    vmeta["arbiter_verdict"],
+                "arbiter_confidence": vmeta["arbiter_confidence"],
+                "timestamp":          row.timestamp.isoformat() if row.timestamp else None,
+                "duration":           duration,
+                "snapshot_url":       presign_snapshot(row.snapshot_url),
             })
 
         return {"violations": violations, "total": len(violations)}

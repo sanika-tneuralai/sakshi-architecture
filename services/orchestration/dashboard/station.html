@@ -72,10 +72,11 @@ const STATION_TZ     = 'Asia/Kolkata';
 
 /* ── Violation map ── */
 const VIOLATION_MAP = {
-  unauthorized_parking:         { label: 'Unauthorized Parking', color: 'rose' },
-  wrong_parking:                { label: 'Double Slot Parking',  color: 'amber' },
+  unauthorized_parking:         { label: 'Unauthorized Parking', color: 'rose'   },
+  wrong_parking:                { label: 'Double Slot Parking',  color: 'amber'  },
+  non_ev_parking:               { label: 'Non-EV Vehicle',       color: 'sky'    },
   multiple_cars_in_roi:         { label: 'Multiple Cars in Slot',color: 'violet' },
-  parking_compliance_triggered: { label: 'Unauthorized Parking', color: 'rose' },
+  parking_compliance_triggered: { label: 'Unauthorized Parking', color: 'rose'   },
 };
 
 function violationMeta(vtype) {
