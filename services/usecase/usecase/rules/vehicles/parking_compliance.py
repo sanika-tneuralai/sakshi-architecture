@@ -183,7 +183,12 @@ _COMPLIANCE_SCHEMA = {
         },
         "slot_occupancy": {
             "type": "object",
-            "additionalProperties": {"type": "integer"},
+            "properties": {
+                "left":   {"type": "integer"},
+                "center": {"type": "integer"},
+                "right":  {"type": "integer"},
+            },
+            "additionalProperties": False,
         },
     },
     "required": ["vehicles", "slot_occupancy"],
@@ -605,13 +610,23 @@ class ParkingComplianceRule(BaseUsecaseRule):
                 # then mislabel the merged blob as "proper" in whichever slot
                 # its centroid happens to fall in. Force double_slot so the
                 # wrong_parking debounce path fires.
+                #
+                # Skip the guard for synthetic LLM tracks (track_id "llm:…"):
+                # their bbox is the ROI polygon's bounding box by construction,
+                # not a YOLO detection, so the ratio can trip when slot
+                # polygons have unequal widths — that's not a merged car.
                 bb = car.get("bbox") or {}
                 bbox_w = (
                     float(bb["x2"]) - float(bb["x1"])
                     if all(k in bb for k in ("x1", "x2")) else 0.0
                 )
                 slot_ratio = (bbox_w / min_slot_w) if min_slot_w > 0 else 0.0
-                if min_slot_w > 0 and slot_ratio >= MERGED_BBOX_SLOT_RATIO:
+                is_synthetic_track = str(track_id).startswith("llm:")
+                if (
+                    not is_synthetic_track
+                    and min_slot_w > 0
+                    and slot_ratio >= MERGED_BBOX_SLOT_RATIO
+                ):
                     verdict = "double_slot"
                     verdict_source = "merged_bbox"
 
