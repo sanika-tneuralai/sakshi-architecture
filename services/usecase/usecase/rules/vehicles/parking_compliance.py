@@ -51,6 +51,8 @@ from usecase.rules.vehicles.vehicle_extraction import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL,
     DETECTION_W,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
     _annotate_all_slots,
     _assign_vehicles_to_targets,
     _b64_jpeg,
@@ -99,10 +101,14 @@ DUPLICATE_DETECTION_CONTAINMENT = float(os.getenv("UNAUTH_DUPLICATE_CONTAINMENT"
 # debounce path.
 MERGED_BBOX_SLOT_RATIO = float(os.getenv("MERGED_BBOX_SLOT_RATIO", "1.15"))
 
-# Use the dedicated Claude compliance call as an arbiter when the geometric
+# Use the dedicated compliance LLM call as an arbiter when the geometric
 # path or the merge-guard flags a suspect verdict. On by default; set to 0
 # to disable and fall back to geometry only.
 COMPLIANCE_LLM_ENABLED = os.getenv("COMPLIANCE_LLM_ENABLED", "1") == "1"
+
+# Which provider to use for compliance arbitration. "openai" (default) or
+# "claude". Mirrors VEHICLE_LLM_PROVIDER / GUN_LLM_PROVIDER.
+COMPLIANCE_LLM_PROVIDER = os.getenv("COMPLIANCE_LLM_PROVIDER", "openai").strip().lower()
 
 # Compliance prompt. The frame has yellow polygon outlines overlaid by
 # _annotate_all_slots; the LLM does not see slot ID labels. Vehicles are
@@ -248,12 +254,51 @@ def _query_claude_compliance(
         return _empty_compliance_response()
 
 
+def _query_openai_compliance(
+    image, rois: Dict[str, List[List[int]]],
+) -> Dict[str, Any]:
+    """Send the annotated frame to OpenAI with the compliance prompt. Returns
+    the empty response on any failure so callers degrade gracefully."""
+    if not OPENAI_API_KEY:
+        return _empty_compliance_response()
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        annotated = _annotate_all_slots(image, rois)
+        frame_b64 = _b64_jpeg(annotated, quality=95)
+        logger.info("[COMPLIANCE-LLM] Sending frame to OpenAI (model=%s)", OPENAI_MODEL)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _COMPLIANCE_PROMPT},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
+                ],
+            }],
+        )
+        text = (response.choices[0].message.content or "").strip()
+        logger.info("[COMPLIANCE-LLM] OpenAI raw response: %s", text)
+        if not text:
+            return _empty_compliance_response()
+        parsed = json.loads(text)
+        if not isinstance(parsed.get("vehicles"), list):
+            return _empty_compliance_response()
+        return parsed
+    except Exception as exc:
+        logger.warning("[COMPLIANCE-LLM] OpenAI call failed: %s", exc)
+        return _empty_compliance_response()
+
+
 def cached_compliance_llm_call(
     snapshot_url: str,
     rois: Dict[str, List[List[int]]],
 ) -> Dict[str, Any]:
-    """One Claude compliance call per snapshot URL, shared across all cars in
-    the same evaluate cycle."""
+    """One compliance LLM call per snapshot URL, shared across all cars in
+    the same evaluate cycle. Provider is selected by COMPLIANCE_LLM_PROVIDER."""
     if not snapshot_url or not COMPLIANCE_LLM_ENABLED:
         return _empty_compliance_response()
     cached = _COMPLIANCE_CACHE.get(snapshot_url)
@@ -262,7 +307,10 @@ def cached_compliance_llm_call(
     image = _download_image(snapshot_url)
     if image is None:
         return _empty_compliance_response()
-    resp = _query_claude_compliance(image, rois)
+    if COMPLIANCE_LLM_PROVIDER == "claude":
+        resp = _query_claude_compliance(image, rois)
+    else:
+        resp = _query_openai_compliance(image, rois)
     _COMPLIANCE_CACHE[snapshot_url] = resp
     _COMPLIANCE_CACHE_ORDER.append(snapshot_url)
     while len(_COMPLIANCE_CACHE_ORDER) > _COMPLIANCE_CACHE_MAX:
