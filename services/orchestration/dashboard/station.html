@@ -802,11 +802,14 @@ function InsightPanel({ insight, aggregates, results, onDismiss }) {
   const rc   = riskColors[risk] || riskColors.LOW;
 
   // Sub-insights: render only those the model populated.
+  // Solo and parallel are split into separate cards so the operator sees
+  // the real (solo) signal alongside the "measurement-artifact" caveat
+  // for parallel, instead of one merged sentence that buries the caveat.
   const subInsights = [
-    { key: 'model_pattern',     label: 'By Model',          text: insight.model_pattern },
-    { key: 'connector_pattern', label: 'By Connector',      text: insight.connector_pattern },
-    { key: 'parallel_pattern',  label: 'Solo vs Parallel',  text: insight.parallel_pattern },
-    { key: 'hour_pattern',      label: 'By Hour',           text: insight.hour_pattern },
+    { key: 'solo_finding',      label: 'Solo Sessions (Real Signal)',     text: insight.solo_finding },
+    { key: 'parallel_finding',  label: 'Parallel Sessions (Measurement)', text: insight.parallel_finding },
+    { key: 'model_pattern',     label: 'By Model',                        text: insight.model_pattern },
+    { key: 'connector_pattern', label: 'By Connector',                    text: insight.connector_pattern },
   ].filter(s => s.text);
 
   return (
@@ -832,11 +835,17 @@ function InsightPanel({ insight, aggregates, results, onDismiss }) {
         <div className="bg-white rounded-2xl shadow-card px-5 py-4 text-sm text-slate-700 whitespace-pre-wrap">{insight.raw}</div>
       ) : (
         <>
-          {/* Headline: where is the loss concentrated */}
-          {insight.loss_breakdown && (
-            <div className="bg-white rounded-2xl shadow-card p-4 border-l-4 border-rose-500">
-              <p className="text-xs font-bold text-rose-600 uppercase tracking-wider mb-1">Where The Loss Is</p>
-              <p className="text-sm text-slate-700">{insight.loss_breakdown}</p>
+          {/* Headline: solo-based summary, with risk-colored accent.
+              We deliberately don't hard-code rose here — when solo loss
+              is small the headline is GOOD news and a red bar misleads. */}
+          {insight.headline && (
+            <div className={`bg-white rounded-2xl shadow-card p-4 border-l-4 ${
+              risk === 'HIGH'   ? 'border-rose-500'   :
+              risk === 'MEDIUM' ? 'border-amber-500'  :
+                                  'border-success-500'
+            }`}>
+              <p className={`text-xs font-bold uppercase tracking-wider mb-1 ${rc.text}`}>Headline</p>
+              <p className="text-sm text-slate-700">{insight.headline}</p>
             </div>
           )}
 
@@ -870,15 +879,21 @@ function InsightPanel({ insight, aggregates, results, onDismiss }) {
             </div>
           )}
 
-          {/* Patterns + Recommendations */}
+          {/* Likely Mismatches + Recommendations.
+              Suspect rows surfaces sessions where meter ≫ client bill —
+              these are attribution errors (our software charged car A's
+              energy to car B), not "lost" energy. Keeping them visible
+              but labeled lets the operator investigate without the
+              dashboard implying they have a billing problem. */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {insight.patterns && insight.patterns.length > 0 && (
+            {insight.suspect_rows && insight.suspect_rows.length > 0 && (
               <div className="bg-white rounded-2xl shadow-card p-4">
-                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Patterns Detected</p>
+                <p className="text-xs font-bold text-amber-700 uppercase tracking-wider mb-1">Likely Mismatches</p>
+                <p className="text-[11px] text-slate-500 mb-2">Meter much larger than the customer's bill — most likely our software attributed another car's energy here, not real loss.</p>
                 <ul className="space-y-1.5">
-                  {insight.patterns.map((p, i) => (
+                  {insight.suspect_rows.map((p, i) => (
                     <li key={i} className="flex gap-2 text-sm text-slate-700">
-                      <span className="mt-0.5 w-4 h-4 rounded-full bg-violet-100 text-violet-700 text-[10px] font-bold flex items-center justify-center flex-shrink-0">{i+1}</span>
+                      <span className="mt-0.5 text-amber-600 flex-shrink-0">⚠</span>
                       {p}
                     </li>
                   ))}

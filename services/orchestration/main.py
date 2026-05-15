@@ -2185,46 +2185,57 @@ def dashboard_energy_analysis(request: dict):
 
     prompt = f"""You are writing a short, plain-English energy report for the
 operator of an EV charging station. The reader runs the station day-to-day
-and is NOT a data analyst — write so a non-technical person can follow it.
-Avoid jargon. No phrases like "shared-meter double-counting", "loss
-attribution", "indicative", "decompose", "structural driver", "metering
-discrepancy", etc. When a technical caveat is important, say it in everyday
-words.
+and is NOT a data analyst. Write so a non-technical person can follow it.
+Avoid jargon. When a technical caveat matters, say it in everyday words.
 
-The aggregates below are already correctly computed — do NOT recompute, just
-narrate them clearly.
+The aggregates below are already correctly computed — do NOT recompute,
+just read them and narrate them clearly.
 
-What "loss" means (explain like this when it comes up):
-- Loss = the energy the customer was BILLED for, minus the energy the
-  station meter measured during that car's stay.
-- A positive loss means the customer paid for more energy than the meter
-  saw — possibly an over-bill or a meter problem.
-- IMPORTANT context to mention when discussing parallel sessions: this
-  station has ONE meter that covers BOTH connectors. When two cars are
-  charging at the same time, the meter reading gets split between them, so
-  the per-car "loss" number for parallel sessions can look bigger than it
-  really is. Solo sessions are more reliable for judging real loss.
+────────────────────────────────────────────────────────────────────────
+READ THIS BEFORE YOU WRITE ANYTHING
+────────────────────────────────────────────────────────────────────────
+This station has ONE physical meter shared between TWO connectors. When
+two cars charge at the same time ("parallel"), our software has to GUESS
+how to split the meter reading between them. That guess is often wrong.
 
-What to answer: in everyday words, WHERE is the loss coming from? Use the
-three dimensions below — model, connector, solo-vs-parallel — to find the
-main driver. If a pattern is weak or mixed, just say so plainly. Don't
-invent patterns and don't pad with caveats — keep it short and useful.
+Because of that:
+  - SOLO sessions (one car charging alone) → the meter reading is
+    trustworthy. Loss numbers here are real.
+  - PARALLEL sessions → the per-car meter number is a guess. Big loss
+    numbers here usually mean OUR SPLIT WAS WRONG, not that the customer
+    was overbilled or that energy disappeared.
 
-For the "recommendations" list: each item should be ONE concrete thing the
-operator can actually do (or check) next. Plain action verbs. No technical
-terminology. Avoid words like "audit", "cross-reference", "decompose",
-"sub-metering", "attribution". Examples of good style:
-  - "Compare the customer's app bill with the station meter for the
-     Volvo session on May 10 to see if the customer was overbilled."
-  - "Add a small meter on each connector so you can tell which car used
-     how much energy without guessing."
-  - "Watch the Tata Tiago charging sessions next week — the loss number
-     for them is much higher than other cars."
+So: judge "real" loss from SOLO sessions only. Treat parallel-session
+loss as a sign our measurement needs better hardware, not as a billing
+problem.
 
+Also: any single session where the meter reading is more than ~50%
+larger than what the customer was billed (e.g. meter 30 kWh on a 12 kWh
+bill) is almost certainly a case where our software attributed another
+car's energy to this one. Do NOT call those "lost" energy. List them in
+"suspect_rows" instead.
+
+────────────────────────────────────────────────────────────────────────
+HOW TO PICK risk_level
+────────────────────────────────────────────────────────────────────────
+Base risk_level on SOLO sessions ONLY:
+  - LOW    : solo loss within ±10% of solo client kWh, OR fewer than 5
+             solo sessions (sample too small to judge).
+  - MEDIUM : solo loss is 10–20% in one direction, consistently.
+  - HIGH   : solo loss is >20% in one direction across 5+ solo sessions.
+If the total loss looks big but it's almost all from parallel sessions
+and solo looks fine, risk_level is LOW — the problem is our measurement,
+not the billing. NEVER pick HIGH because of a big total-loss number
+alone.
+
+────────────────────────────────────────────────────────────────────────
+DATA (already computed — do not recompute)
+────────────────────────────────────────────────────────────────────────
 ## Top-level
 - Sessions: {summary.get('total', '?')} (matched {summary.get('matched', '?')}, unmatched {summary.get('unmatched', '?')})
 - Total client kWh (all rows): {summary.get('total_client_kwh', '?')}
 - Total per-session loss (matched only): {summary.get('total_loss_kwh', '?')} kWh
+  ⚠ this mixes solo + parallel — do NOT use it as the headline.
 
 ## Per-model (top 12 by |loss|)
 {model_block}
@@ -2232,18 +2243,33 @@ terminology. Avoid words like "audit", "cross-reference", "decompose",
 ## Per-connector
 {connector_block}
 
-## Solo vs parallel
+## Solo vs parallel   ← lead the report with the SOLO row
 {parallel_block}
 
+────────────────────────────────────────────────────────────────────────
+RECOMMENDATIONS — STYLE GUIDE
+────────────────────────────────────────────────────────────────────────
+Each item is ONE concrete thing the operator can do or check next. Plain
+verbs. No jargon ("audit", "cross-reference", "sub-metering",
+"attribution", "decompose"). Examples of good style:
+  - "Compare the customer's app bill with the station meter for the
+     Volvo session on May 10 to see if the customer was overbilled."
+  - "Add a small meter on each connector so you can tell which car used
+     how much energy without guessing."
+  - "Watch the Tata Tiago solo sessions next week — the meter and the
+     bill don't agree as closely as for other cars."
+
+────────────────────────────────────────────────────────────────────────
 Return ONLY this JSON shape, filled in:
 {{
-  "loss_breakdown":   "1-2 plain sentences naming where most of the loss is coming from, with the numbers",
-  "model_pattern":    "1 plain sentence about which car models lose the most; 'no clear pattern' if so",
-  "connector_pattern":"1 plain sentence comparing connector 1 vs connector 2; say so if they're roughly equal",
-  "parallel_pattern": "1 plain sentence comparing solo vs parallel sessions; mention the one-meter caveat in everyday words; 'sample too small' is acceptable",
-  "patterns":         ["short plain-English bullet", "short plain-English bullet", "short plain-English bullet"],
+  "headline":         "1 plain sentence. Lead with the SOLO loss number (kWh and %). Say whether the bill and meter mostly agree on solo sessions. Mention parallel ONLY to say it's not a reliable measurement.",
+  "solo_finding":     "1 sentence: how many solo sessions, what is the solo loss in kWh and %, and what that means in plain words. Say 'sample too small' if fewer than 5 solo sessions.",
+  "parallel_finding": "1 sentence: how big the parallel gap looks, plus the everyday-words explanation that this is most likely our software splitting the shared meter wrong — NOT real lost energy or overbilling.",
+  "model_pattern":    "1 sentence on which models look off, but ONLY if the pattern is visible on solo sessions. Otherwise: 'no clear pattern on solo sessions'.",
+  "connector_pattern":"1 sentence comparing connector 1 vs connector 2; say 'roughly equal' if they are.",
+  "suspect_rows":     ["For each session where meter is more than ~50% larger than client bill, list 'VRN — model — date' so the operator can investigate it as a likely mismatch, not as lost energy. Empty array if none."],
   "recommendations":  ["one concrete plain-English action", "one concrete plain-English action", "one concrete plain-English action"],
-  "risk_level":       "LOW | MEDIUM | HIGH"
+  "risk_level":       "LOW | MEDIUM | HIGH (per the rubric above — based on SOLO only)"
 }}
 """
 
@@ -2263,18 +2289,19 @@ Return ONLY this JSON shape, filled in:
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "loss_breakdown":    {"type": "string"},
+                                "headline":          {"type": "string"},
+                                "solo_finding":      {"type": "string"},
+                                "parallel_finding":  {"type": "string"},
                                 "model_pattern":     {"type": "string"},
                                 "connector_pattern": {"type": "string"},
-                                "parallel_pattern":  {"type": "string"},
-                                "patterns":          {"type": "array", "items": {"type": "string"}},
+                                "suspect_rows":      {"type": "array", "items": {"type": "string"}},
                                 "recommendations":   {"type": "array", "items": {"type": "string"}},
                                 "risk_level":        {"type": "string"},
                             },
                             "required": [
-                                "loss_breakdown", "model_pattern", "connector_pattern",
-                                "parallel_pattern",
-                                "patterns", "recommendations", "risk_level",
+                                "headline", "solo_finding", "parallel_finding",
+                                "model_pattern", "connector_pattern",
+                                "suspect_rows", "recommendations", "risk_level",
                             ],
                             "additionalProperties": False,
                         },
