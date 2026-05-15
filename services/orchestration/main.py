@@ -2129,6 +2129,109 @@ def dashboard_energy_analysis(request: dict):
         },
     }
 
+    # Pair-level parallel analysis. The per-car loss in parallel sessions
+    # is unreliable because the shared meter has been split by software;
+    # but the SUM of both cars' losses in a pair survives that split — it
+    # equals (bill_A + bill_B) - meter_total, which is the real physical
+    # question. This block decomposes parallel charging into pair-level
+    # metrics so the LLM can reason about it instead of being told to
+    # ignore parallel data.
+    #
+    # Pair-level rather than window-group: with only 2 connectors and one
+    # meter-total per session, pair (A,B) is the cleanest unit. If three
+    # sessions chain (A on C1, B on C2, C on C1 — B overlaps both A and
+    # C), B appears in two pairs. We do NOT sum pair_loss across pairs
+    # (that would double-count B); we feed the LLM the distribution.
+    pair_metrics = []
+    for i, (idx_i, st_i, et_i, c_i) in enumerate(intervals):
+        for j, (idx_j, st_j, et_j, c_j) in enumerate(intervals):
+            if j <= i or c_j == c_i:
+                continue
+            if not (st_j < et_i and st_i < et_j):
+                continue
+            ra, rb = matched[idx_i], matched[idx_j]
+            ca, cb = ra.get("client_kwh"), rb.get("client_kwh")
+            ma, mb = ra.get("meter_kwh"), rb.get("meter_kwh")
+            la, lb = ra.get("loss_kwh"),  rb.get("loss_kwh")
+            if None in (ca, cb, ma, mb, la, lb):
+                continue
+            pair_client = ca + cb
+            pair_meter  = ma + mb
+            pair_loss   = la + lb
+            abs_sum     = abs(la) + abs(lb)
+            # split_symmetry: 0 → losses cancel (just bad attribution,
+            # the pair's bill+meter agree); 1 → both cars lose same
+            # direction (real signal, not a split artifact).
+            split_symmetry = (abs(la + lb) / abs_sum) if abs_sum > 0 else 0.0
+            # Which connector "won" in the split — i.e. got more meter
+            # credit than its bill (negative loss = meter > bill).
+            winner = c_i if la < lb else c_j
+            pair_metrics.append({
+                "vrn_a":   ra.get("vrn") or "?",
+                "vrn_b":   rb.get("vrn") or "?",
+                "date":    (ra.get("ocpp_start_time") or "")[:10],
+                "connector_a": c_i,
+                "connector_b": c_j,
+                "pair_client_kwh": round(pair_client, 2),
+                "pair_meter_kwh":  round(pair_meter,  2),
+                "pair_loss_kwh":   round(pair_loss,   2),
+                "pair_loss_pct":   round(_pct(pair_loss, pair_client), 1),
+                "split_symmetry":  round(split_symmetry, 2),
+                "winner_connector": winner,
+            })
+
+    # Summarise the pair distribution so the LLM gets the shape, not just
+    # individual rows. Median + IQR communicate "typical pair behavior"
+    # better than mean when a few extreme pairs dominate.
+    def _median(xs):
+        if not xs:
+            return 0.0
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    pair_loss_pcts = [p["pair_loss_pct"] for p in pair_metrics]
+    sym_vals       = [p["split_symmetry"] for p in pair_metrics]
+    # "Symmetric" pair → split_symmetry < 0.3: losses largely cancel
+    # within the pair → attribution artifact, billing fine for that pair.
+    symmetric_count  = sum(1 for s in sym_vals if s < 0.3)
+    one_sided_count  = sum(1 for s in sym_vals if s >= 0.3)
+    conn1_wins = sum(1 for p in pair_metrics if p["winner_connector"] == 1)
+    conn2_wins = sum(1 for p in pair_metrics if p["winner_connector"] == 2)
+    pair_client_total = sum(p["pair_client_kwh"] for p in pair_metrics)
+    pair_meter_total  = sum(p["pair_meter_kwh"]  for p in pair_metrics)
+    pair_loss_total   = sum(p["pair_loss_kwh"]   for p in pair_metrics)
+
+    # Top examples for the LLM to reference — most lopsided pairs (by
+    # |pair_loss_kwh|) so the operator can be pointed at real outliers.
+    lopsided_examples = sorted(
+        pair_metrics, key=lambda p: -abs(p["pair_loss_kwh"])
+    )[:5]
+
+    parallel_pair_summary = {
+        "pair_count":           len(pair_metrics),
+        # Pair-level totals — the headline number for parallel charging.
+        # Unlike sum-of-per-car-losses, this number is NOT corrupted by
+        # the shared-meter split: it asks "did the bill and the meter
+        # agree across both cars together?"
+        "pair_client_kwh_total": round(pair_client_total, 2),
+        "pair_meter_kwh_total":  round(pair_meter_total,  2),
+        "pair_loss_kwh_total":   round(pair_loss_total,   2),
+        "pair_loss_pct_total":   round(_pct(pair_loss_total, pair_client_total), 1),
+        # Distribution shape of per-pair loss %.
+        "pair_loss_pct_median":  round(_median(pair_loss_pcts), 1),
+        "pair_loss_pct_min":     round(min(pair_loss_pcts), 1) if pair_loss_pcts else 0.0,
+        "pair_loss_pct_max":     round(max(pair_loss_pcts), 1) if pair_loss_pcts else 0.0,
+        # Symmetry — how many pairs look like attribution noise vs real
+        # one-sided loss.
+        "symmetric_pairs":       symmetric_count,
+        "one_sided_pairs":       one_sided_count,
+        # Per-connector bias inside parallel pairs.
+        "connector_1_wins":      conn1_wins,
+        "connector_2_wins":      conn2_wins,
+        "lopsided_examples":     lopsided_examples,
+    }
+
     # Hour-of-day — diagnostic dimension for loss, not a standalone metric.
     hourly = defaultdict(lambda: {"sessions": 0, "client_kwh": 0.0, "loss_kwh": 0.0, "parallel": 0})
     for idx, r in enumerate(matched):
@@ -2156,6 +2259,7 @@ def dashboard_energy_analysis(request: dict):
         "by_model":     model_list,
         "by_connector": connector_list,
         "parallel":     parallel_summary,
+        "parallel_pairs": parallel_pair_summary,
         "hourly":       hourly_list,
         "matched_sessions": len(matched),
     }
@@ -2180,8 +2284,40 @@ def dashboard_energy_analysis(request: dict):
         f"loss {parallel_summary['solo']['loss_kwh']:+.2f} ({parallel_summary['solo']['loss_pct']:+.1f}%)\n"
         f"  Parallel : {parallel_summary['parallel']['sessions']} sess, "
         f"client {parallel_summary['parallel']['client_kwh']:.2f} kWh, "
-        f"loss {parallel_summary['parallel']['loss_kwh']:+.2f} ({parallel_summary['parallel']['loss_pct']:+.1f}%)"
+        f"loss {parallel_summary['parallel']['loss_kwh']:+.2f} ({parallel_summary['parallel']['loss_pct']:+.1f}%)  ← per-car split, unreliable; use the pair block below"
     )
+
+    # Pair-level parallel block — these numbers DO survive the bad meter
+    # split because they're computed on the two cars of a pair TOGETHER.
+    pp = parallel_pair_summary
+    if pp["pair_count"] > 0:
+        examples_lines = "\n".join(
+            f"    {ex['vrn_a']} + {ex['vrn_b']} ({ex['date']}, C{ex['connector_a']}+C{ex['connector_b']}): "
+            f"pair client {ex['pair_client_kwh']:.2f}, pair meter {ex['pair_meter_kwh']:.2f}, "
+            f"pair loss {ex['pair_loss_kwh']:+.2f} ({ex['pair_loss_pct']:+.1f}%), "
+            f"symmetry {ex['split_symmetry']:.2f}, winner C{ex['winner_connector']}"
+            for ex in pp["lopsided_examples"]
+        )
+        parallel_pair_block = (
+            f"  Pairs analysed         : {pp['pair_count']}\n"
+            f"  Pair-total client kWh  : {pp['pair_client_kwh_total']:.2f}\n"
+            f"  Pair-total meter kWh   : {pp['pair_meter_kwh_total']:.2f}\n"
+            f"  Pair-total loss kWh    : {pp['pair_loss_kwh_total']:+.2f} "
+            f"({pp['pair_loss_pct_total']:+.1f}% of pair client) "
+            f"← TRUSTWORTHY: survives bad split\n"
+            f"  Per-pair loss % range  : median {pp['pair_loss_pct_median']:+.1f}%, "
+            f"min {pp['pair_loss_pct_min']:+.1f}%, max {pp['pair_loss_pct_max']:+.1f}%\n"
+            f"  Symmetric pairs        : {pp['symmetric_pairs']} "
+            f"(losses cancel within pair → split artifact, billing fine)\n"
+            f"  One-sided pairs        : {pp['one_sided_pairs']} "
+            f"(both cars in pair lose same direction → real signal)\n"
+            f"  Connector winners      : C1 won {pp['connector_1_wins']} pairs, "
+            f"C2 won {pp['connector_2_wins']} pairs "
+            f"(winner = got more meter credit than its bill)\n"
+            f"  Most-lopsided examples :\n{examples_lines}"
+        )
+    else:
+        parallel_pair_block = "  (no parallel pairs in this dataset)"
 
     prompt = f"""You are writing a short, plain-English energy report for the
 operator of an EV charging station. The reader runs the station day-to-day
@@ -2192,41 +2328,84 @@ The aggregates below are already correctly computed — do NOT recompute,
 just read them and narrate them clearly.
 
 ────────────────────────────────────────────────────────────────────────
-READ THIS BEFORE YOU WRITE ANYTHING
+HOW THIS STATION WORKS (READ BEFORE YOU WRITE ANYTHING)
 ────────────────────────────────────────────────────────────────────────
 This station has ONE physical meter shared between TWO connectors. When
 two cars charge at the same time ("parallel"), our software has to GUESS
-how to split the meter reading between them. That guess is often wrong.
+how to split that one meter reading between the two cars.
 
-Because of that:
-  - SOLO sessions (one car charging alone) → the meter reading is
-    trustworthy. Loss numbers here are real.
-  - PARALLEL sessions → the per-car meter number is a guess. Big loss
-    numbers here usually mean OUR SPLIT WAS WRONG, not that the customer
-    was overbilled or that energy disappeared.
+So we have two kinds of data:
+  - SOLO sessions: one car charging alone. The per-car meter reading
+    is trustworthy.
+  - PARALLEL sessions, looked at per-car: each car's meter number is
+    OUR GUESS. Big per-car loss numbers in parallel sessions often
+    just mean the guess was wrong, not that the customer was overbilled.
+  - PARALLEL sessions, looked at as PAIRS: when we add BOTH cars'
+    bills and BOTH cars' meter readings in a pair, the bad split
+    cancels out. The PAIR TOTAL is trustworthy — it answers
+    "did the station meter and the two customer bills agree across
+    both cars together?"
 
-So: judge "real" loss from SOLO sessions only. Treat parallel-session
-loss as a sign our measurement needs better hardware, not as a billing
-problem.
+────────────────────────────────────────────────────────────────────────
+HOW TO ANALYSE PARALLEL CHARGING (the operator cares about this)
+────────────────────────────────────────────────────────────────────────
+Use the "Parallel pairs" block to actually understand parallel charging:
 
-Also: any single session where the meter reading is more than ~50%
-larger than what the customer was billed (e.g. meter 30 kWh on a 12 kWh
-bill) is almost certainly a case where our software attributed another
-car's energy to this one. Do NOT call those "lost" energy. List them in
-"suspect_rows" instead.
+  1. PAIR-TOTAL LOSS — is the sum of both cars' bills close to the sum
+     of both cars' meter readings? If yes, the station is delivering
+     what it charges for, even when two cars charge together. If no,
+     there's a real systemic loss across the pair.
+
+  2. SYMMETRY — pairs split into:
+     • Symmetric pairs (losses cancel within pair): one car looks
+       "over-charged" and the other "under-charged" by similar amounts.
+       This is our software splitting wrong, not a real billing issue.
+       Each customer was still billed correctly on the CP side; only
+       our internal attribution is off.
+     • One-sided pairs (both cars lose same direction): both cars in
+       the pair show loss in the same direction. THIS is real signal —
+       either the station genuinely lost (or gained) energy across the
+       pair, or there's a systemic meter bias.
+
+  3. CONNECTOR WINNER — if one connector consistently "wins" (gets
+     more meter credit than its bill) across many pairs, that points
+     at our slot→connector mapping being wrong, or one connector
+     having a measurement bias.
+
+  4. PAIR-LEVEL LOSS % vs SOLO LOSS % — compare like-for-like. If
+     pair-level loss % is close to solo loss %, parallel charging is
+     no worse than solo. If pair-level loss % is much larger, parallel
+     charging itself has a real problem worth investigating.
+
+Per-car parallel loss numbers (the noisy ones) should NEVER be the
+headline for a parallel-charging finding. Always use pair-level.
+
+────────────────────────────────────────────────────────────────────────
+SINGLE-SESSION SANITY CHECK
+────────────────────────────────────────────────────────────────────────
+Any single session where the meter reading is more than ~50% larger
+than what the customer was billed (e.g. meter 30 kWh on a 12 kWh bill)
+is almost certainly a case where our software attributed another car's
+energy to this one. Do NOT call those "lost" energy — list them in
+"suspect_rows" so the operator can investigate the attribution.
 
 ────────────────────────────────────────────────────────────────────────
 HOW TO PICK risk_level
 ────────────────────────────────────────────────────────────────────────
-Base risk_level on SOLO sessions ONLY:
-  - LOW    : solo loss within ±10% of solo client kWh, OR fewer than 5
-             solo sessions (sample too small to judge).
-  - MEDIUM : solo loss is 10–20% in one direction, consistently.
-  - HIGH   : solo loss is >20% in one direction across 5+ solo sessions.
-If the total loss looks big but it's almost all from parallel sessions
-and solo looks fine, risk_level is LOW — the problem is our measurement,
-not the billing. NEVER pick HIGH because of a big total-loss number
-alone.
+Combine SOLO loss % and PAIR-TOTAL loss % (NOT the per-car parallel
+loss). Use the worse of the two trustworthy signals:
+
+  - LOW    : both solo loss % and pair-total loss % within ±10%,
+             OR sample too small (fewer than 5 solo AND fewer than 5
+             pairs).
+  - MEDIUM : either solo or pair-total loss % is 10–20% in one
+             direction, consistently.
+  - HIGH   : either solo or pair-total loss % is >20% in one direction
+             AND backed by 5+ sessions or pairs.
+
+Per-car parallel loss alone NEVER drives risk_level — it's a known
+attribution artifact. NEVER pick HIGH because of a big "Parallel"
+per-car total in the solo-vs-parallel block.
 
 ────────────────────────────────────────────────────────────────────────
 DATA (already computed — do not recompute)
@@ -2235,7 +2414,7 @@ DATA (already computed — do not recompute)
 - Sessions: {summary.get('total', '?')} (matched {summary.get('matched', '?')}, unmatched {summary.get('unmatched', '?')})
 - Total client kWh (all rows): {summary.get('total_client_kwh', '?')}
 - Total per-session loss (matched only): {summary.get('total_loss_kwh', '?')} kWh
-  ⚠ this mixes solo + parallel — do NOT use it as the headline.
+  ⚠ this mixes solo + per-car-parallel — do NOT use it as the headline.
 
 ## Per-model (top 12 by |loss|)
 {model_block}
@@ -2243,8 +2422,11 @@ DATA (already computed — do not recompute)
 ## Per-connector
 {connector_block}
 
-## Solo vs parallel   ← lead the report with the SOLO row
+## Solo vs parallel (per-car view)
 {parallel_block}
+
+## Parallel pairs (pair-level view — TRUSTWORTHY signal for parallel charging)
+{parallel_pair_block}
 
 ────────────────────────────────────────────────────────────────────────
 RECOMMENDATIONS — STYLE GUIDE
@@ -2254,22 +2436,24 @@ verbs. No jargon ("audit", "cross-reference", "sub-metering",
 "attribution", "decompose"). Examples of good style:
   - "Compare the customer's app bill with the station meter for the
      Volvo session on May 10 to see if the customer was overbilled."
-  - "Add a small meter on each connector so you can tell which car used
-     how much energy without guessing."
-  - "Watch the Tata Tiago solo sessions next week — the meter and the
-     bill don't agree as closely as for other cars."
+  - "When two cars charge together, the meter total and the two bills
+     together are off by 12% — check if the meter is reading low during
+     high-current parallel charging."
+  - "Connector 2 consistently gets more meter credit than its bill
+     when paired with Connector 1 — check the slot-to-connector wiring."
 
 ────────────────────────────────────────────────────────────────────────
 Return ONLY this JSON shape, filled in:
 {{
-  "headline":         "1 plain sentence. Lead with the SOLO loss number (kWh and %). Say whether the bill and meter mostly agree on solo sessions. Mention parallel ONLY to say it's not a reliable measurement.",
-  "solo_finding":     "1 sentence: how many solo sessions, what is the solo loss in kWh and %, and what that means in plain words. Say 'sample too small' if fewer than 5 solo sessions.",
-  "parallel_finding": "1 sentence: how big the parallel gap looks, plus the everyday-words explanation that this is most likely our software splitting the shared meter wrong — NOT real lost energy or overbilling.",
-  "model_pattern":    "1 sentence on which models look off, but ONLY if the pattern is visible on solo sessions. Otherwise: 'no clear pattern on solo sessions'.",
-  "connector_pattern":"1 sentence comparing connector 1 vs connector 2; say 'roughly equal' if they are.",
-  "suspect_rows":     ["For each session where meter is more than ~50% larger than client bill, list 'VRN — model — date' so the operator can investigate it as a likely mismatch, not as lost energy. Empty array if none."],
-  "recommendations":  ["one concrete plain-English action", "one concrete plain-English action", "one concrete plain-English action"],
-  "risk_level":       "LOW | MEDIUM | HIGH (per the rubric above — based on SOLO only)"
+  "headline":           "1 plain sentence. State the SOLO loss % and the PAIR-TOTAL loss % side by side. If both look healthy say so; if one is off say which and by how much.",
+  "solo_finding":       "1 sentence: solo session count and loss in kWh + %. 'Sample too small' if fewer than 5 solo sessions.",
+  "parallel_pair_finding": "1-2 sentences using the pair-level block: pair count, pair-total loss in kWh + %, and whether pairs are mostly symmetric (= attribution noise, billing fine) or one-sided (= real signal). This is the MAIN parallel-charging finding.",
+  "split_artifact_finding": "1 sentence noting how big the per-car parallel loss looks vs the pair-total, to explain to the operator why per-car numbers were misleading. Skip if there are no parallel sessions.",
+  "model_pattern":      "1 sentence on which models look off, but only if visible on solo sessions or one-sided pairs. Otherwise: 'no clear pattern'.",
+  "connector_pattern":  "1 sentence comparing connectors. If one connector consistently wins inside pairs (lopsided winner count), call that out — it points at slot-wiring or a per-connector bias.",
+  "suspect_rows":       ["For each single session where meter is more than ~50% larger than client bill, list 'VRN — model — date' as a likely attribution mismatch, not as lost energy. Empty array if none."],
+  "recommendations":    ["one concrete plain-English action", "one concrete plain-English action", "one concrete plain-English action"],
+  "risk_level":         "LOW | MEDIUM | HIGH (per the rubric above — solo OR pair-total, whichever is worse)"
 }}
 """
 
@@ -2289,17 +2473,19 @@ Return ONLY this JSON shape, filled in:
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "headline":          {"type": "string"},
-                                "solo_finding":      {"type": "string"},
-                                "parallel_finding":  {"type": "string"},
-                                "model_pattern":     {"type": "string"},
-                                "connector_pattern": {"type": "string"},
-                                "suspect_rows":      {"type": "array", "items": {"type": "string"}},
-                                "recommendations":   {"type": "array", "items": {"type": "string"}},
-                                "risk_level":        {"type": "string"},
+                                "headline":               {"type": "string"},
+                                "solo_finding":           {"type": "string"},
+                                "parallel_pair_finding":  {"type": "string"},
+                                "split_artifact_finding": {"type": "string"},
+                                "model_pattern":          {"type": "string"},
+                                "connector_pattern":      {"type": "string"},
+                                "suspect_rows":           {"type": "array", "items": {"type": "string"}},
+                                "recommendations":        {"type": "array", "items": {"type": "string"}},
+                                "risk_level":             {"type": "string"},
                             },
                             "required": [
-                                "headline", "solo_finding", "parallel_finding",
+                                "headline", "solo_finding", "parallel_pair_finding",
+                                "split_artifact_finding",
                                 "model_pattern", "connector_pattern",
                                 "suspect_rows", "recommendations", "risk_level",
                             ],

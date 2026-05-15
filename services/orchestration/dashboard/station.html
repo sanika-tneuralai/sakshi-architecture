@@ -802,14 +802,19 @@ function InsightPanel({ insight, aggregates, results, onDismiss }) {
   const rc   = riskColors[risk] || riskColors.LOW;
 
   // Sub-insights: render only those the model populated.
-  // Solo and parallel are split into separate cards so the operator sees
-  // the real (solo) signal alongside the "measurement-artifact" caveat
-  // for parallel, instead of one merged sentence that buries the caveat.
+  // Parallel charging is split into two cards:
+  //   - parallel_pair_finding: the REAL parallel-charging signal,
+  //     computed on pair totals (which survive the bad per-car split).
+  //   - split_artifact_finding: explains why per-car parallel numbers
+  //     look big but aren't a billing issue.
+  // Keeping them separate lets the operator see the actual finding
+  // without the caveat swallowing it.
   const subInsights = [
-    { key: 'solo_finding',      label: 'Solo Sessions (Real Signal)',     text: insight.solo_finding },
-    { key: 'parallel_finding',  label: 'Parallel Sessions (Measurement)', text: insight.parallel_finding },
-    { key: 'model_pattern',     label: 'By Model',                        text: insight.model_pattern },
-    { key: 'connector_pattern', label: 'By Connector',                    text: insight.connector_pattern },
+    { key: 'solo_finding',           label: 'Solo Sessions',              text: insight.solo_finding },
+    { key: 'parallel_pair_finding',  label: 'Parallel Charging (Pairs)',  text: insight.parallel_pair_finding },
+    { key: 'split_artifact_finding', label: 'Why Per-Car Numbers Differ', text: insight.split_artifact_finding },
+    { key: 'model_pattern',          label: 'By Model',                   text: insight.model_pattern },
+    { key: 'connector_pattern',      label: 'By Connector',               text: insight.connector_pattern },
   ].filter(s => s.text);
 
   return (
