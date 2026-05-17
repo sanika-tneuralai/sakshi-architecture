@@ -125,13 +125,24 @@ You are given ONE CCTV frame. Parking slots are outlined as YELLOW polygons. The
 Your job is to judge — for EACH visible vehicle — whether it is parked correctly inside a single slot, occupying two slots, or outside every slot.
 
 ==================================================
+STEP 0 — SLOT INVENTORY (do this BEFORE judging any vehicle)
+==================================================
+COUNT the number of distinct yellow polygons visible in the frame. The valid `position` values for a single vehicle are constrained by that count:
+
+- 2 polygons visible (left + right): valid positions are `left`, `right`, `left_and_right`. There is NO `center` slot. A vehicle whose body sits between the two polygons is STRADDLING — the verdict MUST be `occupies_two_slots` with position `left_and_right`. Reporting `position: "center"` is INVALID when only two polygons exist.
+- 3 polygons visible (left + center + right): all positions (`left`, `center`, `right`, `left_and_right`, `multiple`) are valid.
+
+The `slot_occupancy` object must only contain keys for slots that ACTUALLY EXIST in the frame. Never emit `slot_occupancy: {"center": ...}` when no center polygon is visible.
+
+==================================================
 VERDICTS
 ==================================================
-- "proper" — the vehicle's body is FULLY inside ONE yellow polygon. The car may be slightly askew, but no part of its body crosses a yellow line.
+- "proper" — the vehicle's body, INCLUDING ALL FOUR WHEELS, is FULLY inside ONE yellow polygon. The car may be slightly askew, but NO PART OF ITS BODY (wheel, bumper, mirror, panel) crosses a yellow line into another polygon or into unmarked area. If any wheel or body edge is on the wrong side of a yellow line, the verdict is NOT "proper".
 - "occupies_two_slots" — ONE vehicle's body overlaps TWO yellow polygons. ALL of these cases qualify:
     * a forward-parked car straddling the divider between two slots,
     * a car parked horizontally (sideways / perpendicular) covering two slots end-to-end,
-    * a car parked diagonally across two slots.
+    * a car parked diagonally across two slots,
+    * a car whose centroid is between two slots, with body parts in both.
   Orientation does not matter. If any part of the body lies in one slot and any other part lies in another slot, the verdict is "occupies_two_slots".
 - "outside_all_slots" — the vehicle's body is entirely OUTSIDE every yellow polygon (parked in the driveway, blocking access, etc.).
 - "partially_outside" — the vehicle is partly inside ONE slot and partly outside every slot (e.g. tail sticking into driveway).
@@ -143,6 +154,24 @@ RULES
 1. List EVERY visible vehicle, including those that look properly parked. The downstream system needs occupancy counts to detect when YOLO has merged two cars into one detection.
 2. If you see TWO distinct vehicles whose bodies both overlap the SAME yellow polygon, BOTH must be reported, and `slot_occupancy` for that position must be 2. Two cars in one slot is a compliance failure even when each looks "proper" individually.
 3. Count carefully: do not collapse two adjacent vehicles into one "occupies_two_slots" verdict. If you can see two distinct vehicles (two roofs, two number plates, two pairs of wheels), report two vehicles each with their own verdict.
+4. A single vehicle sitting between two slots is `occupies_two_slots`, NOT a `proper`-parked car in a phantom middle slot. Do not invent slots that are not painted on the ground.
+
+==================================================
+EXAMPLES (two yellow polygons visible — left and right)
+==================================================
+Car body's left wheels in the left polygon, right wheels in the right polygon, body clearly crossing the yellow dividing line:
+  CORRECT:   {"position":"left_and_right","verdict":"occupies_two_slots","confidence":0.95}
+             slot_occupancy: {"left":1,"right":1}
+  INCORRECT: {"position":"center","verdict":"proper","confidence":0.95}
+             A car between two slots is NOT a proper-parked car in a phantom center slot.
+
+Car parked diagonally, hood overlapping the left polygon, trunk overlapping the right polygon:
+  CORRECT:   {"position":"left_and_right","verdict":"occupies_two_slots","confidence":0.9}
+             slot_occupancy: {"left":1,"right":1}
+
+Car fully inside the left polygon, all four wheels and body inside, no part crossing the yellow line:
+  CORRECT:   {"position":"left","verdict":"proper","confidence":0.95}
+             slot_occupancy: {"left":1,"right":0}
 
 ==================================================
 OUTPUT FORMAT
