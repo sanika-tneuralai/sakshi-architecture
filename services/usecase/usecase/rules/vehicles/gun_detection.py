@@ -88,7 +88,7 @@ GUN_LLM_INFERRED_PLUGIN_SECONDS = int(os.getenv("GUN_LLM_INFERRED_PLUGIN_SECONDS
 # Provider selection mirrors vehicle_extraction. Set GUN_LLM_PROVIDER to
 # "claude" (default), "openai", or "gemini". All three call sites are kept so
 # switching back is an env-var change, not a code change.
-GUN_LLM_PROVIDER = os.getenv("GUN_LLM_PROVIDER", "openai").strip().lower()
+GUN_LLM_PROVIDER = os.getenv("GUN_LLM_PROVIDER", "claude").strip().lower()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")

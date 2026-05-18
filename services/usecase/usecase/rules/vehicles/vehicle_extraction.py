@@ -60,7 +60,7 @@ GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Which provider to call for vehicle extraction. "claude" | "openai" | "gemini".
 # Defaults to claude. Switching back to openai or gemini is a one-line env change
 # — set VEHICLE_LLM_PROVIDER=openai (and OPENAI_API_KEY) and restart.
-VEHICLE_LLM_PROVIDER = os.getenv("VEHICLE_LLM_PROVIDER", "openai").strip().lower()
+VEHICLE_LLM_PROVIDER = os.getenv("VEHICLE_LLM_PROVIDER", "claude").strip().lower()
 
 # Per-slot retry backoff (frames) after a failed attempt.
 _BACKOFF = [10, 20, 9999]
