@@ -110,9 +110,9 @@ MERGED_BBOX_SLOT_RATIO = float(os.getenv("MERGED_BBOX_SLOT_RATIO", "1.15"))
 # to disable and fall back to geometry only.
 COMPLIANCE_LLM_ENABLED = os.getenv("COMPLIANCE_LLM_ENABLED", "1") == "1"
 
-# Which provider to use for compliance arbitration. "claude" (default) or
-# "openai". Mirrors VEHICLE_LLM_PROVIDER / GUN_LLM_PROVIDER.
-COMPLIANCE_LLM_PROVIDER = os.getenv("COMPLIANCE_LLM_PROVIDER", "claude").strip().lower()
+# Which provider to use for compliance arbitration. "openai" (default) or
+# "claude". Mirrors VEHICLE_LLM_PROVIDER / GUN_LLM_PROVIDER.
+COMPLIANCE_LLM_PROVIDER = os.getenv("COMPLIANCE_LLM_PROVIDER", "openai").strip().lower()
 
 # Compliance prompt. The frame has yellow polygon outlines overlaid by
 # _annotate_all_slots; the LLM does not see slot ID labels. Vehicles are
