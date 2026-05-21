@@ -17,6 +17,16 @@ Source-of-truth hierarchy:
      for this track (no snapshot URL, no API key, or LLM saw nothing in the
      vehicle's position).
 
+Backend (env PARKING_COMPLIANCE_BACKEND):
+  llm    — default. Both the per-frame vehicle-extraction LLM call AND the
+           dedicated compliance arbiter are active. Verdict hierarchy above
+           applies as written.
+  yolo   — skips every LLM call from this rule. Verdicts come from geometry
+           only (centroid + 50%% bbox-overlap + merged-bbox guard). is_ev
+           becomes "unknown" so non-EV detection is a no-op until
+           vehicle_extraction persists is_ev onto slot state. LLM code paths
+           are preserved so we can flip back via env at any time.
+
 For unauthorized parking, this rule also fires parking session events so the
 full session lifecycle (in_time → out_time) is captured even when the car
 never enters a legitimate ROI:
@@ -105,9 +115,26 @@ DUPLICATE_DETECTION_CONTAINMENT = float(os.getenv("UNAUTH_DUPLICATE_CONTAINMENT"
 # debounce path.
 MERGED_BBOX_SLOT_RATIO = float(os.getenv("MERGED_BBOX_SLOT_RATIO", "1.15"))
 
+# Backend flag — mirrors PARKING_DETECTION_BACKEND / GUN_DETECTION_BACKEND.
+# "llm" (default) keeps the per-frame vehicle-extraction LLM call AND the
+# compliance arbiter active. "yolo" skips both so the rule runs on pure
+# geometry (centroid + bbox overlap + merged-bbox guard). Both LLM code
+# paths are preserved so we can flip back via env at any time.
+#
+# Trade-off when set to "yolo":
+#   - Non-EV detection becomes a no-op (is_ev comes from the LLM call here),
+#     until vehicle_extraction is reworked to persist is_ev onto slot state.
+#   - The LLM-blind fallback ("if not cars:" branch) emits no violations,
+#     because llm_vehicles will be empty.
+#   - All other compliance verdicts (proper / double_slot / outside_slot)
+#     come from geometry, which is the existing fallback path.
+PARKING_COMPLIANCE_BACKEND = os.getenv("PARKING_COMPLIANCE_BACKEND", "llm").lower()
+
 # Use the dedicated compliance LLM call as an arbiter when the geometric
 # path or the merge-guard flags a suspect verdict. On by default; set to 0
-# to disable and fall back to geometry only.
+# to disable and fall back to geometry only. Independent of the backend
+# flag above (the backend flag is the master switch; this is the inner
+# arbiter toggle, kept for back-compat with existing deployments).
 COMPLIANCE_LLM_ENABLED = os.getenv("COMPLIANCE_LLM_ENABLED", "1") == "1"
 
 # Which provider to use for compliance arbitration. "openai" (default) or
@@ -550,8 +577,17 @@ class ParkingComplianceRule(BaseUsecaseRule):
         # When ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY is unset, or
         # the snapshot URL is missing, llm_vehicles ends up empty and assignments
         # is {} — every car falls through to the geometric fallback below.
+        #
+        # Gated by PARKING_COMPLIANCE_BACKEND: in "yolo" mode we skip the LLM
+        # call entirely. The downstream code (`if llm_vehicles:` LLM-blind
+        # fallback, `llm_quality in (...)` verdict-wins branch, is_ev/non_ev
+        # path) all naturally short-circuit when llm_vehicles/llm_assignments
+        # are empty — no further gating required.
         snapshot_url = detection_output.get("snapshot_url")
-        llm_resp = cached_llm_frame_call(snapshot_url, rois) if snapshot_url else None
+        if PARKING_COMPLIANCE_BACKEND == "llm" and snapshot_url:
+            llm_resp = cached_llm_frame_call(snapshot_url, rois)
+        else:
+            llm_resp = None
         llm_vehicles = (llm_resp or {}).get("vehicles", [])
         llm_targets = [
             {"key": c.get("track_id"),
@@ -737,10 +773,15 @@ class ParkingComplianceRule(BaseUsecaseRule):
                 # wins because it can reason about both painted slot lines AND
                 # vehicle orientation in ways the geometric path cannot.
                 # `insufficient_evidence` falls back to the geometric verdict.
+                #
+                # Gated by PARKING_COMPLIANCE_BACKEND (master switch) AND
+                # COMPLIANCE_LLM_ENABLED (inner toggle). Both must be on for
+                # the arbiter to run.
                 arbiter_verdict = None
                 arbiter_confidence = None
                 if (
-                    COMPLIANCE_LLM_ENABLED
+                    PARKING_COMPLIANCE_BACKEND == "llm"
+                    and COMPLIANCE_LLM_ENABLED
                     and snapshot_url
                     and verdict != "proper"
                 ):
