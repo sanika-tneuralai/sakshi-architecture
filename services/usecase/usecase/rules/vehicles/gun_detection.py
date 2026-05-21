@@ -698,7 +698,10 @@ class GunDetectionRule(BaseUsecaseRule):
             d for d in all_dets if d.get("class_name") == CAR_CLASS
         ]
 
-        print(f"[GUN] camera={camera_id} | rois={list(rois.keys())} | tracked_cars={len(tracked_cars)}")
+        logger.debug(
+            "[GUN] camera=%s | rois=%s | tracked_cars=%d",
+            camera_id, list(rois.keys()), len(tracked_cars),
+        )
 
         # ── Map cars → ROIs ───────────────────────────────────────────────
         # One car per ROI (first car wins if multiple overlap the same ROI).
@@ -718,7 +721,10 @@ class GunDetectionRule(BaseUsecaseRule):
                 if roi_name not in roi_to_gun or gun.get("confidence", 0) > roi_to_gun[roi_name].get("confidence", 0):
                     roi_to_gun[roi_name] = gun
 
-        print(f"[GUN] roi_to_track={roi_to_track} | roi_to_gun={list(roi_to_gun.keys())}")
+        logger.debug(
+            "[GUN] roi_to_track=%s | roi_to_gun=%s",
+            roi_to_track, list(roi_to_gun.keys()),
+        )
 
         events: List[dict] = []
 
@@ -986,5 +992,8 @@ class GunDetectionRule(BaseUsecaseRule):
                     )
 
         triggered = bool(events)
-        print(f"[GUN] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
+        logger.debug(
+            "[GUN] result: triggered=%s | events=%s",
+            triggered, [e["event_type"] for e in events],
+        )
         return {"triggered": triggered, "matched_objects": list(gun_dets), "events": events}
