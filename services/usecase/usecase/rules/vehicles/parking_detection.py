@@ -164,7 +164,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
             return {"triggered": False, "matched_objects": [], "events": []}
 
         cars = [d for d in detection_output.get("detections", []) if d.get("class_name") == "car"]
-        print(f"[PARKING] camera={camera_id} | rois={list(rois.keys())} | cars_detected={len(cars)}")
+        logger.debug(
+            "[PARKING] camera=%s | rois=%s | cars_detected=%d",
+            camera_id, list(rois.keys()), len(cars),
+        )
 
         # ── Canonical tracker (shared across all vehicle usecases) ────────
         tracker_key = f"tracker:{camera_id}"
@@ -267,7 +270,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
         events: List[dict]  = []
         triggered           = False
 
-        print(f"[PARKING] roi_occupants={roi_occupants}")
+        logger.debug("[PARKING] roi_occupants=%s", roi_occupants)
 
         for roi_name, occupant_ids in roi_occupants.items():
 
@@ -548,7 +551,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             },
                         )
                         events.append(evt)
-                        publish_sync("parking_events", evt)
+                        publish_sync("parking_events", evt, task_id=task_id)
                         logger.info(
                             "[PARKING] Outtime confirmed (debounced %.0fs in MAYBE_GONE): "
                             "camera=%s roi=%s track=%s",
@@ -567,7 +570,10 @@ class ParkingDetectionRule(BaseUsecaseRule):
         debounce["entry_buf"] = entry_buf
         set_state(debounce_key, debounce)
 
-        print(f"[PARKING] result: triggered={triggered} | events={[e['event_type'] for e in events]}")
+        logger.debug(
+            "[PARKING] result: triggered=%s | events=%s",
+            triggered, [e["event_type"] for e in events],
+        )
         return {
             "triggered":       triggered,
             "matched_objects": tracked_cars + synthetic_llm_cars,
