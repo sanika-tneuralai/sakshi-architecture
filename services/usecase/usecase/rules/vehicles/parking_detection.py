@@ -29,6 +29,10 @@ YOLO-miss safety net (LLM polling):
   parking_intime fires after ENTRY_FRAMES of consistent injection.
 - Replaces the previous G-marker / logo-occlusion CV fallback, which was
   removed because shadows on the painted G triggered phantom sessions.
+- Gated by PARKING_DETECTION_BACKEND (env, default "llm"). Set to "yolo"
+  to disable the LLM poll entirely — the surrounding YOLO tracking stays
+  unchanged. Code is preserved (not deleted) so we can flip back at any
+  time if YOLO regresses on a camera.
 
 ROI polygons are injected via detection_output["rois"]:
     {"ROI_1": [[x,y], ...], "ROI_2": [[x,y], ...]}
@@ -51,6 +55,12 @@ from workers.redis_state import get_state, set_state, get_slot_state, set_slot_s
 logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3    # consecutive frames car must be present to confirm entry
+
+# Backend flag: "llm" (default) keeps the YOLO-miss LLM safety net active.
+# "yolo" disables the LLM poll entirely — YOLO becomes the sole occupancy
+# source. Switch via env at deploy time (orchestrate sets this); the LLM
+# code path is preserved so we can flip back if YOLO regresses.
+PARKING_DETECTION_BACKEND = os.getenv("PARKING_DETECTION_BACKEND", "llm").lower()
 
 # How often (seconds) to re-poll the LLM for an empty-per-YOLO slot. Verdict
 # is cached in slot.last_llm_poll_at / slot.last_llm_verdict so we never call
@@ -191,58 +201,68 @@ class ParkingDetectionRule(BaseUsecaseRule):
         # llm:{cam}:{ROI} track so the rest of the rule (entry debounce,
         # MAYBE_GONE, swap detection, vehicle_extraction anchor) treats it
         # identically to a YOLO entry.
-        snapshot_url = detection_output.get("snapshot_url")
-        now_for_poll = _now_dt()
-        # Synthetic "cars" appended here are forwarded to vehicle_extraction
-        # via matched_objects so it can run plate/model extraction on
-        # YOLO-blind sessions. The synthetic bbox is the slot polygon's
-        # bounding rectangle so existing which_rois / cropping code handles
-        # them identically to YOLO detections.
+        #
+        # Gated by PARKING_DETECTION_BACKEND: in "yolo" mode this whole block
+        # is skipped and synthetic_llm_cars stays empty — the later return
+        # path already handles that as a no-op.
         synthetic_llm_cars: List[Dict[str, Any]] = []
+        if PARKING_DETECTION_BACKEND == "llm":
+            snapshot_url = detection_output.get("snapshot_url")
+            now_for_poll = _now_dt()
+            # Synthetic "cars" appended here are forwarded to vehicle_extraction
+            # via matched_objects so it can run plate/model extraction on
+            # YOLO-blind sessions. The synthetic bbox is the slot polygon's
+            # bounding rectangle so existing which_rois / cropping code handles
+            # them identically to YOLO detections.
 
-        def _emit_synthetic(roi_name: str) -> None:
-            roi_occupants[roi_name].append(_llm_track_id(camera_id, roi_name))
-            poly = rois.get(roi_name) or []
-            if not poly:
-                return
-            xs = [p[0] for p in poly]
-            ys = [p[1] for p in poly]
-            synthetic_llm_cars.append({
-                "track_id":   _llm_track_id(camera_id, roi_name),
-                "bbox": {
-                    "x1": float(min(xs)), "y1": float(min(ys)),
-                    "x2": float(max(xs)), "y2": float(max(ys)),
-                },
-                "class_name": "car",
-                "confidence": 1.0,
-            })
+            def _emit_synthetic(roi_name: str) -> None:
+                roi_occupants[roi_name].append(_llm_track_id(camera_id, roi_name))
+                poly = rois.get(roi_name) or []
+                if not poly:
+                    return
+                xs = [p[0] for p in poly]
+                ys = [p[1] for p in poly]
+                synthetic_llm_cars.append({
+                    "track_id":   _llm_track_id(camera_id, roi_name),
+                    "bbox": {
+                        "x1": float(min(xs)), "y1": float(min(ys)),
+                        "x2": float(max(xs)), "y2": float(max(ys)),
+                    },
+                    "class_name": "car",
+                    "confidence": 1.0,
+                })
 
-        for roi_name in list(roi_occupants.keys()):
-            if roi_occupants[roi_name]:
-                continue   # YOLO has a car — skip LLM, free of charge
-            slot_for_poll = get_slot_state(camera_id, roi_name)
-            last_poll_iso = slot_for_poll.get("last_llm_poll_at")
-            elapsed = _absent_seconds(last_poll_iso, now_for_poll) if last_poll_iso else float("inf")
+            for roi_name in list(roi_occupants.keys()):
+                if roi_occupants[roi_name]:
+                    continue   # YOLO has a car — skip LLM, free of charge
+                slot_for_poll = get_slot_state(camera_id, roi_name)
+                last_poll_iso = slot_for_poll.get("last_llm_poll_at")
+                elapsed = _absent_seconds(last_poll_iso, now_for_poll) if last_poll_iso else float("inf")
 
-            if elapsed < LLM_POLL_INTERVAL_SECONDS:
-                # Within the sticky window — reuse last verdict, no new call.
-                if slot_for_poll.get("last_llm_verdict") is True:
+                if elapsed < LLM_POLL_INTERVAL_SECONDS:
+                    # Within the sticky window — reuse last verdict, no new call.
+                    if slot_for_poll.get("last_llm_verdict") is True:
+                        _emit_synthetic(roi_name)
+                    continue
+
+                if not snapshot_url:
+                    continue  # Can't ask the LLM without a frame.
+
+                verdict = llm_confirms_vehicle_in_slot(snapshot_url, rois, roi_name)
+                slot_for_poll["last_llm_poll_at"] = now_for_poll.isoformat()
+                slot_for_poll["last_llm_verdict"] = verdict   # True / False / None
+                set_slot_state(camera_id, roi_name, slot_for_poll)
+                logger.info(
+                    "[PARKING] LLM poll: camera=%s roi=%s verdict=%s",
+                    camera_id, roi_name, verdict,
+                )
+                if verdict is True:
                     _emit_synthetic(roi_name)
-                continue
-
-            if not snapshot_url:
-                continue  # Can't ask the LLM without a frame.
-
-            verdict = llm_confirms_vehicle_in_slot(snapshot_url, rois, roi_name)
-            slot_for_poll["last_llm_poll_at"] = now_for_poll.isoformat()
-            slot_for_poll["last_llm_verdict"] = verdict   # True / False / None
-            set_slot_state(camera_id, roi_name, slot_for_poll)
-            logger.info(
-                "[PARKING] LLM poll: camera=%s roi=%s verdict=%s",
-                camera_id, roi_name, verdict,
+        else:
+            logger.debug(
+                "[PARKING] LLM safety net disabled (PARKING_DETECTION_BACKEND=%s) — YOLO-only",
+                PARKING_DETECTION_BACKEND,
             )
-            if verdict is True:
-                _emit_synthetic(roi_name)
 
         events: List[dict]  = []
         triggered           = False
