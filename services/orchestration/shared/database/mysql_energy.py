@@ -369,6 +369,132 @@ def compute_kwh_from_readings(
     return round(energy, 3)
 
 
+def allocate_kwh_among_sessions(
+    readings: list[dict],
+    sessions: list[dict],
+) -> dict:
+    """
+    Fairly distribute meter increments across overlapping sessions.
+
+    A single shared meter on one controller serves both connectors, so when
+    two cars charge in parallel the same total_kwh delta belongs to both
+    sessions. Computing per-session kWh independently double-counts that
+    delta. This function instead walks consecutive readings, splits each
+    delta equally among the sessions that were plugged in across that
+    step, and returns each session's accumulated share.
+
+    `sessions` items must carry: id, plug_time, plug_out_time, in_time,
+    out_time. Per-session window resolution mirrors
+    compute_kwh_from_readings — primary uses plug_time/plug_out_time with
+    a ±PLUG_BUFFER_MINUTES match; fallback uses in_time/out_time exactly.
+
+    Returns: { session['id']: kwh_or_None }. None when no usable start /
+    end anchor could be located for the session.
+    """
+    if not readings:
+        return {s["id"]: None for s in sessions}
+
+    n = len(readings)
+    buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
+
+    def _idx_closest_in_window(target: datetime, window: timedelta):
+        lo, hi = target - window, target + window
+        best_idx = None
+        best_delta = None
+        for i, row in enumerate(readings):
+            rt = row["received_time"]
+            if rt < lo:
+                continue
+            if rt > hi:
+                break
+            delta = abs((rt - target).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_idx, best_delta = i, delta
+        return best_idx
+
+    def _idx_first_at_or_after(target: datetime):
+        for i, row in enumerate(readings):
+            if row["received_time"] >= target:
+                return i
+        return None
+
+    def _idx_last_at_or_before(target: datetime):
+        last = None
+        for i, row in enumerate(readings):
+            if row["received_time"] > target:
+                break
+            last = i
+        return last
+
+    def _idx_latest_at_or_after(target: datetime):
+        last = None
+        for i, row in enumerate(readings):
+            if row["received_time"] >= target:
+                last = i
+        return last
+
+    bounds: list = []
+    ids: list = []
+    for s in sessions:
+        ids.append(s["id"])
+        t_plug_in  = _to_naive_ist(s.get("plug_time"))
+        t_plug_out = _to_naive_ist(s.get("plug_out_time"))
+        t_in       = _to_naive_ist(s.get("in_time"))
+        t_out      = _to_naive_ist(s.get("out_time"))
+
+        using_fallback = t_plug_in is None
+        if t_plug_in is None and t_in is None:
+            bounds.append(None)
+            continue
+
+        if not using_fallback:
+            idx_in = _idx_closest_in_window(t_plug_in, buf)
+            idx_out = (
+                _idx_closest_in_window(t_plug_out, buf)
+                if t_plug_out is not None
+                else _idx_latest_at_or_after(t_plug_in)
+            )
+        else:
+            idx_in = _idx_first_at_or_after(t_in)
+            idx_out = (
+                _idx_last_at_or_before(t_out)
+                if t_out is not None
+                else _idx_latest_at_or_after(t_in)
+            )
+
+        if idx_in is None or idx_out is None or idx_out <= idx_in:
+            bounds.append(None)
+            continue
+        bounds.append((idx_in, idx_out))
+
+    energy: dict = {
+        sid: (0.0 if bnd is not None else None)
+        for sid, bnd in zip(ids, bounds)
+    }
+
+    # Walk each interval [k, k+1) and split its delta among the sessions
+    # whose plug window covers it. A session with anchors (idx_in, idx_out)
+    # owns intervals k where idx_in <= k < idx_out.
+    for k in range(n - 1):
+        delta = float(readings[k + 1]["total_kwh"]) - float(readings[k]["total_kwh"])
+        if delta <= 0:
+            continue
+        active = [
+            sid for sid, bnd in zip(ids, bounds)
+            if bnd is not None and bnd[0] <= k < bnd[1]
+        ]
+        if not active:
+            continue
+        share = delta / len(active)
+        for sid in active:
+            energy[sid] += share
+
+    return {
+        sid: (None if v is None else round(v, 3))
+        for sid, v in energy.items()
+    }
+
+
 def test_mysql_connection() -> bool:
     """Return True if the MySQL energy DB is reachable."""
     try:

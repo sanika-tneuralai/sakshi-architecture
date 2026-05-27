@@ -1699,7 +1699,7 @@ def dashboard_sessions(
         from shared.database.models import ChargingSession
         from shared.database.mysql_energy import (
             fetch_readings_window,
-            compute_kwh_from_readings,
+            allocate_kwh_among_sessions,
             _to_naive_ist,
             PLUG_BUFFER_MINUTES,
         )
@@ -1757,28 +1757,26 @@ def dashboard_sessions(
             window_end   = max(candidate_ends)
             readings = fetch_readings_window(window_start, window_end)
 
+        # Allocate meter increments across all sessions in one pass so cars
+        # that charged in parallel split each delta instead of both
+        # claiming the full reading-to-reading jump. Anchor on plug
+        # times when present and fall back to in/out so the live row's
+        # kWh keeps ticking when gun_detection briefly drops the plug.
+        alloc_input = [
+            {
+                "id": r.session_id,
+                "plug_time": r.plug_time,
+                "plug_out_time": r.plug_out_time,
+                "in_time": r.in_time,
+                "out_time": r.out_time,
+            }
+            for r in rows
+        ]
+        energy_by_id = allocate_kwh_among_sessions(readings, alloc_input)
+
         sessions = []
         for r in rows:
-            # Dashboard sessions table: anchor energy to car in/out times,
-            # not plug times. Keeps the per-row kWh consistent with the live
-            # slot card and immune to spurious plug-out events while the car
-            # is still parked & charging.
-            #
-            # Original (plug-time based) call retained for easy revert:
-            # energy_kwh = compute_kwh_from_readings(
-            #     readings,
-            #     plug_time=r.plug_time,
-            #     plug_out_time=r.plug_out_time,
-            #     in_time=r.in_time,
-            #     out_time=r.out_time,
-            # )
-            energy_kwh = compute_kwh_from_readings(
-                readings,
-                plug_time=None,
-                plug_out_time=None,
-                in_time=r.in_time,
-                out_time=r.out_time,
-            )
+            energy_kwh = energy_by_id.get(r.session_id)
             sessions.append({
                 "session_id":    r.session_id,
                 "camera_id":     r.camera_id,
@@ -1875,7 +1873,7 @@ def dashboard_energy_comparison_upload(
         from shared.database.models import ChargingSession
         from shared.database.mysql_energy import (
             fetch_readings_window,
-            compute_kwh_from_readings,
+            allocate_kwh_among_sessions,
             _to_naive_ist,
         )
 
@@ -1914,15 +1912,24 @@ def dashboard_energy_comparison_upload(
         else:
             readings = []
 
+        # Allocate meter increments across overlapping sessions so parallel
+        # charging no longer double-counts the shared meter against both
+        # cars. Per-session loss_kwh now reflects the real attribution.
+        alloc_input = [
+            {
+                "id": r.session_id,
+                "plug_time": r.plug_time,
+                "plug_out_time": r.plug_out_time,
+                "in_time": r.in_time,
+                "out_time": r.out_time,
+            }
+            for r in rows
+        ]
+        energy_by_id = allocate_kwh_among_sessions(readings, alloc_input)
+
         cctv_sessions = []
         for r in rows:
-            energy_kwh = compute_kwh_from_readings(
-                readings,
-                plug_time=r.plug_time,
-                plug_out_time=r.plug_out_time,
-                in_time=r.in_time,
-                out_time=r.out_time,
-            )
+            energy_kwh = energy_by_id.get(r.session_id)
             cctv_sessions.append(CctvSession(
                 session_id=r.session_id,
                 camera_id=r.camera_id,
@@ -1978,8 +1985,11 @@ def dashboard_energy_analysis(request: dict):
       - Car model (Excel-side, authoritative — CCTV model is unreliable)
       - Connector
       - Solo vs parallel charging (parallel = other connector active during
-        this session's OCPP window; the shared meter double-counts in those
-        windows, so per-session loss is most trustworthy on solo sessions)
+        this session's OCPP window; meter increments are now split equally
+        across overlapping sessions so per-session loss is comparable
+        across solo and parallel, but the split is an equal allocation,
+        not a per-car measurement — pair-level totals remain the cleanest
+        signal when two cars share the meter)
       - Hour-of-day (correlated with parallel — peak hours typically overlap)
 
     Aggregates are computed in Python BEFORE the LLM call so the model can
@@ -2129,13 +2139,13 @@ def dashboard_energy_analysis(request: dict):
         },
     }
 
-    # Pair-level parallel analysis. The per-car loss in parallel sessions
-    # is unreliable because the shared meter has been split by software;
-    # but the SUM of both cars' losses in a pair survives that split — it
-    # equals (bill_A + bill_B) - meter_total, which is the real physical
-    # question. This block decomposes parallel charging into pair-level
-    # metrics so the LLM can reason about it instead of being told to
-    # ignore parallel data.
+    # Pair-level parallel analysis. Per-session meter_kwh is already an
+    # equal-share allocation of the shared meter (see
+    # allocate_kwh_among_sessions), so per-car loss is meaningful. The
+    # pair-level SUM is still the cleanest physical question — it equals
+    # (bill_A + bill_B) - meter_total, independent of how the equal split
+    # was applied — so we surface both: per-car loss for attribution and
+    # pair totals for the underlying bill-vs-meter agreement.
     #
     # Pair-level rather than window-group: with only 2 connectors and one
     # meter-total per session, pair (A,B) is the cleanest unit. If three
@@ -2647,16 +2657,22 @@ def dashboard_station(
     db = SessionLocal()
     try:
         from shared.database.models import ChargingSession
-        from shared.database.mysql_energy import get_energy_consumed
+        from shared.database.mysql_energy import (
+            fetch_readings_window,
+            allocate_kwh_among_sessions,
+            _to_naive_ist,
+            PLUG_BUFFER_MINUTES,
+        )
 
         SLOTS = ["ROI_1", "ROI_2"]
-        slots_out = {}
 
+        # Resolve the live session per slot in a single pass so we can run
+        # the energy allocator over BOTH at once. Without this, each slot
+        # would receive the full meter delta during a parallel-parked
+        # window — i.e. the shared meter would be double-counted.
+        slot_session: dict = {}
         for slot_id in SLOTS:
-            # Only consider genuinely live sessions: no out_time AND status is
-            # active or charging. incomplete means the stale-cleanup job already
-            # declared the session abandoned — the slot is physically empty.
-            session = (
+            slot_session[slot_id] = (
                 db.query(ChargingSession)
                 .filter(
                     ChargingSession.camera_id == camera_id,
@@ -2668,38 +2684,52 @@ def dashboard_station(
                 .first()
             )
 
+        live = [s for s in slot_session.values() if s is not None]
+
+        # Live energy is anchored to car_in (not plug_in) — gun_detection
+        # occasionally flips to "unplugged" while the car is still parked
+        # & charging, which would otherwise freeze the live kWh reading.
+        # Passing plug_time=None forces the allocator onto the car-time
+        # fallback branch for each session.
+        energy_by_id: dict = {}
+        if live:
+            from zoneinfo import ZoneInfo
+            buf = timedelta(minutes=PLUG_BUFFER_MINUTES)
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+            starts, ends = [], []
+            for s in live:
+                ts_in = _to_naive_ist(s.in_time)
+                if ts_in is not None:
+                    starts.append(ts_in - buf)
+                ts_out = _to_naive_ist(s.out_time)
+                ends.append((ts_out + buf) if ts_out is not None else now_ist)
+            if starts and ends:
+                readings = fetch_readings_window(min(starts), max(ends))
+                alloc_input = [
+                    {
+                        "id": s.session_id,
+                        "plug_time": None,
+                        "plug_out_time": None,
+                        "in_time": s.in_time,
+                        "out_time": s.out_time,
+                    }
+                    for s in live
+                ]
+                energy_by_id = allocate_kwh_among_sessions(readings, alloc_input)
+
+        def fmt_time(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+
+        slots_out = {}
+        for slot_id in SLOTS:
+            session = slot_session[slot_id]
             if session is None:
                 slots_out[slot_id] = {"status": "empty"}
                 continue
-
-            def fmt_time(dt):
-                if dt is None:
-                    return None
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.isoformat()
-
-            # Live energy: kWh consumed so far. Anchored to car_in / car_out
-            # (not plug_in / plug_out) — gun-detection occasionally flips to
-            # "unplugged" while the car is still parked & charging, which would
-            # otherwise freeze the live kWh reading prematurely. Passing
-            # plug_time=None forces get_energy_consumed() onto the car-time
-            # fallback branch.
-            #
-            # Original (plug-time based) call retained for easy revert:
-            # energy_kwh = get_energy_consumed(
-            #     plug_time=session.plug_time,
-            #     plug_out_time=session.plug_out_time,
-            #     in_time=session.in_time,
-            #     out_time=session.out_time,
-            # )
-            energy_kwh = get_energy_consumed(
-                plug_time=None,
-                plug_out_time=None,
-                in_time=session.in_time,
-                out_time=session.out_time,
-            )
-
             slots_out[slot_id] = {
                 "car_number":      session.car_number,
                 "car_model":       session.car_model,
@@ -2709,7 +2739,7 @@ def dashboard_station(
                 "gun_plugin_time": fmt_time(session.plug_time),
                 "gun_plugout_time": fmt_time(session.plug_out_time),
                 "status":          session.session_status or "active",
-                "energy_kwh":      energy_kwh,
+                "energy_kwh":      energy_by_id.get(session.session_id),
             }
 
         return {"station_id": station_id, "slots": slots_out}
