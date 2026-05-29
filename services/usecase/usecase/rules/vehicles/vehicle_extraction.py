@@ -22,6 +22,7 @@ Per-slot retry budget is preserved via the shared slot state
 - ``slot.extraction_attempts`` : 0..3
 - ``slot.extraction_backoff_until`` : frame_counter gate
 - ``slot.car_number``, ``slot.car_model`` : last good values
+- ``slot.is_ev``, ``slot.parking_quality`` : last LLM EV / parking verdict
 
 Differences vs the previous per-slot implementation:
 - Old code: 1 LLM call per occupied slot per attempt (N calls per frame).
@@ -819,6 +820,10 @@ def _apply_extraction_result(
     model_ok = car_model  not in _MODEL_NEGATIVE
 
     slot["parking_quality"] = llm_vehicle.get("parking_quality", "unknown")
+    # EV verdict is independent of plate/model success — persist it whenever the
+    # LLM saw a vehicle here so downstream (parking_compliance, orchestration)
+    # can read it off slot state instead of re-calling the LLM.
+    slot["is_ev"] = llm_vehicle.get("is_ev", "unknown")
 
     if plate_ok and model_ok:
         slot["extracted"]  = True
@@ -1110,18 +1115,20 @@ class VehicleExtractionRule(BaseUsecaseRule):
 
             slot_id_out = None if kind == "yolo_unauthorized" else meta["slot_id"]
             vehicle_details.append({
-                "track_id":   meta["track_id"],
-                "slot_id":    slot_id_out,
-                "car_number": slot.get("car_number"),
-                "car_model":  slot.get("car_model"),
-                "confidence": meta["confidence"],
+                "track_id":        meta["track_id"],
+                "slot_id":         slot_id_out,
+                "car_number":      slot.get("car_number"),
+                "car_model":       slot.get("car_model"),
+                "is_ev":           slot.get("is_ev"),
+                "parking_quality": slot.get("parking_quality"),
+                "confidence":      meta["confidence"],
             })
 
         logger.info(
             "[VEHICLE] result: triggered=True | targets=%d | llm_called=%s | "
             "rows=%s",
             len(targets), bool(targets_needing_llm and llm_resp.get("vehicles") is not None),
-            [(v["slot_id"], v["car_number"], v["car_model"]) for v in vehicle_details],
+            [(v["slot_id"], v["car_number"], v["car_model"], v["is_ev"]) for v in vehicle_details],
         )
 
         return {

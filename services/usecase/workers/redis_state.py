@@ -112,6 +112,8 @@ def _default_slot_state() -> dict:
         "extraction_backoff_until": 0,     # frame_counter value — do not retry before this
         "car_number": None,
         "car_model": None,
+        "is_ev": None,            # "ev" | "non_ev" | "unknown" — LLM EV verdict
+        "parking_quality": None,  # "proper" | "across_line" | ... — LLM parking verdict
 
         # Gun
         "gun_present_frames": 0,  # consecutive frames with gun in slot
