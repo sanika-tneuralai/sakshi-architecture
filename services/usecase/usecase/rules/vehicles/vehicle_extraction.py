@@ -16,13 +16,26 @@ Provider selection (env-driven). Set VEHICLE_LLM_PROVIDER to one of:
 All three call sites are kept — switching providers is an env-var + restart,
 no code change.
 
-Per-slot retry budget is preserved via the shared slot state
+Cross-check by consensus
+-------------------------
+We do NOT trust the first clean read. Each occupied car gets a budget of
+_MAX_READS LLM reads (calls we already make across frames); each read casts a
+vote, and the field is finalised by majority:
+- car_model : plurality vote.
+- car_number: per-character majority over the modal-length reads, so a single
+  misread character is outvoted.
+- is_ev     : plurality vote over concrete ev/non_ev verdicts.
+Early exit: once _CONFIRM reads agree exactly on BOTH plate and model we stop
+(clean case ≈ 2 calls). Otherwise we spend the full budget and vote.
+
+Per-car ballot + budget live in the shared slot state
 (``slot:{camera_id}:{slot_id}``):
-- ``slot.extracted``           : True once we have a usable result
-- ``slot.extraction_attempts`` : 0..3
-- ``slot.extraction_backoff_until`` : frame_counter gate
-- ``slot.car_number``, ``slot.car_model`` : last good values
-- ``slot.is_ev``, ``slot.parking_quality`` : last LLM EV / parking verdict
+- ``slot.extracted``           : True once consensus reached OR budget spent
+- ``slot.extraction_attempts`` : reads spent, 0.._MAX_READS
+- ``slot.extraction_backoff_until`` : frame_counter gate between reads
+- ``slot.plate_reads``/``model_reads``/``is_ev_reads`` : the ballots
+- ``slot.car_number``, ``slot.car_model`` : running consensus values
+- ``slot.is_ev``, ``slot.parking_quality`` : consensus EV / latest parking verdict
 
 Differences vs the previous per-slot implementation:
 - Old code: 1 LLM call per occupied slot per attempt (N calls per frame).
@@ -37,6 +50,7 @@ import base64
 import json
 import logging
 import os
+from collections import Counter
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import boto3
@@ -63,9 +77,20 @@ GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # — set VEHICLE_LLM_PROVIDER=openai (and OPENAI_API_KEY) and restart.
 VEHICLE_LLM_PROVIDER = os.getenv("VEHICLE_LLM_PROVIDER", "openai").strip().lower()
 
-# Per-slot retry backoff (frames) after a failed attempt.
-_BACKOFF = [10, 20, 9999]
-_MODEL_RETRY_DELAY = int(os.getenv("VEHICLE_MODEL_RETRY_DELAY_FRAMES", "45"))
+# ── Consensus / cross-check budget ──────────────────────────────────────────
+# Rather than trust the first clean read, we spend up to _MAX_READS LLM calls
+# per car (the calls were already budgeted) and finalise by voting across them:
+#   - car_model : plurality vote (tata punch, tata nexon, tata punch -> tata punch)
+#   - car_number: per-character majority over the modal-length plates, so a
+#     single misread character is outvoted (KL44R6290, KL44R629O, KL44R6290 ->
+#     KL44R6290)
+#   - is_ev     : plurality vote over concrete (ev/non_ev) verdicts
+# Early exit: once _CONFIRM reads agree EXACTLY on BOTH plate and model we stop
+# (the clean case costs 2 calls, not 3). Reads are spaced _CONSENSUS_BACKOFF
+# frames apart so each samples a distinct frame.
+_MAX_READS        = int(os.getenv("VEHICLE_CONSENSUS_READS", "3"))
+_CONFIRM          = int(os.getenv("VEHICLE_CONSENSUS_CONFIRM", "2"))
+_CONSENSUS_BACKOFF = int(os.getenv("VEHICLE_CONSENSUS_BACKOFF_FRAMES", "10"))
 _MIN_CONFIDENCE    = float(os.getenv("VEHICLE_MIN_CONFIDENCE", "0.35"))
 
 DETECTION_W = int(os.getenv("DETECTION_WIDTH",  "1920"))
@@ -793,6 +818,73 @@ def _assign_vehicles_to_targets(
 
 
 # ---------------------------------------------------------------------------
+# Consensus across the per-car read budget
+# ---------------------------------------------------------------------------
+
+def _plate_consensus(plates: List[str]) -> Optional[str]:
+    """Per-character majority vote over the modal-length plate reads.
+
+    Reading the same plate over several frames lets a single misread character
+    be outvoted: ["KL44R6290", "KL44R629O", "KL44R6290"] -> "KL44R6290".
+    Plates of differing length can't be aligned position-by-position, so we
+    first pick the most common length and vote only among reads of that length.
+    """
+    clean = [p for p in plates if p and p not in _PLATE_NEGATIVE]
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    modal_len = Counter(len(p) for p in clean).most_common(1)[0][0]
+    aligned = [p for p in clean if len(p) == modal_len]
+    return "".join(
+        Counter(p[i] for p in aligned).most_common(1)[0][0]
+        for i in range(modal_len)
+    )
+
+
+def _model_consensus(models: List[str]) -> Optional[str]:
+    """Plurality vote over model reads, case-insensitive, returning the original
+    casing of the winning value. ["Tata Punch", "Tata Nexon", "Tata Punch"] ->
+    "Tata Punch"."""
+    clean = [m for m in models if m and m not in _MODEL_NEGATIVE]
+    if not clean:
+        return None
+    counts: Counter = Counter()
+    representative: Dict[str, str] = {}
+    for m in clean:
+        key = m.strip().lower()
+        counts[key] += 1
+        representative.setdefault(key, m)
+    return representative[counts.most_common(1)[0][0]]
+
+
+def _is_ev_consensus(verdicts: List[str]) -> str:
+    """Plurality vote over concrete ev/non_ev verdicts; "unknown" if none."""
+    concrete = [v for v in verdicts if v in {"ev", "non_ev"}]
+    if not concrete:
+        return "unknown"
+    return Counter(concrete).most_common(1)[0][0]
+
+
+def _agree_count(reads: List[str], negatives: set) -> int:
+    """How many reads agree on the single most-common (exact, case-insensitive)
+    non-negative value. Used for the early-exit confidence check."""
+    clean = [r.strip().lower() for r in reads if r and r not in negatives]
+    if not clean:
+        return 0
+    return Counter(clean).most_common(1)[0][1]
+
+
+def _refresh_consensus(slot: Dict[str, Any]) -> None:
+    """Recompute the best-so-far car_number/car_model/is_ev from the vote lists
+    and write them onto the slot, so vehicle_details carries the running
+    consensus even before the budget is exhausted."""
+    slot["car_number"] = _plate_consensus(slot.get("plate_reads", []))
+    slot["car_model"]  = _model_consensus(slot.get("model_reads", []))
+    slot["is_ev"]      = _is_ev_consensus(slot.get("is_ev_reads", []))
+
+
+# ---------------------------------------------------------------------------
 # Slot-state update helper
 # ---------------------------------------------------------------------------
 
@@ -800,85 +892,64 @@ def _apply_extraction_result(
     slot: Dict[str, Any],
     llm_vehicle: Optional[Dict[str, Any]],
 ) -> None:
-    """Mutates slot in place. Mirrors the success/partial/fail rules from the
-    previous per-slot implementation, but keyed off a frame-level result."""
-    if llm_vehicle is None:
-        # The LLM didn't see this slot's vehicle (or no vehicles at all).
-        slot["extraction_attempts"] = int(slot.get("extraction_attempts", 0)) + 1
-        if slot["extraction_attempts"] >= 3:
-            slot["extracted"] = True
-            logger.warning("[VEHICLE] 3 attempts exhausted (no LLM match) — marking extracted, fields null")
-        else:
-            slot["extraction_backoff_until"] = (
-                int(slot.get("frame_counter", 0)) + _BACKOFF[slot["extraction_attempts"] - 1]
-            )
-        return
+    """Mutates slot in place. Each call records one vote in the per-car ballot
+    and decides whether to finalise (extracted=True) or schedule another read.
 
-    car_number = llm_vehicle["car_number"]
-    car_model  = llm_vehicle["car_model"]
-    plate_ok = car_number not in _PLATE_NEGATIVE
-    model_ok = car_model  not in _MODEL_NEGATIVE
-
-    slot["parking_quality"] = llm_vehicle.get("parking_quality", "unknown")
-    # EV verdict is independent of plate/model success — persist it whenever the
-    # LLM saw a vehicle here so downstream (parking_compliance, orchestration)
-    # can read it off slot state instead of re-calling the LLM.
-    slot["is_ev"] = llm_vehicle.get("is_ev", "unknown")
-
-    if plate_ok and model_ok:
-        slot["extracted"]  = True
-        slot["car_number"] = car_number
-        slot["car_model"]  = car_model
-        logger.info("[VEHICLE] Extraction success (full): plate=%s model=%s quality=%s",
-                    car_number, car_model, slot["parking_quality"])
-        return
-
-    if plate_ok and not model_ok:
-        slot["car_number"] = car_number
-        if not slot.get("model_retry_done", False):
-            slot["model_retry_done"] = True
-            slot["extraction_backoff_until"] = max(
-                int(slot.get("extraction_backoff_until", 0)),
-                int(slot.get("frame_counter", 0)) + _MODEL_RETRY_DELAY,
-            )
-            logger.info(
-                "[VEHICLE] Plate-only — scheduling one model retry at frame %d",
-                slot["extraction_backoff_until"],
-            )
-        else:
-            slot["extracted"] = True
-            logger.info("[VEHICLE] Plate-only — finalised (model retry already used)")
-        return
-
-    if model_ok and not plate_ok:
-        # Model only — keep the model, count the attempt against retries.
-        slot["car_model"] = car_model
-        slot["extraction_attempts"] = int(slot.get("extraction_attempts", 0)) + 1
-        if slot["extraction_attempts"] >= 3:
-            slot["extracted"] = True
-            logger.info("[VEHICLE] Model-only finalised (3 attempts) model=%s", car_model)
-        else:
-            slot["extraction_backoff_until"] = (
-                int(slot.get("frame_counter", 0)) + _BACKOFF[slot["extraction_attempts"] - 1]
-            )
-        return
-
-    # Neither plate nor model.
+    Finalise when EITHER:
+      - _CONFIRM reads agree exactly on BOTH plate and model (clean case, early
+        exit — typically 2 calls), OR
+      - the read budget (_MAX_READS) is spent (consensus over whatever we got).
+    A frame where the LLM didn't see this slot's vehicle still consumes one read
+    from the budget but contributes no vote.
+    """
     slot["extraction_attempts"] = int(slot.get("extraction_attempts", 0)) + 1
-    if slot["extraction_attempts"] >= 3:
+    attempts = slot["extraction_attempts"]
+
+    if llm_vehicle is not None:
+        # parking_quality is a per-frame judgement, not voted — keep latest.
+        slot["parking_quality"] = llm_vehicle.get("parking_quality", "unknown")
+
+        car_number = llm_vehicle["car_number"]
+        car_model  = llm_vehicle["car_model"]
+        is_ev      = llm_vehicle.get("is_ev", "unknown")
+        if car_number not in _PLATE_NEGATIVE:
+            slot.setdefault("plate_reads", []).append(car_number)
+        if car_model not in _MODEL_NEGATIVE:
+            slot.setdefault("model_reads", []).append(car_model)
+        if is_ev not in _IS_EV_NEGATIVE:
+            slot.setdefault("is_ev_reads", []).append(is_ev)
+        _refresh_consensus(slot)
+
+    plate_confirmed = _agree_count(slot.get("plate_reads", []), _PLATE_NEGATIVE) >= _CONFIRM
+    model_confirmed = _agree_count(slot.get("model_reads", []), _MODEL_NEGATIVE) >= _CONFIRM
+    budget_spent    = attempts >= _MAX_READS
+
+    if (plate_confirmed and model_confirmed) or budget_spent:
         slot["extracted"] = True
-        logger.warning("[VEHICLE] 3 attempts exhausted — marking extracted, fields null")
-    else:
-        slot["extraction_backoff_until"] = (
-            int(slot.get("frame_counter", 0)) + _BACKOFF[slot["extraction_attempts"] - 1]
+        _refresh_consensus(slot)
+        logger.info(
+            "[VEHICLE] Extraction finalised (%s) after %d read(s): "
+            "plate=%s model=%s is_ev=%s quality=%s",
+            "confirmed" if plate_confirmed and model_confirmed else "budget",
+            attempts, slot.get("car_number"), slot.get("car_model"),
+            slot.get("is_ev"), slot.get("parking_quality"),
         )
+        return
+
+    # Not yet confident and budget remains — sample another frame.
+    slot["extraction_backoff_until"] = int(slot.get("frame_counter", 0)) + _CONSENSUS_BACKOFF
+    logger.info(
+        "[VEHICLE] Read %d/%d — next read after frame %d (plate=%s model=%s)",
+        attempts, _MAX_READS, slot["extraction_backoff_until"],
+        slot.get("car_number"), slot.get("car_model"),
+    )
 
 
 def _wants_extraction(slot: Dict[str, Any], force_occupied: bool = False) -> bool:
     return (
         (bool(slot.get("occupied")) or force_occupied)
         and not slot.get("extracted", False)
-        and int(slot.get("extraction_attempts", 0)) < 3
+        and int(slot.get("extraction_attempts", 0)) < _MAX_READS
         and int(slot.get("frame_counter", 0)) >= int(slot.get("extraction_backoff_until", 0))
     )
 

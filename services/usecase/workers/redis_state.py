@@ -107,13 +107,16 @@ def _default_slot_state() -> dict:
         "car_absent_since": None, # ISO str, first frame the car went missing; None while present
 
         # Vehicle extraction
-        "extracted": False,                # True once Gemini succeeds OR attempts exhausted
-        "extraction_attempts": 0,          # 0..3
+        "extracted": False,                # True once consensus reached OR budget spent
+        "extraction_attempts": 0,          # reads spent so far, 0.._MAX_READS
         "extraction_backoff_until": 0,     # frame_counter value — do not retry before this
-        "car_number": None,
-        "car_model": None,
-        "is_ev": None,            # "ev" | "non_ev" | "unknown" — LLM EV verdict
-        "parking_quality": None,  # "proper" | "across_line" | ... — LLM parking verdict
+        "plate_reads": [],                 # ballot: every readable plate across reads
+        "model_reads": [],                 # ballot: every readable model across reads
+        "is_ev_reads": [],                 # ballot: every concrete ev/non_ev verdict
+        "car_number": None,                # running per-character consensus of plate_reads
+        "car_model": None,                 # running plurality consensus of model_reads
+        "is_ev": None,            # "ev" | "non_ev" | "unknown" — consensus EV verdict
+        "parking_quality": None,  # "proper" | "across_line" | ... — latest LLM parking verdict
 
         # Gun
         "gun_present_frames": 0,  # consecutive frames with gun in slot
