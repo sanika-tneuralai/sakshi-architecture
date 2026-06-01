@@ -25,6 +25,7 @@ vote, and the field is finalised by majority:
 - car_number: per-character majority over the modal-length reads, so a single
   misread character is outvoted.
 - is_ev     : plurality vote over concrete ev/non_ev verdicts.
+- vehicle_type: plurality vote over concrete two_wheeler/four_wheeler verdicts.
 Early exit: once _CONFIRM reads agree exactly on BOTH plate and model we stop
 (clean case ≈ 2 calls). Otherwise we spend the full budget and vote.
 
@@ -99,6 +100,7 @@ DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
 _PLATE_NEGATIVE = {"unreadable", "vehicle_number_not_visible", "", "none", "null"}
 _MODEL_NEGATIVE = {"unknown", "not_clear", "", "none", "null"}
 _IS_EV_NEGATIVE = {"unknown", "", "none", "null"}
+_VEHICLE_TYPE_NEGATIVE = {"unknown", "", "none", "null"}
 
 # In-process cache: one LLM call per snapshot, regardless of which rule asks.
 # Both this rule and parking_detection's CV-only gate consult the cache via
@@ -237,6 +239,7 @@ Your task:
    - Read the vehicle number plate ONLY if every character is clearly visible.
    - Judge the parking quality of that vehicle against its YELLOW slot outline.
    - Classify the vehicle as electric (EV) or non-electric (non_ev).
+   - Classify the vehicle body type as two_wheeler or four_wheeler.
 4. NEVER guess or hallucinate any vehicle number or model.
 
 ==================================================
@@ -257,15 +260,17 @@ Schema:
       "car_number": "KL44R6290",
       "number_plate_visible": true,
       "parking_quality": "proper",
-      "is_ev": "ev"
+      "is_ev": "ev",
+      "vehicle_type": "four_wheeler"
     },
     {
       "position": "right",
-      "car_model": "BYD Atto 3",
+      "car_model": "Honda Shine",
       "car_number": "unreadable",
       "number_plate_visible": false,
       "parking_quality": "across_line",
-      "is_ev": "ev"
+      "is_ev": "non_ev",
+      "vehicle_type": "two_wheeler"
     }
   ]
 }
@@ -395,6 +400,24 @@ STRICT RULES:
   "ev" and do NOT default to "non_ev".
 
 ==================================================
+STEP 8 — VEHICLE BODY TYPE
+==================================================
+Classify each vehicle's body type using ONLY visible evidence.
+
+Allowed values:
+- "two_wheeler"  : motorcycle, scooter, moped, or any two-wheeled vehicle —
+                   regardless of make/model name (e.g. "Honda Shine",
+                   "Royal Enfield", "Ola S1" are all two_wheeler).
+- "four_wheeler" : car, SUV, van, pickup, or any four-wheeled vehicle.
+- "unknown"      : cannot tell from the visible evidence (occlusion, glare,
+                   distance, ambiguous shape).
+
+STRICT RULES:
+- Judge from the visible body/wheels, NOT from the model name string alone.
+- NEVER infer body type from parking location.
+- When genuinely unsure, return "unknown" rather than guessing.
+
+==================================================
 ADDITIONAL GUARDRAILS
 ==================================================
 - NEVER hallucinate.
@@ -460,6 +483,13 @@ def _validate_is_ev(value: Any) -> str:
     return "unknown"
 
 
+def _validate_vehicle_type(value: Any) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"two_wheeler", "four_wheeler", "unknown"}:
+        return s
+    return "unknown"
+
+
 def _normalise_llm_vehicles(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce raw LLM JSON into a canonical shape, filtering bad entries."""
     if not isinstance(parsed, dict):
@@ -488,6 +518,7 @@ def _normalise_llm_vehicles(parsed: Dict[str, Any]) -> Dict[str, Any]:
             "number_plate_visible":  bool(v.get("number_plate_visible", False)),
             "parking_quality":       _validate_quality(v.get("parking_quality")),
             "is_ev":                 _validate_is_ev(v.get("is_ev")),
+            "vehicle_type":          _validate_vehicle_type(v.get("vehicle_type")),
         })
 
     if not vehicles:
@@ -554,10 +585,11 @@ def _query_claude_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> 
                                         "number_plate_visible": {"type": "boolean"},
                                         "parking_quality":      {"type": "string"},
                                         "is_ev":                {"type": "string"},
+                                        "vehicle_type":         {"type": "string"},
                                     },
                                     "required": ["position", "car_model", "car_number",
                                                  "number_plate_visible", "parking_quality",
-                                                 "is_ev"],
+                                                 "is_ev", "vehicle_type"],
                                     "additionalProperties": False,
                                 },
                             },
@@ -643,10 +675,11 @@ def _query_gemini_frame(image: np.ndarray, rois: Dict[str, List[List[int]]]) -> 
                             "number_plate_visible": {"type": "boolean"},
                             "parking_quality":      {"type": "string"},
                             "is_ev":                {"type": "string"},
+                            "vehicle_type":         {"type": "string"},
                         },
                         "required": ["position", "car_model", "car_number",
                                      "number_plate_visible", "parking_quality",
-                                     "is_ev"],
+                                     "is_ev", "vehicle_type"],
                     },
                 },
             },
@@ -702,6 +735,9 @@ def _merge_llm(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, 
             v["parking_quality"] = sec["parking_quality"]
         if v.get("is_ev", "unknown") in _IS_EV_NEGATIVE and sec.get("is_ev", "unknown") not in _IS_EV_NEGATIVE:
             v["is_ev"] = sec["is_ev"]
+        if (v.get("vehicle_type", "unknown") in _VEHICLE_TYPE_NEGATIVE
+                and sec.get("vehicle_type", "unknown") not in _VEHICLE_TYPE_NEGATIVE):
+            v["vehicle_type"] = sec["vehicle_type"]
     return primary
 
 
@@ -866,6 +902,15 @@ def _is_ev_consensus(verdicts: List[str]) -> str:
     return Counter(concrete).most_common(1)[0][0]
 
 
+def _vehicle_type_consensus(verdicts: List[str]) -> str:
+    """Plurality vote over concrete two_wheeler/four_wheeler verdicts; "unknown"
+    if none. Mirrors _is_ev_consensus."""
+    concrete = [v for v in verdicts if v in {"two_wheeler", "four_wheeler"}]
+    if not concrete:
+        return "unknown"
+    return Counter(concrete).most_common(1)[0][0]
+
+
 def _agree_count(reads: List[str], negatives: set) -> int:
     """How many reads agree on the single most-common (exact, case-insensitive)
     non-negative value. Used for the early-exit confidence check."""
@@ -879,9 +924,10 @@ def _refresh_consensus(slot: Dict[str, Any]) -> None:
     """Recompute the best-so-far car_number/car_model/is_ev from the vote lists
     and write them onto the slot, so vehicle_details carries the running
     consensus even before the budget is exhausted."""
-    slot["car_number"] = _plate_consensus(slot.get("plate_reads", []))
-    slot["car_model"]  = _model_consensus(slot.get("model_reads", []))
-    slot["is_ev"]      = _is_ev_consensus(slot.get("is_ev_reads", []))
+    slot["car_number"]   = _plate_consensus(slot.get("plate_reads", []))
+    slot["car_model"]    = _model_consensus(slot.get("model_reads", []))
+    slot["is_ev"]        = _is_ev_consensus(slot.get("is_ev_reads", []))
+    slot["vehicle_type"] = _vehicle_type_consensus(slot.get("vehicle_type_reads", []))
 
 
 # ---------------------------------------------------------------------------
@@ -909,15 +955,18 @@ def _apply_extraction_result(
         # parking_quality is a per-frame judgement, not voted — keep latest.
         slot["parking_quality"] = llm_vehicle.get("parking_quality", "unknown")
 
-        car_number = llm_vehicle["car_number"]
-        car_model  = llm_vehicle["car_model"]
-        is_ev      = llm_vehicle.get("is_ev", "unknown")
+        car_number   = llm_vehicle["car_number"]
+        car_model    = llm_vehicle["car_model"]
+        is_ev        = llm_vehicle.get("is_ev", "unknown")
+        vehicle_type = llm_vehicle.get("vehicle_type", "unknown")
         if car_number not in _PLATE_NEGATIVE:
             slot.setdefault("plate_reads", []).append(car_number)
         if car_model not in _MODEL_NEGATIVE:
             slot.setdefault("model_reads", []).append(car_model)
         if is_ev not in _IS_EV_NEGATIVE:
             slot.setdefault("is_ev_reads", []).append(is_ev)
+        if vehicle_type not in _VEHICLE_TYPE_NEGATIVE:
+            slot.setdefault("vehicle_type_reads", []).append(vehicle_type)
         _refresh_consensus(slot)
 
     plate_confirmed = _agree_count(slot.get("plate_reads", []), _PLATE_NEGATIVE) >= _CONFIRM
@@ -929,10 +978,10 @@ def _apply_extraction_result(
         _refresh_consensus(slot)
         logger.info(
             "[VEHICLE] Extraction finalised (%s) after %d read(s): "
-            "plate=%s model=%s is_ev=%s quality=%s",
+            "plate=%s model=%s is_ev=%s type=%s quality=%s",
             "confirmed" if plate_confirmed and model_confirmed else "budget",
             attempts, slot.get("car_number"), slot.get("car_model"),
-            slot.get("is_ev"), slot.get("parking_quality"),
+            slot.get("is_ev"), slot.get("vehicle_type"), slot.get("parking_quality"),
         )
         return
 
@@ -1191,6 +1240,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
                 "car_number":      slot.get("car_number"),
                 "car_model":       slot.get("car_model"),
                 "is_ev":           slot.get("is_ev"),
+                "vehicle_type":    slot.get("vehicle_type"),
                 "parking_quality": slot.get("parking_quality"),
                 "confidence":      meta["confidence"],
             })
@@ -1199,7 +1249,7 @@ class VehicleExtractionRule(BaseUsecaseRule):
             "[VEHICLE] result: triggered=True | targets=%d | llm_called=%s | "
             "rows=%s",
             len(targets), bool(targets_needing_llm and llm_resp.get("vehicles") is not None),
-            [(v["slot_id"], v["car_number"], v["car_model"], v["is_ev"]) for v in vehicle_details],
+            [(v["slot_id"], v["car_number"], v["car_model"], v["is_ev"], v["vehicle_type"]) for v in vehicle_details],
         )
 
         return {

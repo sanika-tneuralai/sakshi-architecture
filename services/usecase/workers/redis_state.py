@@ -113,9 +113,11 @@ def _default_slot_state() -> dict:
         "plate_reads": [],                 # ballot: every readable plate across reads
         "model_reads": [],                 # ballot: every readable model across reads
         "is_ev_reads": [],                 # ballot: every concrete ev/non_ev verdict
+        "vehicle_type_reads": [],          # ballot: every concrete two_wheeler/four_wheeler verdict
         "car_number": None,                # running per-character consensus of plate_reads
         "car_model": None,                 # running plurality consensus of model_reads
         "is_ev": None,            # "ev" | "non_ev" | "unknown" — consensus EV verdict
+        "vehicle_type": None,     # "two_wheeler" | "four_wheeler" | "unknown" — consensus type
         "parking_quality": None,  # "proper" | "across_line" | ... — latest LLM parking verdict
 
         # Gun

@@ -463,6 +463,11 @@ class GunDetectionRule(BaseUsecaseRule):
             slot = get_slot_state(camera_id, roi_name)
             if not slot["occupied"]:
                 continue
+            # Two-wheelers don't use the charging gun — never poll plug-in /
+            # plug-out for them. Orchestration also clears any gun fields that
+            # were written before vehicle_type consensus was reached.
+            if slot.get("vehicle_type") == "two_wheeler":
+                continue
             since_check = _seconds_since(slot.get("last_gun_check_at"), now_dt)
 
             if not slot["plugin_logged"]:
@@ -490,6 +495,8 @@ class GunDetectionRule(BaseUsecaseRule):
         for roi_name in rois:
             slot = get_slot_state(camera_id, roi_name)
             if not slot.get("occupied") or slot.get("plugin_logged"):
+                continue
+            if slot.get("vehicle_type") == "two_wheeler":
                 continue
             since_intime = _seconds_since(slot.get("in_time"), now_dt)
             if since_intime >= GUN_LLM_INFERRED_PLUGIN_SECONDS:
@@ -740,6 +747,10 @@ class GunDetectionRule(BaseUsecaseRule):
             # Only process gun logic when the slot is confirmed occupied.
             # If parking_detection hasn't confirmed a car here yet, skip.
             if not slot["occupied"]:
+                continue
+
+            # Two-wheelers don't use the charging gun — skip all plug logic.
+            if slot.get("vehicle_type") == "two_wheeler":
                 continue
 
             if gun_det:
