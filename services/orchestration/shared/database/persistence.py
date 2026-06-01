@@ -273,8 +273,8 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
     parking_by_track: dict = {}   # {track_id: {"in_time": ts, "out_time": ts}}  — unauthorized only
     gun_by_slot: dict = {}        # {slot_id: {"plug_time": ts, "plug_out_time": ts, "gun_number": str, "track_id": str}}
     gun_by_track: dict = {}       # {track_id: {"gun_number": str}}  — unauthorized only, no plug times
-    vehicle_by_slot: dict = {}    # {slot_id: {"car_number": str, "car_model": str}}
-    vehicle_by_track: dict = {}   # {track_id: {"car_number": str, "car_model": str}}
+    vehicle_by_slot: dict = {}    # {slot_id: {"car_number": str, "car_model": str, "vehicle_type": str}}
+    vehicle_by_track: dict = {}   # {track_id: {"car_number": str, "car_model": str, "vehicle_type": str}}
 
     for result in usecase_results:
         usecase_id = result.get("usecase_id") or result.get("usecase_name", "")
@@ -352,8 +352,9 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 sid = d.get("slot_id")
                 tid = d.get("track_id")
                 entry = {
-                    "car_number": d.get("car_number"),
-                    "car_model":  d.get("car_model"),
+                    "car_number":   d.get("car_number"),
+                    "car_model":    d.get("car_model"),
+                    "vehicle_type": d.get("vehicle_type"),
                 }
                 if sid:
                     vehicle_by_slot[sid] = entry
@@ -383,14 +384,28 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         # because slot-anchored extraction always provides slot_id)
         car_number = None
         car_model  = None
+        vehicle_type = None
         vd = vehicle_by_slot.get(slot_id)
         if vd:
             cn = vd.get("car_number")
             cm = vd.get("car_model")
+            vt = vd.get("vehicle_type")
             if cn not in (None, "unreadable", "unknown"):
                 car_number = cn
             if cm not in (None, "unknown"):
                 car_model = cm
+            if vt not in (None, "unknown"):
+                vehicle_type = vt
+
+        # Two-wheelers don't use the charging gun. Drop any gun/plug data the
+        # gun_detection rule may have emitted before vehicle_type consensus was
+        # reached, so the session row never carries gun_number / plug_time /
+        # plug_out_time for a motorcycle. Already-persisted values are cleared
+        # below once the session row is loaded.
+        is_two_wheeler = vehicle_type == "two_wheeler"
+        if is_two_wheeler:
+            plug_time = plug_out_time = None
+            gun_number = None
 
         _persistence_logger.info(
             f"[DB][{camera_id}] upsert slot={slot_id} track={track_id} "
@@ -488,12 +503,33 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if plug_out_time and session.plug_out_time is None: session.plug_out_time = plug_out_time
             if out_time    and session.out_time    is None: session.out_time    = out_time
 
+            # Two-wheelers: scrub any gun/plug data that was persisted before
+            # vehicle_type consensus identified the vehicle as a motorcycle.
+            # gun_detection stops polling once it knows, but a plug-in (or
+            # inferred plug-in) may already have fired and been written. A
+            # motorcycle never uses the charging gun, so these fields must be
+            # NULL — which also keeps the status out of "charging" below.
+            if is_two_wheeler and (
+                session.gun_number is not None
+                or session.plug_time is not None
+                or session.plug_out_time is not None
+            ):
+                _persistence_logger.info(
+                    f"[DB] Clearing gun/plug fields for two-wheeler session_id={session.session_id} "
+                    f"slot={slot_id} (gun={session.gun_number} plug_time={session.plug_time}) camera={camera_id}"
+                )
+                session.gun_number    = None
+                session.plug_time     = None
+                session.plug_out_time = None
+
             # If the car has left (out_time set) and was charging (plug_time set)
             # but no gun_plugout event fired, infer plug_out_time = out_time. The
             # gun must have been removed at or before the car left, so out_time is
             # a safe upper-bound proxy when detection missed the plug-out frame.
+            # Skipped for two-wheelers (no gun semantics).
             if (
-                session.out_time is not None
+                not is_two_wheeler
+                and session.out_time is not None
                 and session.plug_time is not None
                 and session.plug_out_time is None
             ):
@@ -563,14 +599,24 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
 
         car_number = None
         car_model  = None
+        vehicle_type = None
         vd = vehicle_by_track.get(track_id)
         if vd:
             cn = vd.get("car_number")
             cm = vd.get("car_model")
+            vt = vd.get("vehicle_type")
             if cn not in (None, "unreadable", "unknown"):
                 car_number = cn
             if cm not in (None, "unknown"):
                 car_model = cm
+            if vt not in (None, "unknown"):
+                vehicle_type = vt
+
+        # Two-wheelers don't use the charging gun — drop opportunistic
+        # gun_number attribution for motorcycles.
+        is_two_wheeler = vehicle_type == "two_wheeler"
+        if is_two_wheeler:
+            gun_number = None
 
         _persistence_logger.info(
             f"[DB][{camera_id}] upsert unauthorized track={track_id} "
@@ -624,6 +670,15 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if gun_number and session.gun_number is None: session.gun_number = gun_number
             if in_time    and session.in_time    is None: session.in_time    = in_time
             if out_time   and session.out_time   is None: session.out_time   = out_time
+
+            # Two-wheeler: scrub any gun_number attributed before vehicle_type
+            # consensus identified the vehicle as a motorcycle.
+            if is_two_wheeler and session.gun_number is not None:
+                _persistence_logger.info(
+                    f"[DB] Clearing gun_number for two-wheeler unauthorized session_id={session.session_id} "
+                    f"track={track_id} camera={camera_id}"
+                )
+                session.gun_number = None
 
             if session.in_time is not None and session.out_time is not None:
                 if _is_below_min_duration(session.in_time, session.out_time):
