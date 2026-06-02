@@ -8,8 +8,11 @@ Backends (env GUN_DETECTION_BACKEND):
            in-house gun YOLO model is unreliable. The rule polls per slot:
               Plug-in:  1 min cadence, 2-of-N confirmation, max 20 attempts
               Plug-out: 5 min cadence, one-shot, runs until parking_outtime
-  yolo   — original YOLO-based gun detector with inferred plug-in fallback.
-           Kept for the future where a retrained gun model becomes reliable.
+  yolo   — YOLO-based gun detector. Plug-in/plug-out are driven ONLY by real
+           gun detections (no time-based inference). A gun is matched to the
+           car whose bbox it overlaps, and that car's slot is credited; a car
+           parked in a gun blind-spot keeps plug_time = NULL (truthful
+           "incomplete" row).
 
 Design notes that apply to both backends:
 - NO own CentroidTracker. Tracked cars are read from
@@ -57,7 +60,12 @@ logger = logging.getLogger(__name__)
 
 GUN_CLASS          = "gun"
 CAR_CLASS          = "car"
-GUN_PLUGIN_FRAMES  = 3    # consecutive frames gun must be present to confirm plugin
+GUN_PLUGIN_FRAMES  = int(os.getenv("GUN_PLUGIN_FRAMES", "3"))  # consecutive gun frames to confirm plug-in
+# Min fraction of a gun's bbox area that must fall inside a car's bbox for the
+# gun to count as "plugged into" that car. A slot's charging gun sits OUTSIDE
+# the slot's parking polygon, so we match gun→car (then car→slot) instead of
+# gun→parking-ROI. Env-overridable for per-camera tuning.
+GUN_CAR_OVERLAP_MIN = float(os.getenv("GUN_CAR_OVERLAP_MIN", "0.5"))
 
 # ── Backend selection ───────────────────────────────────────────────────────
 # Default to LLM until we have a reliable gun YOLO model. Flip to "yolo" by
@@ -101,21 +109,28 @@ GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DETECTION_W = int(os.getenv("DETECTION_WIDTH",  "1920"))
 DETECTION_H = int(os.getenv("DETECTION_HEIGHT", "1080"))
 
-# ── YOLO backend tunables (legacy, unchanged) ───────────────────────────────
-# Inferred plug-in: after this many seconds since parking_intime with no real
-# gun detection, fire a synthetic gun_plugin so downstream energy lookups have
-# a plug_time anchor.
-INFERRED_PLUGIN_SECONDS = 120
-# After firing an inferred plug, expect a real gun frame within this window.
-# If never seen, roll back so the row doesn't end up with a phantom plug_time.
-INFERRED_VERIFY_TIMEOUT_SECONDS = 300
+# ── YOLO backend tunables ────────────────────────────────────────────────────
+# (Time-based inferred plug-in has been removed — plug-ins are logged only on
+# real gun detection. Only the plug-out debounce windows remain.)
 
 # Plug-out debounce. PLUGGED → MAYBE_OUT after sustained absence; only commit
-# gun_plugout once the gun stays absent past both the grace and confirmation
-# windows without returning.
-GUN_MAYBE_OUT_SECONDS    = 60
-GUN_RETURN_GRACE_SECONDS = 120
-GUN_CONFIRM_OUT_SECONDS  = 120
+# gun_plugout once the gun stays absent past (GRACE + CONFIRM) more seconds
+# without returning. Total latency from last gun sighting to gun_plugout =
+# MAYBE_OUT + GRACE + CONFIRM. All env-overridable for per-camera tuning.
+# Defaults sum to 120s (2 min): a car that unplugs-and-leaves is already
+# covered by parking_outtime's plug_out_time inference, so this window mainly
+# governs the lingering case (unplugged but still parked).
+GUN_MAYBE_OUT_SECONDS    = int(os.getenv("GUN_MAYBE_OUT_SECONDS",    "30"))
+GUN_RETURN_GRACE_SECONDS = int(os.getenv("GUN_RETURN_GRACE_SECONDS", "45"))
+GUN_CONFIRM_OUT_SECONDS  = int(os.getenv("GUN_CONFIRM_OUT_SECONDS",  "45"))
+# Provisional plug-out finalize window. After the absence debounce above
+# completes, the plug-out is held PENDING (not emitted) for this many more
+# seconds. If the gun reappears on the same car within it, the plug-out is
+# cancelled silently (the gun was occluded by a person, not unplugged). Set to
+# 0 to disable provisional behaviour and emit on debounce as before.
+# Total latency from last gun sighting to a COMMITTED gun_plugout =
+# MAYBE_OUT + GRACE + CONFIRM + FINALIZE.
+GUN_PLUGOUT_FINALIZE_SECONDS = int(os.getenv("GUN_PLUGOUT_FINALIZE_SECONDS", "60"))
 
 
 def _now() -> str:
@@ -169,6 +184,31 @@ def _gun_name_for_roi(roi_name: str) -> str:
     parts = roi_name.rsplit("_", 1)
     suffix = parts[-1] if len(parts) == 2 and parts[-1].isdigit() else roi_name
     return f"Gun {suffix}"
+
+
+def _gun_in_car_overlap(gun_bbox: dict, car_bbox: dict) -> float:
+    """Fraction of the gun bbox area that lies inside the car bbox.
+
+    Both bboxes are dicts with x1/y1/x2/y2 in the same detection-frame pixel
+    space the ROI polygons use. Returns 0.0 on empty bboxes or no intersection.
+
+    A gun is "plugged into" the car whose bbox it most overlaps (see
+    GUN_CAR_OVERLAP_MIN). This replaces gun-in-parking-ROI matching, which
+    mis-assigns guns because a slot's charging gun physically sits outside the
+    slot's parking polygon (e.g. near the lane divider between two slots).
+    """
+    if not gun_bbox or not car_bbox:
+        return 0.0
+    try:
+        ix1 = max(gun_bbox["x1"], car_bbox["x1"])
+        iy1 = max(gun_bbox["y1"], car_bbox["y1"])
+        ix2 = min(gun_bbox["x2"], car_bbox["x2"])
+        iy2 = min(gun_bbox["y2"], car_bbox["y2"])
+    except (KeyError, TypeError):
+        return 0.0
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    gun_area = max(0.0, (gun_bbox["x2"] - gun_bbox["x1"]) * (gun_bbox["y2"] - gun_bbox["y1"]))
+    return inter / gun_area if gun_area > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -712,25 +752,44 @@ class GunDetectionRule(BaseUsecaseRule):
 
         # ── Map cars → ROIs ───────────────────────────────────────────────
         # One car per ROI (first car wins if multiple overlap the same ROI).
-        roi_to_track: Dict[str, str] = {}
+        # Keep the car object (not just its track_id) so guns can be matched
+        # against the car's bbox below.
+        roi_to_car: Dict[str, dict] = {}
         if rois:
             for car in tracked_cars:
                 for roi_name in which_rois(car["bbox"], rois):
-                    if roi_name not in roi_to_track:
-                        roi_to_track[roi_name] = car.get("track_id", "unknown")
+                    if roi_name not in roi_to_car:
+                        roi_to_car[roi_name] = car
+        roi_to_track: Dict[str, str] = {
+            roi_name: car.get("track_id", "unknown")
+            for roi_name, car in roi_to_car.items()
+        }
 
-        # ── Map guns → ROIs ───────────────────────────────────────────────
-        # Keep the highest-confidence gun per ROI.
+        # ── Map guns → the CAR they're plugged into, then to that car's slot ─
+        # A charging gun sits outside its slot's parking polygon, so matching
+        # gun-in-ROI mis-assigns it (slot 1's gun can land in slot 2's polygon).
+        # Instead attach each gun to the car whose bbox it most overlaps
+        # (>= GUN_CAR_OVERLAP_MIN) and resolve the slot from that car. A gun
+        # belongs to at most one car; keep the highest-confidence gun per ROI
+        # if several map to the same car.
         gun_dets = [d for d in all_dets if d.get("class_name") == GUN_CLASS]
         roi_to_gun: Dict[str, dict] = {}
         for gun in gun_dets:
-            for roi_name in (which_rois(gun.get("bbox", {}), rois) if rois else []):
-                if roi_name not in roi_to_gun or gun.get("confidence", 0) > roi_to_gun[roi_name].get("confidence", 0):
-                    roi_to_gun[roi_name] = gun
+            best_roi, best_frac = None, 0.0
+            for roi_name, car in roi_to_car.items():
+                frac = _gun_in_car_overlap(gun.get("bbox", {}), car.get("bbox", {}))
+                if frac > best_frac:
+                    best_roi, best_frac = roi_name, frac
+            if best_roi is not None and best_frac >= GUN_CAR_OVERLAP_MIN:
+                if (
+                    best_roi not in roi_to_gun
+                    or gun.get("confidence", 0) > roi_to_gun[best_roi].get("confidence", 0)
+                ):
+                    roi_to_gun[best_roi] = gun
 
         logger.debug(
-            "[GUN] roi_to_track=%s | roi_to_gun=%s",
-            roi_to_track, list(roi_to_gun.keys()),
+            "[GUN] roi_to_car=%s | roi_to_gun=%s",
+            list(roi_to_car.keys()), list(roi_to_gun.keys()),
         )
 
         events: List[dict] = []
@@ -759,11 +818,9 @@ class GunDetectionRule(BaseUsecaseRule):
                 slot["gun_absent_frames"]   = 0  # legacy counter, kept for back-compat
                 slot["gun_name"]            = slot["gun_name"] or gun_name
 
-                # Real plug-in path: gun confirmed for GUN_PLUGIN_FRAMES.
-                # If the slot was on an inferred plug, this real detection
-                # confirms the inference — we keep the inferred timestamp
-                # (it's earlier and more representative of when the user
-                # actually plugged in) but flip the verification flag.
+                # Plug-in: gun confirmed present for GUN_PLUGIN_FRAMES
+                # consecutive evaluations. This is the ONLY path that logs a
+                # plug-in — there is no time-based inference fallback.
                 if not slot["plugin_logged"] and slot["gun_present_frames"] >= GUN_PLUGIN_FRAMES:
                     plug_time              = event_ts
                     slot["plugin_logged"]  = True
@@ -788,10 +845,9 @@ class GunDetectionRule(BaseUsecaseRule):
                     publish_sync("gun_events", evt, task_id=task_id)
                     logger.info("[GUN] Plugin: camera=%s roi=%s gun=%s", camera_id, roi_name, gun_name)
 
-                # Already plugged in (real or inferred). A real gun frame
-                # confirms the plug is genuine and clears any in-progress
-                # plug-out debounce — the gun is back, so MAYBE_OUT was a
-                # false alarm (occlusion).
+                # Already plugged in. A continuing gun frame clears any
+                # in-progress plug-out debounce — the gun is back, so a
+                # pending MAYBE_OUT was a false alarm (occlusion).
                 elif slot["plugin_logged"] and not slot["plugout_logged"]:
                     slot["gun_seen_after_plugin"] = True
 
@@ -802,136 +858,67 @@ class GunDetectionRule(BaseUsecaseRule):
                         )
                         slot["gun_maybe_out_since"] = None
 
+                    # (B) Cancel a PROVISIONAL plug-out. The debounce had
+                    # already elapsed and we were holding plug-out PENDING, but
+                    # the gun is back on this car and the slot was never reset
+                    # (so no new car arrived). That means a person had been
+                    # occluding the gun, not that it was unplugged. Cancel
+                    # silently — nothing was published, so there is no wrong
+                    # plug_out_time to undo downstream.
+                    if slot.get("plugout_pending_since"):
+                        logger.info(
+                            "[GUN] Provisional plug-out cancelled (gun returned "
+                            "on same car — occlusion, no new car): camera=%s roi=%s",
+                            camera_id, roi_name,
+                        )
+                        slot["plugout_pending_since"] = None
+                        slot["plugout_pending_time"]  = None
+
             else:
                 # ── Gun NOT visible this frame ──────────────────────────
                 slot["gun_present_frames"] = 0
 
-                # Inferred plug-in path: no real gun seen, but car has been
-                # parked long enough that we synthesize a plug.
-                if (
-                    not slot["plugin_logged"]
-                    and slot.get("in_time")
-                ):
-                    parked_secs = _seconds_since(slot["in_time"], now_dt)
-                    if parked_secs >= INFERRED_PLUGIN_SECONDS:
-                        plug_time = event_ts
-                        slot["plugin_logged"]  = True
-                        slot["plug_time"]      = plug_time
-                        slot["gun_name"]       = slot["gun_name"] or gun_name
-                        slot["plug_time_inferred"]    = True
-                        slot["gun_seen_after_plugin"] = False
-
-                        evt = build_event(
-                            event_type="gun_plugin",
-                            camera_id=camera_id,
-                            timestamp=plug_time,
-                            track_id=track_id,
-                            metadata={
-                                "gun_name": slot["gun_name"] or gun_name,
-                                "roi":      roi_name,
-                                "slot_id":  roi_name,
-                                "inferred": True,
-                                "reason":   "no gun detection within INFERRED_PLUGIN_SECONDS of parking_intime",
-                            },
-                        )
-                        events.append(evt)
-                        publish_sync("gun_events", evt, task_id=task_id)
-                        logger.info(
-                            "[GUN] Plugin (inferred, %.0fs after intime): camera=%s roi=%s",
-                            parked_secs, camera_id, roi_name,
-                        )
-
-                # Plug-out debounce — only runs after a confirmed plug.
-                # plugin_logged is NEVER cleared by a missed frame here; it
-                # only flips off via the rollback below or via reset_slot_state.
-                elif slot["plugin_logged"] and not slot["plugout_logged"]:
-                    plug_dt = _parse_iso(slot.get("plug_time"))
-                    secs_since_plug = (
-                        (now_dt - plug_dt).total_seconds() if plug_dt else 0.0
-                    )
-
-                    # Inference rollback: if the plug was inferred and we have
-                    # never actually seen the gun since, give up after the
-                    # verification window. The car parked but never plugged
-                    # in (or the gun is permanently in a blind spot — either
-                    # way we can't confirm, so don't synthesize a plugout
-                    # later either).
-                    if (
-                        slot.get("plug_time_inferred")
-                        and not slot.get("gun_seen_after_plugin")
-                        and secs_since_plug >= INFERRED_VERIFY_TIMEOUT_SECONDS
-                    ):
-                        logger.warning(
-                            "[GUN] Inferred plug rolled back (gun never observed in %.0fs): "
-                            "camera=%s roi=%s",
-                            secs_since_plug, camera_id, roi_name,
-                        )
-                        slot["plugin_logged"]         = False
-                        slot["plug_time"]             = None
-                        slot["plug_time_inferred"]    = False
-                        slot["gun_seen_after_plugin"] = False
-                        slot["gun_maybe_out_since"]   = None
-                        # No event fired; the orchestration row never got a
-                        # plug_time for this slot, so there is nothing to undo
-                        # downstream. (We did fire gun_plugin earlier — but
-                        # the upsert is first-write-wins, so a future real
-                        # plug for this same slot+session won't overwrite.
-                        # Acceptable: this slot's row simply keeps the
-                        # inferred plug_time, which is conservative.)
-                        set_slot_state(camera_id, roi_name, slot)
-                        continue
-
-                    # Plug-out state machine.
+                # Inference is disabled: a plug-in is logged ONLY when the
+                # model actually saw the gun (the gun_det branch above). A car
+                # parked in a gun blind-spot keeps plug_time = NULL — a
+                # truthful "incomplete" session row. So with no gun visible,
+                # the only work is the plug-out debounce for an already-
+                # confirmed plug. plugin_logged is never cleared by a missed
+                # frame; it flips off only on confirmed plug-out or reset.
+                if slot["plugin_logged"] and not slot["plugout_logged"]:
+                    # Three-stage plug-out so a person occluding the gun is
+                    # never mistaken for an unplug:
                     #
-                    # PLUGGED  → after GUN_MAYBE_OUT_SECONDS of absence,
-                    #            enter MAYBE_OUT (no event yet).
-                    # MAYBE_OUT → if gun reappears, exit entirely (handled
-                    #             in the gun_det branch above; that's the
-                    #             "miss → return" half of the user's pattern).
-                    # MAYBE_OUT → after GUN_RETURN_GRACE_SECONDS +
-                    #             GUN_CONFIRM_OUT_SECONDS of continued absence
-                    #             without a return, fire gun_plugout (the
-                    #             "miss → return → miss again" pattern only
-                    #             reaches this point if the second miss is
-                    #             sustained, since any return resets state).
-                    maybe_since = slot.get("gun_maybe_out_since")
-                    if not maybe_since:
-                        # PLUGGED → MAYBE_OUT after sustained absence.
-                        # last_gun_seen_at is the anchor; on the first plug
-                        # cycle there might not be one yet, so fall back to
-                        # plug_time which marks the start of "should be visible".
-                        last_seen = (
-                            slot.get("last_gun_seen_at")
-                            or slot.get("plug_time")
-                        )
-                        absent_secs = _seconds_since(last_seen, now_dt)
-                        if absent_secs >= GUN_MAYBE_OUT_SECONDS:
-                            slot["gun_maybe_out_since"] = now_dt.isoformat()
-                            logger.info(
-                                "[GUN] Entered MAYBE_OUT (absent %.1fs): camera=%s roi=%s",
-                                absent_secs, camera_id, roi_name,
-                            )
-                    else:
-                        # Already in MAYBE_OUT and gun is still absent (we're
-                        # in the not-gun_det branch). Time accumulates; only
-                        # fire once both windows have elapsed.
-                        in_maybe_secs = _seconds_since(maybe_since, now_dt)
-                        ready_to_fire = in_maybe_secs >= (
-                            GUN_RETURN_GRACE_SECONDS + GUN_CONFIRM_OUT_SECONDS
-                        )
-
-                        if ready_to_fire:
-                            plugout_time = event_ts
+                    #   PLUGGED   → MAYBE_OUT after GUN_MAYBE_OUT_SECONDS absence
+                    #   MAYBE_OUT → PENDING after GRACE+CONFIRM more seconds of
+                    #               continued absence (debounce satisfied). The
+                    #               plug-out is NOT emitted yet.
+                    #   PENDING   → COMMIT (emit gun_plugout) after
+                    #               GUN_PLUGOUT_FINALIZE_SECONDS more absence.
+                    #
+                    # A gun returning at MAYBE_OUT or PENDING cancels it (in the
+                    # gun_det branch) — the occlusion-recovery path. Nothing is
+                    # published until COMMIT, so an occlusion never leaves a
+                    # wrong (first-write-wins) plug_out_time downstream.
+                    pending_since = slot.get("plugout_pending_since")
+                    if pending_since:
+                        # (B) PENDING and gun still absent — commit once the
+                        # finalize window has elapsed with no gun return.
+                        pending_secs = _seconds_since(pending_since, now_dt)
+                        if pending_secs >= GUN_PLUGOUT_FINALIZE_SECONDS:
+                            plugout_time = slot.get("plugout_pending_time") or event_ts
                             slot["plug_out_time"]  = plugout_time
                             slot["plugout_logged"] = True
-                            # Re-arm for a possible second plug cycle in this slot
-                            slot["plugin_logged"]         = False
-                            slot["plugout_logged"]        = False
+                            # (A) No re-arm within the same occupancy: keep
+                            # plugin_logged True so a gun returning on the SAME
+                            # car can't start a new plug cycle. A genuinely new
+                            # car resets the slot (parking_outtime) first, which
+                            # clears all of this state.
                             slot["gun_maybe_out_since"]   = None
-                            slot["gun_absent_frames"]     = 0
+                            slot["plugout_pending_since"] = None
+                            slot["plugout_pending_time"]  = None
                             slot["gun_present_frames"]    = 0
-                            slot["plug_time_inferred"]    = False
-                            slot["gun_seen_after_plugin"] = False
+                            slot["gun_absent_frames"]     = 0
 
                             evt = build_event(
                                 event_type="gun_plugout",
@@ -949,9 +936,48 @@ class GunDetectionRule(BaseUsecaseRule):
                             events.append(evt)
                             publish_sync("gun_events", evt, task_id=task_id)
                             logger.info(
-                                "[GUN] Plugout (debounced %.0fs): camera=%s roi=%s",
-                                in_maybe_secs, camera_id, roi_name,
+                                "[GUN] Plugout COMMITTED (pending %.0fs, no gun "
+                                "return): camera=%s roi=%s",
+                                pending_secs, camera_id, roi_name,
                             )
+                    else:
+                        maybe_since = slot.get("gun_maybe_out_since")
+                        if not maybe_since:
+                            # PLUGGED → MAYBE_OUT after sustained absence.
+                            # last_gun_seen_at is the anchor; on the first plug
+                            # cycle there might not be one yet, so fall back to
+                            # plug_time which marks the start of "should be visible".
+                            last_seen = (
+                                slot.get("last_gun_seen_at")
+                                or slot.get("plug_time")
+                            )
+                            absent_secs = _seconds_since(last_seen, now_dt)
+                            if absent_secs >= GUN_MAYBE_OUT_SECONDS:
+                                slot["gun_maybe_out_since"] = now_dt.isoformat()
+                                logger.info(
+                                    "[GUN] Entered MAYBE_OUT (absent %.1fs): camera=%s roi=%s",
+                                    absent_secs, camera_id, roi_name,
+                                )
+                        else:
+                            # In MAYBE_OUT and gun still absent. Once the
+                            # debounce windows elapse, move to PENDING (provisional
+                            # plug-out) rather than emitting — emission waits for
+                            # the finalize window so a returning gun can still
+                            # cancel it (the occlusion case).
+                            in_maybe_secs = _seconds_since(maybe_since, now_dt)
+                            debounce_done = in_maybe_secs >= (
+                                GUN_RETURN_GRACE_SECONDS + GUN_CONFIRM_OUT_SECONDS
+                            )
+                            if debounce_done:
+                                slot["plugout_pending_since"] = now_dt.isoformat()
+                                slot["plugout_pending_time"]  = event_ts
+                                logger.info(
+                                    "[GUN] Plug-out PENDING (debounced %.0fs; "
+                                    "holding %ds for gun-return before commit): "
+                                    "camera=%s roi=%s",
+                                    in_maybe_secs, GUN_PLUGOUT_FINALIZE_SECONDS,
+                                    camera_id, roi_name,
+                                )
 
             # Always update last_gun_seen_at while gun is visible — this is
             # the anchor the plug-out debounce uses to measure absence.
@@ -976,8 +1002,15 @@ class GunDetectionRule(BaseUsecaseRule):
                 if not which_rois(c.get("bbox", {}), rois)
                 and c.get("track_id")
             ]
+            # roi_to_gun above maps a gun to its car's slot; for the
+            # unauthorized check we need the raw gun-in-ROI geometry instead
+            # (a gun sitting in an ROI that currently has no occupant).
+            gun_in_roi: Dict[str, dict] = {}
+            for gun in gun_dets:
+                for roi_name in which_rois(gun.get("bbox", {}), rois):
+                    gun_in_roi.setdefault(roi_name, gun)
             unoccupied_gun_rois = [
-                roi_name for roi_name, gun in roi_to_gun.items()
+                roi_name for roi_name in gun_in_roi
                 if not get_slot_state(camera_id, roi_name)["occupied"]
             ]
             if len(unauthorized_cars) == 1 and unoccupied_gun_rois:

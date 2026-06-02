@@ -144,6 +144,17 @@ def _default_slot_state() -> dict:
         # grace and confirmation windows without returning.
         "gun_maybe_out_since": None,        # ISO ts when MAYBE_OUT entered
 
+        # Provisional plug-out (YOLO backend). When the absence debounce
+        # completes we do NOT emit gun_plugout immediately — we mark it
+        # PENDING. If the gun reappears on the same car (slot never reset, so
+        # no new car arrived) before the finalize window elapses, the plug-out
+        # is cancelled silently: it was a person occluding the gun, not a real
+        # unplug. Only after the finalize window without a return do we commit
+        # and emit gun_plugout. Nothing is published while pending, so an
+        # occlusion never produces a (first-write-wins) wrong plug_out_time.
+        "plugout_pending_since": None,      # ISO ts when plug-out became provisional
+        "plugout_pending_time": None,       # candidate plug_out_time to emit on commit
+
         # Same idea for the car: don't fire parking_outtime on a single
         # missing-frame stretch. Wait for sustained absence past both
         # the grace and confirmation windows so a tracker hiccup doesn't
