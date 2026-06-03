@@ -345,6 +345,11 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             "slot_id": roi_name,
                             "intime":  slot.get("in_time"),
                             "outtime": swap_ts,
+                            # Last frame the gun was on this (old) car ≈ real
+                            # unplug moment. Lets persistence record the true
+                            # plug_out_time instead of inferring = out_time when
+                            # the car left before a gun_plugout could commit.
+                            "last_gun_seen_at": slot.get("last_gun_seen_at"),
                             "reason":  swap_reason,
                         },
                     )
@@ -451,6 +456,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                                     "slot_id": roi_name,
                                     "intime":  slot["in_time"],
                                     "outtime": swap_ts,
+                                    "last_gun_seen_at": slot.get("last_gun_seen_at"),
                                     "reason":  "car swap — new car confirmed in slot",
                                 },
                             )
@@ -548,6 +554,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                                 "slot_id": roi_name,
                                 "intime":  slot["in_time"],
                                 "outtime": outtime,
+                                "last_gun_seen_at": slot.get("last_gun_seen_at"),
                             },
                         )
                         events.append(evt)
