@@ -906,7 +906,18 @@ class GunDetectionRule(BaseUsecaseRule):
                         # finalize window has elapsed with no gun return.
                         pending_secs = _seconds_since(pending_since, now_dt)
                         if pending_secs >= GUN_PLUGOUT_FINALIZE_SECONDS:
-                            plugout_time = slot.get("plugout_pending_time") or event_ts
+                            # Anchor plug_out_time to the LAST time the gun was
+                            # actually seen on the car (≈ the real unplug
+                            # moment), NOT the commit instant — otherwise the
+                            # recorded time lags the true unplug by the whole
+                            # debounce + finalize window (~180s). Fallbacks keep
+                            # it well-defined if last_gun_seen_at is missing.
+                            plugout_time = (
+                                slot.get("last_gun_seen_at")
+                                or slot.get("plugout_pending_time")
+                                or slot.get("plug_time")
+                                or event_ts
+                            )
                             slot["plug_out_time"]  = plugout_time
                             slot["plugout_logged"] = True
                             # (A) No re-arm within the same occupancy: keep
