@@ -308,13 +308,18 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     continue
 
                 if slot_id not in parking_by_slot:
-                    parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None}
+                    parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None, "last_gun_seen_at": None}
                 if etype == "parking_intime" and parking_by_slot[slot_id]["in_time"] is None:
                     parking_by_slot[slot_id]["in_time"]  = ts
                     parking_by_slot[slot_id]["track_id"] = parking_by_slot[slot_id]["track_id"] or tid
                 elif etype == "parking_outtime" and parking_by_slot[slot_id]["out_time"] is None:
                     parking_by_slot[slot_id]["out_time"] = ts
                     parking_by_slot[slot_id]["track_id"] = parking_by_slot[slot_id]["track_id"] or tid
+                    # Last frame the gun was on the car ≈ real unplug moment.
+                    # Used to record an accurate plug_out_time on departure
+                    # instead of inferring = out_time (see inference below).
+                    if parking_by_slot[slot_id].get("last_gun_seen_at") is None:
+                        parking_by_slot[slot_id]["last_gun_seen_at"] = meta.get("last_gun_seen_at")
 
         elif usecase_id == "gun_detection":
             for evt in extras.get("events", result.get("events", [])):
@@ -377,6 +382,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
         out_time      = _parse_dt(p.get("out_time"))
         plug_time     = _parse_dt(g.get("plug_time"))
         plug_out_time = _parse_dt(g.get("plug_out_time"))
+        last_gun_seen_at = _parse_dt(p.get("last_gun_seen_at"))
         gun_number    = g.get("gun_number")
         track_id      = p.get("track_id") or g.get("track_id")
 
@@ -523,9 +529,12 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 session.plug_out_time = None
 
             # If the car has left (out_time set) and was charging (plug_time set)
-            # but no gun_plugout event fired, infer plug_out_time = out_time. The
-            # gun must have been removed at or before the car left, so out_time is
-            # a safe upper-bound proxy when detection missed the plug-out frame.
+            # but no gun_plugout event fired, record plug_out_time. Prefer
+            # last_gun_seen_at (the last frame the gun was actually on the car,
+            # carried on the parking_outtime event ≈ the real unplug moment) —
+            # this is accurate when the driver unplugged and drove off before a
+            # gun_plugout could commit. Fall back to out_time as the upper-bound
+            # proxy when last_gun_seen_at is unavailable (e.g. gun blind-spot).
             # Skipped for two-wheelers (no gun semantics).
             if (
                 not is_two_wheeler
@@ -533,7 +542,7 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 and session.plug_time is not None
                 and session.plug_out_time is None
             ):
-                session.plug_out_time = session.out_time
+                session.plug_out_time = last_gun_seen_at or session.out_time
 
             # ---- Status derivation ---- #
             # A session is "completed" once both in_time and out_time exist —
