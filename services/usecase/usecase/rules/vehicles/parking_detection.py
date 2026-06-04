@@ -172,7 +172,13 @@ class ParkingDetectionRule(BaseUsecaseRule):
         # ── Canonical tracker (shared across all vehicle usecases) ────────
         tracker_key = f"tracker:{camera_id}"
         tracker_state = get_state(tracker_key)
-        tracker = CentroidTracker(max_disappeared=20, max_distance=100)
+        # (B) Stickier tracker: keep a parked car's id across longer detection
+        # drops and a jumpier centroid (large fisheye bboxes on a dark/wet car),
+        # so it isn't re-id'd into a "new" car every drop. Env-overridable.
+        tracker = CentroidTracker(
+            max_disappeared=int(os.getenv("TRACKER_MAX_DISAPPEARED", "60")),
+            max_distance=int(os.getenv("TRACKER_MAX_DISTANCE", "250")),
+        )
         if tracker_state:
             tracker.from_dict(tracker_state)
         tracked_cars = tracker.update(cars)
@@ -308,30 +314,47 @@ class ParkingDetectionRule(BaseUsecaseRule):
                 swap_reason = None
 
                 if slot["occupied"] and slot.get("car_maybe_gone_since"):
-                    # Any returning car arriving while we're already debouncing
-                    # an exit is treated as a new vehicle when (a) the id
-                    # differs and isn't an LLM-poll alias for the same car,
-                    # or (b) the absence has already exceeded the MAYBE_GONE
-                    # threshold.
+                    # A returning car during exit-debounce is a genuine new
+                    # vehicle only when its track_id differs from the slot's
+                    # (and isn't the LLM-poll alias for the same car). A *same*
+                    # id returning is the same car — never a swap. (Dropped the
+                    # old "same id after long absence" case: it fired on routine
+                    # re-ids and fragmented one parked car into many sessions.)
                     different_real_id = (
                         prev_tid_for_swap is not None
                         and all(tid != prev_tid_for_swap for tid in occupant_ids)
                         and prev_tid_for_swap != llm_tid_for_swap
                         and all(tid != llm_tid_for_swap for tid in occupant_ids)
                     )
-                    long_absence = (
-                        _absent_seconds(slot.get("car_absent_since"), _now_dt())
-                        >= CAR_MAYBE_GONE_SECONDS
-                    )
                     if different_real_id:
                         fire_immediate_swap = True
                         swap_reason = "different track_id during MAYBE_GONE"
-                    elif long_absence:
-                        fire_immediate_swap = True
-                        swap_reason = (
-                            f"same track_id returned after >= "
-                            f"{CAR_MAYBE_GONE_SECONDS}s absence — likely re-id"
-                        )
+
+                # (A) Identity gate. A different track_id during MAYBE_GONE is
+                # usually the SAME parked car re-identified after a detection
+                # drop (the tracker minted a new id), not a real new vehicle —
+                # the giveaway is the slot's extracted plate is unchanged. When
+                # the slot already has a confident car_number, adopt the new
+                # track_id into the current session and clear the exit debounce
+                # instead of firing a swap (which fragments one visit into many
+                # ChargingSession rows). Genuine swaps before a plate is read
+                # still fall through to the swap path below.
+                if fire_immediate_swap and slot.get("car_number"):
+                    adopted_tid = next(
+                        (tid for tid in occupant_ids if tid != prev_tid_for_swap),
+                        prev_tid_for_swap,
+                    )
+                    logger.info(
+                        "[PARKING] Re-id adopted (same-plate session car=%s), NOT a "
+                        "swap: camera=%s roi=%s old_track=%s new_track=%s (%s)",
+                        slot.get("car_number"), camera_id, roi_name,
+                        prev_tid_for_swap, adopted_tid, swap_reason,
+                    )
+                    slot["track_id"]             = adopted_tid
+                    slot["car_absent_since"]     = None
+                    slot["car_maybe_gone_since"] = None
+                    fire_immediate_swap = False
+                    swap_reason = None
 
                 if fire_immediate_swap:
                     swap_ts = event_ts
