@@ -41,10 +41,13 @@ from shared.common.config import Config
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Default class names — must match new model label order
-# {0: "car", 1: "gun", 2: "no_gun"}
+# Default class names — must match the compiled .hef label order.
+# goec_N_v1.hef (3-class): {0: "motorcycle", 1: "car", 2: "gun"}
+# NOTE: order is index-significant — the postprocess loop maps each
+# detection by its enumerate position into this list, so a wrong order
+# silently mislabels every detection (old goec_M_v1 had car=0, gun=1).
 # ---------------------------------------------------------------------------
-_DEFAULT_CLASSES = ["car", "gun", "no_gun"]
+_DEFAULT_CLASSES = ["motorcycle", "car", "gun"]
 
 
 class HailoDetector(BaseDetector):
