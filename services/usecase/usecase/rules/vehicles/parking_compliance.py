@@ -821,6 +821,11 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     "occupied": False, "violated": False, "wrong_fired": False,
                     "non_ev_fired": False, "intime": None,
                 })
+                # Remember a two-wheeler so the unauthorized session it would
+                # otherwise create is skipped by orchestrate — a car charging
+                # station never records a two-wheeler as a charging session.
+                if car.get("class_name") == "motorcycle":
+                    slot["vehicle_type"] = "two_wheeler"
 
                 if verdict == "outside_slot":
                     # Duplicate-detection guard only runs in the geometric
@@ -913,7 +918,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                                     camera_id=camera_id,
                                     timestamp=slot["intime"],
                                     track_id=track_id,
-                                    metadata={"source": "unauthorized_parking"},
+                                    metadata={"source": "unauthorized_parking", "vehicle_type": slot.get("vehicle_type")},
                                 )
                                 events.append(intime_evt)
                                 publish_sync("parking_events", intime_evt)
@@ -1085,6 +1090,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
                             "intime": slot.get("intime"),
                             "outtime": outtime,
                             "source": "unauthorized_parking",
+                            "vehicle_type": slot.get("vehicle_type"),
                         },
                     )
                     events.append(outtime_evt)

@@ -378,6 +378,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             # the car left before a gun_plugout could commit.
                             "last_gun_seen_at": slot.get("last_gun_seen_at"),
                             "reason":  swap_reason,
+                            "vehicle_type": slot.get("vehicle_type"),
                         },
                     )
                     events.append(outtime_evt)
@@ -448,7 +449,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             camera_id=camera_id,
                             timestamp=intime,
                             track_id=tid,
-                            metadata={"roi": roi_name, "slot_id": roi_name},
+                            metadata={"roi": roi_name, "slot_id": roi_name, "vehicle_type": slot.get("vehicle_type")},
                         )
                         events.append(evt)
                         publish_sync("parking_events", evt, task_id=task_id)
@@ -493,6 +494,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                                     "outtime": swap_ts,
                                     "last_gun_seen_at": slot.get("last_gun_seen_at"),
                                     "reason":  "car swap — new car confirmed in slot",
+                                    "vehicle_type": slot.get("vehicle_type"),
                                 },
                             )
                             events.append(outtime_evt)
@@ -510,6 +512,11 @@ class ParkingDetectionRule(BaseUsecaseRule):
                             slot["in_time"]          = swap_ts
                             slot["track_id"]         = tid
                             slot["car_absent_since"] = None
+                            # Re-seed vehicle_type for the new occupant (the slot
+                            # was reset above) so a swapped-in motorcycle is still
+                            # kept out of charging_sessions.
+                            if car_by_tid.get(tid, {}).get("class_name") == "motorcycle":
+                                slot["vehicle_type"] = "two_wheeler"
                             entry_buf[roi_name].pop(tid, None)
 
                             intime_evt = build_event(
@@ -517,7 +524,7 @@ class ParkingDetectionRule(BaseUsecaseRule):
                                 camera_id=camera_id,
                                 timestamp=swap_ts,
                                 track_id=tid,
-                                metadata={"roi": roi_name, "slot_id": roi_name},
+                                metadata={"roi": roi_name, "slot_id": roi_name, "vehicle_type": slot.get("vehicle_type")},
                             )
                             events.append(intime_evt)
                             publish_sync("parking_events", intime_evt, task_id=task_id)
