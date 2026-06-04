@@ -168,9 +168,9 @@ def get_camera_usecases(camera_id: str) -> List[str]:
 _USECASE_CLASSES: Dict[str, list] = {
     "gun_detection":      ["gun"],
     "safety_monitoring":  ["fire", "smoke"],
-    "parking_detection":  ["car"],
-    "parking_compliance": ["car"],
-    "vehicle_extraction": ["car"],
+    "parking_detection":  ["car", "motorcycle"],
+    "parking_compliance": ["car", "motorcycle"],
+    "vehicle_extraction": ["car"],   # car-only by design: motorcycles skip the extraction LLM
     "phone_detection":    ["cell phone"],
     "smoking_detection":  ["cigarette"],
     "mopping_detection":  ["mop"],
@@ -300,7 +300,12 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     if meta.get("source") != "unauthorized_parking" or not tid:
                         continue
                     if tid not in parking_by_track:
-                        parking_by_track[tid] = {"in_time": None, "out_time": None}
+                        parking_by_track[tid] = {"in_time": None, "out_time": None, "vehicle_type": None}
+                    # Carry the YOLO-derived vehicle_type stamped on the event —
+                    # the only two-wheeler signal for a motorcycle (it skips the
+                    # extraction LLM).
+                    if parking_by_track[tid].get("vehicle_type") in (None, "unknown"):
+                        parking_by_track[tid]["vehicle_type"] = meta.get("vehicle_type")
                     if etype == "parking_intime" and parking_by_track[tid]["in_time"] is None:
                         parking_by_track[tid]["in_time"] = ts
                     elif etype == "parking_outtime" and parking_by_track[tid]["out_time"] is None:
@@ -308,7 +313,13 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                     continue
 
                 if slot_id not in parking_by_slot:
-                    parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None, "last_gun_seen_at": None}
+                    parking_by_slot[slot_id] = {"in_time": None, "out_time": None, "track_id": None, "last_gun_seen_at": None, "vehicle_type": None}
+                # Carry the YOLO-derived vehicle_type stamped on the parking
+                # event. Motorcycles skip vehicle_extraction (no LLM), so this is
+                # the only vehicle_type signal for a two-wheeler — used below to
+                # keep it out of charging_sessions entirely (car charging station).
+                if parking_by_slot[slot_id].get("vehicle_type") in (None, "unknown"):
+                    parking_by_slot[slot_id]["vehicle_type"] = meta.get("vehicle_type")
                 if etype == "parking_intime" and parking_by_slot[slot_id]["in_time"] is None:
                     parking_by_slot[slot_id]["in_time"]  = ts
                     parking_by_slot[slot_id]["track_id"] = parking_by_slot[slot_id]["track_id"] or tid
@@ -402,16 +413,23 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 car_model = cm
             if vt not in (None, "unknown"):
                 vehicle_type = vt
+        # Fall back to the YOLO-seeded vehicle_type carried on the parking event
+        # — motorcycles skip the extraction LLM, so vehicle_by_slot is empty for
+        # them.
+        if vehicle_type is None:
+            pvt = p.get("vehicle_type")
+            if pvt not in (None, "unknown"):
+                vehicle_type = pvt
 
-        # Two-wheelers don't use the charging gun. Drop any gun/plug data the
-        # gun_detection rule may have emitted before vehicle_type consensus was
-        # reached, so the session row never carries gun_number / plug_time /
-        # plug_out_time for a motorcycle. Already-persisted values are cleared
-        # below once the session row is loaded.
-        is_two_wheeler = vehicle_type == "two_wheeler"
-        if is_two_wheeler:
-            plug_time = plug_out_time = None
-            gun_number = None
+        # This is a car charging station: two-wheelers never get a charging
+        # session row. A motorcycle's only record is the non_ev_parking alert
+        # raised by parking_compliance. Skip the slot before any row is created.
+        if vehicle_type == "two_wheeler":
+            _persistence_logger.info(
+                f"[DB][{camera_id}] slot={slot_id} is a two-wheeler — "
+                f"skipping charging_session (alert-only)"
+            )
+            continue
 
         _persistence_logger.info(
             f"[DB][{camera_id}] upsert slot={slot_id} track={track_id} "
@@ -509,25 +527,6 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if plug_out_time and session.plug_out_time is None: session.plug_out_time = plug_out_time
             if out_time    and session.out_time    is None: session.out_time    = out_time
 
-            # Two-wheelers: scrub any gun/plug data that was persisted before
-            # vehicle_type consensus identified the vehicle as a motorcycle.
-            # gun_detection stops polling once it knows, but a plug-in (or
-            # inferred plug-in) may already have fired and been written. A
-            # motorcycle never uses the charging gun, so these fields must be
-            # NULL — which also keeps the status out of "charging" below.
-            if is_two_wheeler and (
-                session.gun_number is not None
-                or session.plug_time is not None
-                or session.plug_out_time is not None
-            ):
-                _persistence_logger.info(
-                    f"[DB] Clearing gun/plug fields for two-wheeler session_id={session.session_id} "
-                    f"slot={slot_id} (gun={session.gun_number} plug_time={session.plug_time}) camera={camera_id}"
-                )
-                session.gun_number    = None
-                session.plug_time     = None
-                session.plug_out_time = None
-
             # If the car has left (out_time set) and was charging (plug_time set)
             # but no gun_plugout event fired, record plug_out_time. Prefer
             # last_gun_seen_at (the last frame the gun was actually on the car,
@@ -535,10 +534,8 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             # this is accurate when the driver unplugged and drove off before a
             # gun_plugout could commit. Fall back to out_time as the upper-bound
             # proxy when last_gun_seen_at is unavailable (e.g. gun blind-spot).
-            # Skipped for two-wheelers (no gun semantics).
             if (
-                not is_two_wheeler
-                and session.out_time is not None
+                session.out_time is not None
                 and session.plug_time is not None
                 and session.plug_out_time is None
             ):
@@ -620,12 +617,20 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
                 car_model = cm
             if vt not in (None, "unknown"):
                 vehicle_type = vt
+        # Fall back to the YOLO-seeded vehicle_type carried on the event.
+        if vehicle_type is None:
+            pvt = p.get("vehicle_type")
+            if pvt not in (None, "unknown"):
+                vehicle_type = pvt
 
-        # Two-wheelers don't use the charging gun — drop opportunistic
-        # gun_number attribution for motorcycles.
-        is_two_wheeler = vehicle_type == "two_wheeler"
-        if is_two_wheeler:
-            gun_number = None
+        # Car charging station: two-wheelers never get a charging session row,
+        # in-slot or unauthorized. Skip before any row is created.
+        if vehicle_type == "two_wheeler":
+            _persistence_logger.info(
+                f"[DB][{camera_id}] unauthorized track={track_id} is a two-wheeler — "
+                f"skipping charging_session (alert-only)"
+            )
+            continue
 
         _persistence_logger.info(
             f"[DB][{camera_id}] upsert unauthorized track={track_id} "
@@ -679,15 +684,6 @@ def upsert_charging_session(camera_id: str, usecase_results: list) -> None:
             if gun_number and session.gun_number is None: session.gun_number = gun_number
             if in_time    and session.in_time    is None: session.in_time    = in_time
             if out_time   and session.out_time   is None: session.out_time   = out_time
-
-            # Two-wheeler: scrub any gun_number attributed before vehicle_type
-            # consensus identified the vehicle as a motorcycle.
-            if is_two_wheeler and session.gun_number is not None:
-                _persistence_logger.info(
-                    f"[DB] Clearing gun_number for two-wheeler unauthorized session_id={session.session_id} "
-                    f"track={track_id} camera={camera_id}"
-                )
-                session.gun_number = None
 
             if session.in_time is not None and session.out_time is not None:
                 if _is_below_min_duration(session.in_time, session.out_time):
