@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 
 ENTRY_FRAMES = 3   # consecutive frames car must be outside ROI to confirm unauthorized entry (wrong_parking gate)
 EXIT_FRAMES  = 3   # consecutive frames car must be absent to confirm exit
+MOTO_FRAMES  = int(os.getenv("MOTO_FRAMES", "3"))  # consecutive tracked frames a YOLO motorcycle must sit in-ROI before the non-EV alert fires (debounces single-frame misclassification)
 MIN_CAR_CONFIDENCE = 0.5  # drop low-confidence detections before evaluating compliance
 # Wrong-parking threshold: a neighbour ROI is only counted as "occupied by this car"
 # when ≥50 % of the bbox sample grid falls inside it. Tuned for Indian parking — a
@@ -264,6 +265,7 @@ _COMPLIANCE_CACHE_MAX = 16
 _DESC_UNAUTHORIZED       = "Unauthorised parking"
 _DESC_DOUBLE_SLOT        = "Double slot parking"
 _DESC_NON_EV             = "Non-EV vehicle"
+_DESC_TWO_WHEELER        = "Two-wheeler in EV charging slot"
 _DESC_UNAUTHORIZED_NONEV = "Unauthorised non-EV"
 
 
@@ -544,7 +546,7 @@ class ParkingComplianceRule(BaseUsecaseRule):
         if tracked_cars is None:
             tracked_cars = [
                 d for d in detection_output.get("detections", [])
-                if d.get("class_name") == "car"
+                if d.get("class_name") in ("car", "motorcycle")
             ]
         cars = [
             c for c in tracked_cars
@@ -1007,22 +1009,40 @@ class ParkingComplianceRule(BaseUsecaseRule):
                     slot["outside_since"] = None
                     slot["wrong_buf"] = 0
 
-                # ── Non-EV parking (LLM-only) ─────────────────────────────────
-                # A non-EV vehicle occupying any configured EV slot is a
-                # violation. We require:
-                #   - LLM is_ev verdict == "non_ev" (we never default to non_ev
-                #     when uncertain; "unknown" never fires)
-                #   - the vehicle overlaps any ROI (centroid in OR bbox-overlap
-                #     above WRONG_PARKING_OVERLAP) — i.e. it is occupying a
-                #     slot reserved for EVs. A non-EV parked outside every ROI
-                #     is just regular unauthorized parking.
-                # Fires once per track via slot["non_ev_fired"].
+                # ── Non-EV parking ────────────────────────────────────────────
+                # Two trigger paths, both gated on the vehicle overlapping a ROI
+                # (centroid in OR bbox-overlap above WRONG_PARKING_OVERLAP) — a
+                # vehicle parked outside every ROI is just regular unauthorized
+                # parking, handled above. Fires once per track via
+                # slot["non_ev_fired"].
+                #
+                #   1. YOLO "motorcycle" class (LLM-free): a two-wheeler in a
+                #      car-charging bay is a violation regardless of whether the
+                #      bike is itself electric — two-wheelers can't use the car
+                #      charging gun. We fire on YOLO directly but require
+                #      MOTO_FRAMES consecutive in-ROI frames to shrug off a
+                #      single-frame misclassification.
+                #   2. LLM is_ev verdict == "non_ev" (cars): we never default to
+                #      non_ev when uncertain; "unknown" never fires.
+                is_motorcycle = car.get("class_name") == "motorcycle"
+                if is_motorcycle and all_matched_rois:
+                    slot["moto_buf"] = slot.get("moto_buf", 0) + 1
+                else:
+                    slot["moto_buf"] = 0
+                moto_confirmed = slot.get("moto_buf", 0) >= MOTO_FRAMES
+
                 if (
-                    llm_is_ev == "non_ev"
+                    (moto_confirmed or llm_is_ev == "non_ev")
                     and all_matched_rois
                     and not slot.get("non_ev_fired")
                 ):
                     slot["non_ev_fired"] = True
+                    reason = (
+                        "two-wheeler occupying EV charging slot"
+                        if moto_confirmed
+                        else "non-EV vehicle occupying EV charging slot"
+                    )
+                    description = _DESC_TWO_WHEELER if moto_confirmed else _DESC_NON_EV
                     evt = build_event(
                         event_type="non_ev_parking",
                         camera_id=camera_id,
@@ -1034,8 +1054,8 @@ class ParkingComplianceRule(BaseUsecaseRule):
                             "occupied_rois": all_matched_rois,
                             "car_model": (llm_vehicle or {}).get("car_model"),
                             "car_number": (llm_vehicle or {}).get("car_number"),
-                            "reason": "non-EV vehicle occupying EV charging slot",
-                            "description": _DESC_NON_EV,
+                            "reason": reason,
+                            "description": description,
                             "occupied_rois_summary": ", ".join(all_matched_rois),
                         },
                     )
@@ -1044,8 +1064,8 @@ class ParkingComplianceRule(BaseUsecaseRule):
                         flagged.append(car)
                     publish_sync("violation_events", evt)
                     logger.warning(
-                        "[COMPLIANCE] Non-EV parking: camera=%s track=%s rois=%s",
-                        camera_id, track_id, all_matched_rois,
+                        "[COMPLIANCE] Non-EV parking (%s): camera=%s track=%s rois=%s",
+                        "motorcycle" if moto_confirmed else "llm", camera_id, track_id, all_matched_rois,
                     )
 
         # ── Check exit for unauthorized cars no longer visible ────────────────

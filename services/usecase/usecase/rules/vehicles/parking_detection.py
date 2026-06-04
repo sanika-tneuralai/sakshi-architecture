@@ -163,7 +163,11 @@ class ParkingDetectionRule(BaseUsecaseRule):
             logger.error("[PARKING] 'rois' missing from payload for camera '%s'", camera_id)
             return {"triggered": False, "matched_objects": [], "events": []}
 
-        cars = [d for d in detection_output.get("detections", []) if d.get("class_name") == "car"]
+        # Admit the new YOLO "motorcycle" class alongside "car": both occupy a
+        # slot and must be tracked. The model now emits motorcycles on their own
+        # class, so filtering to "car" only would make every bike invisible
+        # (never tracked, never occupies a slot, never alerted).
+        cars = [d for d in detection_output.get("detections", []) if d.get("class_name") in ("car", "motorcycle")]
         logger.debug(
             "[PARKING] camera=%s | rois=%s | cars_detected=%d",
             camera_id, list(rois.keys()), len(cars),
@@ -429,6 +433,14 @@ class ParkingDetectionRule(BaseUsecaseRule):
                         slot["in_time"]          = intime
                         slot["track_id"]         = tid
                         slot["car_absent_since"] = None
+                        # YOLO's "motorcycle" class is authoritative for
+                        # vehicle_type — seed it here, at the already
+                        # ENTRY_FRAMES-debounced occupancy confirmation, so
+                        # gun_detection's two-wheeler skip fires without waiting
+                        # for (or paying for) the vehicle_extraction LLM. Cars
+                        # are left for the LLM to classify as usual.
+                        if car_by_tid.get(tid, {}).get("class_name") == "motorcycle":
+                            slot["vehicle_type"] = "two_wheeler"
                         entry_buf[roi_name].pop(tid, None)
 
                         evt = build_event(
