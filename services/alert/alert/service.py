@@ -18,6 +18,7 @@ from alert.schemas import (
     PipelineAlertRequest,
     PipelineAlertResponse,
 )
+from alert.telegram import is_telegram_target, send_telegram
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +57,34 @@ def _build_message(usecase_id: str, matched_count: int, extras: Optional[Dict[st
                 base += f" | plate: {vd.get('car_number', 'N/A')}  model: {vd.get('car_model', 'N/A')}"
 
     return base
+
+
+# Friendly headline per usecase for the Telegram message. Falls back to the
+# raw usecase_id for anything not listed.
+_TELEGRAM_HEADLINES: Dict[str, str] = {
+    "camera_offline":   "📷❌ Camera OFFLINE",
+    "camera_recovered": "📷✅ Camera back ONLINE",
+}
+
+
+def _build_telegram_text(
+    camera_id: str,
+    usecase_id: str,
+    message: str,
+    timestamp: str,
+    extras: Optional[Dict[str, Any]],
+) -> str:
+    """Compose the human-facing Telegram message for a fired alert."""
+    headline = _TELEGRAM_HEADLINES.get(usecase_id, f"⚠ {usecase_id}")
+    lines = [
+        headline,
+        f"Camera: {camera_id}",
+        f"Time: {timestamp}",
+    ]
+    detail = (extras or {}).get("detail")
+    if detail:
+        lines.append(f"Detail: {detail}")
+    return "\n".join(lines)
 
 
 def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertResponse:
@@ -115,6 +144,12 @@ def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertRespo
             timestamp=timestamp,
             extras=extras if extras else None,
         ))
+
+        # Fan out to Telegram for allowlisted usecases (default: camera health).
+        # Guarded + non-fatal inside send_telegram — never breaks the response.
+        if is_telegram_target(usecase_id):
+            send_telegram(_build_telegram_text(
+                request.camera_id, usecase_id, message, timestamp, extras))
 
     print(f"[SERVICE] process_pipeline_alerts done | alerts_sent={len(alerts_sent)}\n")
 
