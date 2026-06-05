@@ -197,6 +197,13 @@ CAMERA_DETECTION_CONCURRENCY = int(os.getenv("CAMERA_DETECTION_CONCURRENCY", "10
 USECASE_CONCURRENCY = int(os.getenv("USECASE_CONCURRENCY", "20"))
 ALERT_CONCURRENCY = int(os.getenv("ALERT_CONCURRENCY", "30"))
 
+# Consecutive pipeline errors (frame fetch / detection failures) before a camera
+# is treated as offline and a camera_offline alert is fired. A camera that has
+# rotated and powered off stops delivering frames, which surfaces here as a run
+# of fetch_frame failures. Kept below max_errors_before_pause so the alert fires
+# before the camera is paused.
+CAMERA_OFFLINE_AFTER_ERRORS = int(os.getenv("CAMERA_OFFLINE_AFTER_ERRORS", "3"))
+
 # Default poll interval between pipeline iterations
 DEFAULT_POLL_INTERVAL = float(os.getenv("DEFAULT_POLL_INTERVAL", "1.0"))
 
@@ -225,6 +232,9 @@ class CameraStats:
     consecutive_errors: int = 0
     last_run: Optional[datetime] = None
     last_error: Optional[str] = None
+    # True once a camera_offline alert has been fired for the current outage;
+    # cleared (with a camera_recovered alert) on the next successful iteration.
+    offline_alerted: bool = False
     latencies: List[float] = field(default_factory=list)  # Keep last 100
     
     @property
@@ -500,6 +510,35 @@ async def send_alerts(camera_id: str, usecase_results: List[dict]) -> dict:
         data = response.json()
         logger.debug(f"[{camera_id}] alert response: {data}")
         return data
+
+
+async def send_camera_state_alert(camera_id: str, state: str, detail: str = "") -> None:
+    """Fire a camera-health alert (offline / recovered) through the alert service.
+
+    The orchestrator is the single source of truth for alerting: decode-detect
+    only exposes camera state, the orchestrator decides, and the alert service
+    delivers. We reuse send_alerts() with a synthetic usecase result whose
+    usecase_id ("camera_offline" / "camera_recovered") the alert service keys on
+    for its Telegram allowlist. Best-effort: any failure is logged, never raised.
+    """
+    usecase_id = f"camera_{state}"
+    try:
+        await send_alerts(camera_id, [{
+            "usecase_id": usecase_id,
+            "triggered": True,
+            "matched_objects": [],
+            "matched_count": 0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "extras": {
+                "state": state,
+                "reason": "frame_stream_unavailable" if state == "offline" else "frame_stream_resumed",
+                "detail": detail,
+                "source": "orchestration",
+            },
+        }])
+        logger.info(f"[{camera_id}] camera-state alert fired: {usecase_id} ({detail})")
+    except Exception as e:
+        logger.warning(f"[{camera_id}] camera-state alert '{usecase_id}' failed (non-critical): {e!r}")
 
 
 # =============================================================================
@@ -919,6 +958,14 @@ class PipelineManager:
                 stats.last_run = datetime.now()
                 stats.consecutive_errors = 0  # Reset on success
 
+                # Camera was offline and is now delivering frames again → recover.
+                if stats.offline_alerted:
+                    stats.offline_alerted = False
+                    await send_camera_state_alert(
+                        camera_id, "recovered",
+                        detail="frame stream resumed",
+                    )
+
                 # Single structured INFO line per iteration: per-stage timing
                 # makes it instantly clear which hop is slow next time. Full
                 # payloads are in the debug file at the same iter= tag.
@@ -944,6 +991,16 @@ class PipelineManager:
                     f"consecutive_errors={stats.consecutive_errors} | "
                     f"error={e!r}"
                 )
+
+                # Camera has stopped delivering frames (rotated / powered off /
+                # link dropped) → fire a one-shot offline alert. The flag is
+                # cleared on the next successful iteration (recovery alert above).
+                if stats.consecutive_errors >= CAMERA_OFFLINE_AFTER_ERRORS and not stats.offline_alerted:
+                    stats.offline_alerted = True
+                    await send_camera_state_alert(
+                        camera_id, "offline",
+                        detail=f"{stats.consecutive_errors} consecutive frame failures; last_error={stats.last_error}",
+                    )
 
                 # Pause camera if too many consecutive errors
                 if stats.consecutive_errors >= config.max_errors_before_pause:
