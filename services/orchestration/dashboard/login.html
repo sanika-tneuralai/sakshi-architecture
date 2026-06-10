@@ -143,15 +143,15 @@
   </div>
 
   <div class="login-footer">
-    GOEC Surveillance Dashboard &copy; 2024
+    GOEC Surveillance Dashboard &copy; 2026
   </div>
 </div>
 
 <script src="app.js"></script>
 <script>
-  // If already logged in, skip to home
+  // If already logged in, skip straight to the dashboard
   if (Auth.getUser()) {
-    window.location.href = 'home.html';
+    window.location.href = 'station.html';
   }
 
   async function handleLogin(e) {
@@ -173,7 +173,7 @@
     await new Promise(r => setTimeout(r, 400));
 
     if (Auth.login(username, password)) {
-      window.location.href = 'home.html';
+      window.location.href = 'station.html';
     } else {
       btn.disabled = false;
       lbl.textContent = 'Sign In';

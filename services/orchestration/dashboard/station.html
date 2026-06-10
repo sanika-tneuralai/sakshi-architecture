@@ -4,6 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EV Station Monitor</title>
+  <!-- Auth gate: bounce to login.html before loading the dashboard if there's
+       no active session. Runs first (synchronous app.js + check) so the React
+       and Tailwind CDN bundles below never download for a signed-out user. -->
+  <script src="app.js"></script>
+  <script>Auth.requireAuth();</script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
