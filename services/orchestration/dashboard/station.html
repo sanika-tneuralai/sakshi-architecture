@@ -579,40 +579,202 @@ function fmtDurationSecs(secs) {
   return `${s}s`;
 }
 
-function EnergyLossTable({ results, summary }) {
-  const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)'/*, 'Loss %'*/];
-  const [dateFilter, setDateFilter] = React.useState('all');
+/* "YYYY-MM-DD HH:MM:SS" → "HH:MM" for compact time-of-day columns. */
+function fmtTimeOfDay(s) {
+  if (!s) return null;
+  const m = /\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2})/.exec(s);
+  return m ? m[1] : s;
+}
 
-  // Distinct OCPP dates from the current upload (sorted newest-first).
+function Badge({ text, cls, title }) {
+  return (
+    <span title={title} className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${cls}`}>
+      {text}
+    </span>
+  );
+}
+
+/* Per-row scenario flags: invalid client time, parallel charging,
+   balance-cutoff / merged, and a suspicious-loss marker. */
+function FlagBadges({ r }) {
+  const flags = [];
+  if (r.time_valid === false) {
+    flags.push(<Badge key="inv" text="Invalid time" cls="bg-rose-100 text-rose-700"
+      title={(r.time_invalid_reason || 'Invalid client timestamps') + ' — excluded from matching & loss total'} />);
+  }
+  if (r.is_parallel) {
+    const partners = (r.overlap_partners || [])
+      .map(p => `${p.vrn || '?'} (C${p.connector} ${p.start}–${p.end})`).join('; ');
+    flags.push(<Badge key="par" text="Parallel" cls="bg-violet-100 text-violet-700"
+      title={partners ? `Overlapping charge on the other gun: ${partners}` : 'Overlapping charge on the other connector'} />);
+  }
+  if (r.balance_cutoff) {
+    flags.push(<Badge key="bc" text={r.merged_count > 1 ? `Merged ×${r.merged_count}` : 'Balance cutoff'} cls="bg-sky-100 text-sky-700"
+      title={r.merged_count > 1
+        ? `Merged from ${r.merged_count} OCPP transactions (balance-cutoff & resume)`
+        : 'Charge stopped on balance cutoff'} />);
+  }
+  if (r.suspicious) {
+    flags.push(<Badge key="sus" text="Suspicious" cls="bg-amber-100 text-amber-700"
+      title={`Suspicious loss — ${r.suspicious_reason || 'unexplained'}`} />);
+  }
+  if (!flags.length) return <span className="text-slate-300">—</span>;
+  return <div className="flex flex-wrap gap-1">{flags}</div>;
+}
+
+function DetailField({ label, children }) {
+  return (
+    <div className="flex justify-between gap-3 py-0.5">
+      <span className="text-slate-400">{label}</span>
+      <span className="text-slate-700 font-medium text-right">{children == null || children === '' ? '—' : children}</span>
+    </div>
+  );
+}
+
+/* Expandable OCPP-vs-CCTV comparison so the PM can justify each match. */
+function MatchDetail({ r }) {
+  const matched = r.matched_session_id != null;
+  return (
+    <div className="px-6 py-4 bg-slate-50 border-y border-slate-100">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs">
+        <div>
+          <div className="font-bold text-slate-600 uppercase tracking-wide mb-2">OCPP (client)</div>
+          <DetailField label="Plate">{display(r.vrn)}</DetailField>
+          <DetailField label="Make / Model">{display([r.make, r.model].filter(Boolean).join(' '))}</DetailField>
+          <DetailField label="Connector">{r.connector_id}</DetailField>
+          <DetailField label="Start">{r.ocpp_start_time}</DetailField>
+          <DetailField label="End">{r.ocpp_end_time}</DetailField>
+          <DetailField label="Energy">{r.client_kwh != null ? r.client_kwh.toFixed(3) + ' kWh' : null}</DetailField>
+          <DetailField label="Stop reason">{r.stop_reason}</DetailField>
+          <DetailField label="Closed by">{r.closed_by}</DetailField>
+          {r.merged_count > 1 && <DetailField label="Merged from">{r.merged_count + ' transactions'}</DetailField>}
+          {r.time_valid === false && (
+            <div className="mt-2 text-rose-600 font-semibold">
+              ⚠ {r.time_invalid_reason || 'Invalid timestamps'} — discarded from time matching & loss total.
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="font-bold text-slate-600 uppercase tracking-wide mb-2">Our camera (CCTV)</div>
+          {matched ? (
+            <React.Fragment>
+              <DetailField label="Plate">{display(r.matched_car_number)}</DetailField>
+              <DetailField label="Model">{display(r.matched_car_model)}</DetailField>
+              <DetailField label="Slot">{r.matched_slot_id}</DetailField>
+              <DetailField label="Car in / out">{(fmtTimeOfDay(r.matched_in_time) || '—') + ' – ' + (fmtTimeOfDay(r.matched_out_time) || '—')}</DetailField>
+              <DetailField label="Plug in / out">{(fmtTimeOfDay(r.matched_plug_time) || '—') + ' – ' + (fmtTimeOfDay(r.matched_plug_out_time) || '—')}</DetailField>
+              <DetailField label="Energy (our meter)">{r.meter_kwh != null ? r.meter_kwh.toFixed(3) + ' kWh' : null}</DetailField>
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                <ConfidenceBadge level={r.confidence} />
+                <span className="text-slate-400 ml-1">Matched on:</span>
+                {humaniseReasons(r.match_reasons).map(c => (
+                  <span key={c} className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-500 text-[10px] font-medium">{c}</span>
+                ))}
+              </div>
+            </React.Fragment>
+          ) : (
+            <div className="text-slate-500">
+              No CCTV session matched.{' '}
+              {r.time_valid === false
+                ? 'Client timestamps invalid — time/duration signals were discarded, so only an exact plate match could have linked this row.'
+                : 'No reliable plate or time overlap with a camera session (blind-spot parking, camera outage, or plate not read).'}
+            </div>
+          )}
+        </div>
+      </div>
+      {r.suspicious && (
+        <div className="mt-3 text-amber-700 text-xs font-semibold">
+          Suspicious loss ({r.loss_kwh > 0 ? 'we under-counted vs the client meter' : 'we over-counted vs the client meter'}) — likely cause: {r.suspicious_reason}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Column definitions. `sort` present → header is clickable/sortable. */
+const ENERGY_COLS = [
+  { key: 'date',      label: 'Date',         sort: r => r.ocpp_date },
+  { key: 'start',     label: 'Start',        sort: r => r.ocpp_start_time },
+  { key: 'end',       label: 'End',          sort: r => r.ocpp_end_time },
+  { key: 'vrn',       label: 'VRN',          sort: r => r.vrn },
+  { key: 'model',     label: 'Make / Model' },
+  { key: 'match',     label: 'Match Quality' },
+  { key: 'connector', label: 'Connector',    sort: r => r.connector_id },
+  { key: 'duration',  label: 'Duration',     sort: r => r.duration_seconds },
+  { key: 'client',    label: 'Client kWh',   sort: r => r.client_kwh },
+  { key: 'meter',     label: 'Meter kWh',    sort: r => r.meter_kwh },
+  { key: 'loss',      label: 'Loss (kWh)',   sort: r => r.loss_kwh },
+  { key: 'flags',     label: 'Flags' },
+];
+
+function EnergyLossTable({ results, summary }) {
+  const [dateFilter, setDateFilter] = React.useState('all');
+  const [sortKey, setSortKey] = React.useState('start');
+  const [sortDir, setSortDir] = React.useState('asc');
+  const [expanded, setExpanded] = React.useState(() => new Set());
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir('asc'); }
+  };
+  const toggleExpand = (k) => setExpanded(prev => {
+    const n = new Set(prev);
+    if (n.has(k)) n.delete(k); else n.add(k);
+    return n;
+  });
+
+  // Distinct OCPP dates from the current upload (ascending → earliest first).
   const availableDates = React.useMemo(() => {
     if (!results) return [];
     const set = new Set();
     for (const r of results) if (r.ocpp_date) set.add(r.ocpp_date);
-    return Array.from(set).sort().reverse();
+    return Array.from(set).sort();
   }, [results]);
 
-  // Reset filter when a fresh upload changes the available date set.
+  // On a fresh upload, default to the EARLIEST date rather than dumping every
+  // date at once; the selector lets the user switch. Re-runs only when the
+  // date set itself changes (i.e. a new upload), not on manual filter changes.
   React.useEffect(() => {
-    if (dateFilter !== 'all' && !availableDates.includes(dateFilter)) setDateFilter('all');
+    setExpanded(new Set());
+    if (availableDates.length) setDateFilter(availableDates[0]);
+    else setDateFilter('all');
   }, [availableDates]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filteredResults = React.useMemo(() => {
     if (!results) return results;
-    if (dateFilter === 'all') return results;
-    return results.filter(r => r.ocpp_date === dateFilter);
-  }, [results, dateFilter]);
+    let rows = dateFilter === 'all' ? results.slice() : results.filter(r => r.ocpp_date === dateFilter);
+    const col = ENERGY_COLS.find(c => c.key === sortKey);
+    if (col && col.sort) {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      rows.sort((a, b) => {
+        const va = col.sort(a), vb = col.sort(b);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;          // nulls always last
+        if (vb == null) return -1;
+        if (va < vb) return -1 * dir;
+        if (va > vb) return 1 * dir;
+        return 0;
+      });
+    }
+    return rows;
+  }, [results, dateFilter, sortKey, sortDir]);
 
   // Recompute summary metrics over the filtered rows so the strip reflects
-  // exactly what's on screen. Must run BEFORE any early-return — React's
-  // rules-of-hooks require the same hook order on every render.
+  // exactly what's on screen. Invalid-time rows are counted but excluded from
+  // the loss total. Must run BEFORE any early-return (rules-of-hooks).
   const visibleSummary = React.useMemo(() => {
-    if (dateFilter === 'all' || !summary) return summary;
+    if (!summary) return summary;
     const rows = filteredResults || [];
     let matched = 0, client = 0, loss = 0, hasLoss = false;
+    let par = 0, bc = 0, inv = 0, sus = 0;
     for (const r of rows) {
       if (r.matched_session_id != null) matched += 1;
       if (typeof r.client_kwh === 'number') client += r.client_kwh;
-      if (typeof r.loss_kwh === 'number') { loss += r.loss_kwh; hasLoss = true; }
+      if (typeof r.loss_kwh === 'number' && r.time_valid !== false) { loss += r.loss_kwh; hasLoss = true; }
+      if (r.is_parallel) par += 1;
+      if (r.balance_cutoff) bc += 1;
+      if (r.time_valid === false) inv += 1;
+      if (r.suspicious) sus += 1;
     }
     return {
       ...summary,
@@ -621,8 +783,12 @@ function EnergyLossTable({ results, summary }) {
       unmatched: rows.length - matched,
       total_client_kwh: client,
       total_loss_kwh: hasLoss ? loss : null,
+      parallel_count: par,
+      balance_cutoff_count: bc,
+      invalid_count: inv,
+      suspicious_count: sus,
     };
-  }, [filteredResults, dateFilter, summary]);
+  }, [filteredResults, summary]);
 
   if (!results || !results.length) {
     return (
@@ -656,21 +822,34 @@ function EnergyLossTable({ results, summary }) {
             <div>Client total: <span className="font-semibold text-slate-700">{visibleSummary.total_client_kwh.toFixed(2)} kWh</span></div>
           )}
           {visibleSummary.total_loss_kwh != null && (
-            <div>Total loss: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{visibleSummary.total_loss_kwh.toFixed(2)} kWh</span></div>
+            <div>Total loss: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{visibleSummary.total_loss_kwh.toFixed(2)} kWh</span> <span className="text-slate-400">(invalid-time rows excluded)</span></div>
           )}
-          {/* Loss % summary hidden — parallel sessions skew total
-          {visibleSummary.total_loss_kwh != null && visibleSummary.total_client_kwh > 0 && (
-            <div>Loss %: <span className={`font-semibold ${visibleSummary.total_loss_kwh > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{((visibleSummary.total_loss_kwh / visibleSummary.total_client_kwh) * 100).toFixed(1)}%</span></div>
-          )} */}
+          {visibleSummary.parallel_count > 0 && (
+            <div><span className="font-semibold text-violet-700">{visibleSummary.parallel_count}</span> parallel</div>
+          )}
+          {visibleSummary.balance_cutoff_count > 0 && (
+            <div><span className="font-semibold text-sky-700">{visibleSummary.balance_cutoff_count}</span> balance-cutoff</div>
+          )}
+          {visibleSummary.invalid_count > 0 && (
+            <div><span className="font-semibold text-rose-600">{visibleSummary.invalid_count}</span> invalid</div>
+          )}
+          {visibleSummary.suspicious_count > 0 && (
+            <div><span className="font-semibold text-amber-700">{visibleSummary.suspicious_count}</span> suspicious</div>
+          )}
         </div>
       )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr>
-              {cols.map(c => (
-                <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
-                  {c}
+              <th className="w-8 border-b border-slate-100"></th>
+              {ENERGY_COLS.map(c => (
+                <th
+                  key={c.key}
+                  onClick={c.sort ? () => toggleSort(c.key) : undefined}
+                  className={`text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap ${c.sort ? 'cursor-pointer select-none hover:text-slate-600' : ''}`}
+                >
+                  {c.label}{c.sort && sortKey === c.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
                 </th>
               ))}
             </tr>
@@ -679,39 +858,48 @@ function EnergyLossTable({ results, summary }) {
             {(filteredResults || []).map((r, i) => {
               const loss = r.loss_kwh;
               const hasLoss = loss != null;
-              /* const lossPct = r.loss_pct != null
-                ? r.loss_pct
-                : (loss != null && r.client_kwh > 0 ? parseFloat(((loss / r.client_kwh) * 100).toFixed(1)) : null); */
+              const rowKey = r.excel_row + '-' + i;
+              const isOpen = expanded.has(rowKey);
+              const invalid = r.time_valid === false;
+              const baseBg = i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60';
               return (
-                <tr key={r.excel_row + '-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
-                  <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
-                  <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(r.vrn) || <NA />}</td>
-                  <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
-                    {display([r.make, r.model].filter(Boolean).join(' ')) || <NA />}
-                  </td>
-                  <td className="px-4 py-3 whitespace-nowrap align-top">
-                    <MatchQualityCell confidence={r.confidence} reasons={r.match_reasons} />
-                  </td>
-                  <td className="px-4 py-3 text-slate-600 text-xs">{r.connector_id ?? <NA text="—" />}</td>
-                  <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{fmtDurationSecs(r.duration_seconds) || <NA text="—" />}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">{r.client_kwh != null ? r.client_kwh.toFixed(3) : <NA text="—" />}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{r.meter_kwh != null ? r.meter_kwh.toFixed(3) : <NA text="—" />}</td>
-                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
-                    {hasLoss ? (
-                      <span className={loss > 0.1 ? 'font-semibold text-rose-600' : loss < -0.1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
-                        {loss.toFixed(3)}
-                      </span>
-                    ) : <NA text="—" />}
-                  </td>
-                  {/* Loss % column hidden — parallel sessions inflate meter_kwh causing misleading negative %
-                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
-                    {lossPct != null ? (
-                      <span className={lossPct > 1 ? 'font-semibold text-rose-600' : lossPct < -1 ? 'font-semibold text-amber-600' : 'text-slate-700'}>
-                        {lossPct > 0 ? '+' : ''}{lossPct.toFixed(1)}%
-                      </span>
-                    ) : <NA text="—" />}
-                  </td> */}
-                </tr>
+                <React.Fragment key={rowKey}>
+                  <tr
+                    onClick={() => toggleExpand(rowKey)}
+                    className={`cursor-pointer hover:bg-brand-50/40 ${invalid ? 'bg-rose-50/40 text-slate-400' : baseBg}`}
+                  >
+                    <td className="pl-3 pr-1 py-3 text-slate-400 text-xs select-none">{isOpen ? '▾' : '▸'}</td>
+                    <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{fmtTimeOfDay(r.ocpp_start_time) || <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{fmtTimeOfDay(r.ocpp_end_time) || <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(r.vrn) || <NA />}</td>
+                    <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
+                      {display([r.make, r.model].filter(Boolean).join(' ')) || <NA />}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap align-top">
+                      <MatchQualityCell confidence={r.confidence} reasons={r.match_reasons} />
+                    </td>
+                    <td className="px-4 py-3 text-slate-600 text-xs">{r.connector_id ?? <NA text="—" />}</td>
+                    <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{fmtDurationSecs(r.duration_seconds) || <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">{r.client_kwh != null ? r.client_kwh.toFixed(3) : <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{r.meter_kwh != null ? r.meter_kwh.toFixed(3) : <NA text="—" />}</td>
+                    <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
+                      {hasLoss ? (
+                        <span className={(r.suspicious ? 'font-bold ' : 'font-semibold ') + (loss > 0.1 ? 'text-rose-600' : loss < -0.1 ? 'text-amber-600' : 'text-slate-700')}>
+                          {loss > 0 ? '+' : ''}{loss.toFixed(3)}
+                        </span>
+                      ) : <NA text="—" />}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap align-top"><FlagBadges r={r} /></td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={ENERGY_COLS.length + 1} className="p-0">
+                        <MatchDetail r={r} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>

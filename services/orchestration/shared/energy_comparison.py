@@ -95,6 +95,15 @@ class ExcelRow:
     charge_point: str | None = None
     stop_reason: str | None = None   # Remote / EVDisconnected / ...
     closed_by: str | None = None     # balanceCutOff / mobile / CP / ...
+    # Timestamp sanity. Some client exports ship corrupted OCPP times
+    # (end < start, or a wall-clock span that wildly disagrees with the
+    # reported duration — observed on the 2026-06-09 export). Such rows must
+    # NOT contribute time/duration signals to the matcher: feeding them in
+    # makes the conflict penalties veto otherwise-correct VRN matches. We flag
+    # them here, keep them visible on the dashboard, and exclude them from the
+    # loss totals.
+    time_valid: bool = True
+    time_invalid_reason: str | None = None
     # Grouping bookkeeping. merged_count==1 means a raw OCPP row; >1 means
     # group_ocpp_transactions collapsed several adjacent rows into this one.
     merged_count: int = 1
@@ -221,6 +230,38 @@ def parse_ocpp_datetime(v: Any) -> datetime | None:
     return None
 
 
+# How far the OCPP wall-clock span (end - start) may drift from the reported
+# Session Duration before we treat the timestamps as corrupted. Real exports
+# agree to the second; the 2026-06-09 export was off by hours.
+TIME_SANITY_ABS_SECONDS = 30 * 60   # 30 min absolute slack
+TIME_SANITY_RATIO       = 3.0       # ...AND > 3× the reported duration
+
+
+def validate_ocpp_times(
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+    duration_seconds: int | None,
+) -> tuple[bool, str | None]:
+    """Sanity-check a row's OCPP Start/End timestamps.
+
+    Returns (time_valid, reason). A row is invalid when end precedes start, or
+    when the wall-clock span disagrees with the reported Session Duration by
+    more than TIME_SANITY_ABS_SECONDS AND a TIME_SANITY_RATIO factor. Rows with
+    one timestamp missing are left valid (the matcher already degrades to the
+    signals it has); only contradictory pairs are flagged.
+    """
+    if start_dt is None or end_dt is None:
+        return True, None
+    span = (end_dt - start_dt).total_seconds()
+    if span < 0:
+        return False, "OCPP end time precedes start time"
+    if duration_seconds is not None and duration_seconds > 0:
+        diff = abs(span - duration_seconds)
+        if diff > TIME_SANITY_ABS_SECONDS and diff > TIME_SANITY_RATIO * duration_seconds:
+            return False, "OCPP start/end span disagrees with reported duration"
+    return True, None
+
+
 def _to_ist_naive(dt: datetime | None) -> datetime | None:
     """Normalise a (possibly tz-aware UTC) datetime to a naive IST datetime."""
     if dt is None:
@@ -303,6 +344,7 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
         duration_s = parse_duration(get("_duration"))
         start_dt = parse_ocpp_datetime(get("_start"))
         end_dt = parse_ocpp_datetime(get("_end"))
+        time_valid, time_invalid_reason = validate_ocpp_times(start_dt, end_dt, duration_s)
         connector_raw = get("_connector")
         try:
             connector_id = int(connector_raw) if connector_raw not in (None, "") else None
@@ -342,6 +384,8 @@ def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
             charge_point=_str_or_none(get("_charge_point")),
             stop_reason=_str_or_none(get("_stop_reason")),
             closed_by=_str_or_none(get("_closed_by")),
+            time_valid=time_valid,
+            time_invalid_reason=time_invalid_reason,
         ))
     return parsed
 
@@ -452,12 +496,23 @@ def _merge_group(group: list[ExcelRow]) -> ExcelRow:
 
     tx_ids = [r.transaction_id for r in group if r.transaction_id]
 
+    merged_start = min((r.start_dt for r in group if r.start_dt is not None), default=None)
+    merged_end   = max((r.end_dt   for r in group if r.end_dt   is not None), default=None)
+    # A merged row's duration is the SUM of its fragments' charging time, while
+    # its wall-clock span is first-start → last-end — these legitimately differ
+    # (that's why _score_pair uses the span). So don't re-run the duration-vs-
+    # span check here; the merged row is valid as long as every fragment was
+    # valid and the overall window isn't reversed.
+    merged_valid = all(r.time_valid for r in group) and (
+        merged_start is None or merged_end is None or merged_end >= merged_start
+    )
+
     return ExcelRow(
         row_index=first.row_index,
         transaction_id=first.transaction_id,     # canonical = first
         session_id_ocpp=first.session_id_ocpp,
-        start_dt=min((r.start_dt for r in group if r.start_dt is not None), default=None),
-        end_dt  =max((r.end_dt   for r in group if r.end_dt   is not None), default=None),
+        start_dt=merged_start,
+        end_dt  =merged_end,
         duration_seconds=total_duration,
         connector_id=first.connector_id,
         vrn_raw=vrn_raw_mode,
@@ -476,6 +531,8 @@ def _merge_group(group: list[ExcelRow]) -> ExcelRow:
         merged_count=len(group),
         merged_transaction_ids=tx_ids,
         vrn_variants=vrn_variants,
+        time_valid=merged_valid,
+        time_invalid_reason=None if merged_valid else "merged window has invalid OCPP times",
     )
 
 
@@ -596,9 +653,15 @@ def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
     # transactions (e.g. 1h 55m for the Volvo's 3 sub-sessions) while the
     # wall-clock span is start-of-first to end-of-last (4h 36m) — which is
     # what lines up with CCTV's plug_time → plug_out_time window.
+    # Skip ALL time/duration scoring when the OCPP timestamps are known-bad
+    # (end < start, or span contradicts the reported duration). Otherwise the
+    # corrupted span produces a duration-conflict (-3) AND a time-conflict (-3)
+    # that wipe out an otherwise-correct VRN(+3)+model(+2) match — exactly what
+    # made KA03AK3275 read "No match" on the 2026-06-09 export. With times
+    # dropped, such rows can only match via exact VRN (see _has_strong_signal).
     cctv_dur = cctv.duration_seconds
     excel_wall_dur = None
-    if excel.start_dt is not None and excel.end_dt is not None:
+    if excel.time_valid and excel.start_dt is not None and excel.end_dt is not None:
         excel_wall_dur = int((excel.end_dt - excel.start_dt).total_seconds())
     if excel_wall_dur is not None and cctv_dur is not None:
         diff = abs(excel_wall_dur - cctv_dur)
@@ -614,7 +677,8 @@ def _score_pair(excel: ExcelRow, cctv: CctvSession) -> tuple[int, list[str]]:
 
     # Wall-clock proximity: OCPP start vs CCTV plug_time (fallback in_time).
     # Strongest single non-VRN signal — same gun at the same minute is decisive.
-    excel_start = _to_ist_naive(excel.start_dt)
+    # Suppressed for invalid-time rows (see duration block above).
+    excel_start = _to_ist_naive(excel.start_dt) if excel.time_valid else None
     cctv_anchor = _to_ist_naive(cctv.plug_time) or _to_ist_naive(cctv.in_time)
     if excel_start is not None and cctv_anchor is not None:
         time_diff = abs(int((excel_start - cctv_anchor).total_seconds()))
@@ -714,16 +778,70 @@ def match_excel_to_cctv(excel_rows: list[ExcelRow], cctv_sessions: list[CctvSess
     return results
 
 
-def result_to_dict(r: MatchResult) -> dict[str, Any]:
-    """Serializable shape for the dashboard."""
+def is_balance_cutoff(ex: ExcelRow) -> bool:
+    """True when this (possibly merged) OCPP row is a balance-cutoff scenario:
+    the charge stopped on a balance cutoff, or several fragments were merged
+    (a balanceCutOff-and-resume cycle is the main reason merging happens)."""
+    if ex.merged_count and ex.merged_count > 1:
+        return True
+    return (ex.closed_by or "").strip().lower() == "balancecutoff"
+
+
+def compute_overlaps(excel_rows: list[ExcelRow]) -> dict[int, dict[str, Any]]:
+    """Per-row parallel-charging detection, keyed by ExcelRow.row_index.
+
+    Two rows overlap when they sit on OPPOSITE connectors and their (valid)
+    OCPP windows intersect (st_j < et_i and st_i < et_j). The site has a single
+    shared meter split equally across both guns, so an overlap is exactly the
+    condition under which the equal split mis-attributes energy between the two
+    cars — which is what the dashboard surfaces to explain a suspicious loss.
+
+    Returns { row_index: {"is_parallel": bool, "partners": [ {vrn, connector,
+    start, end} ]} }. Rows with invalid/missing times never register an
+    overlap (we can't trust their window).
+    """
+    intervals = []  # (row_index, start, end, connector, vrn)
+    for ex in excel_rows:
+        if not ex.time_valid or ex.start_dt is None or ex.end_dt is None or ex.connector_id is None:
+            continue
+        intervals.append((ex.row_index, ex.start_dt, ex.end_dt, ex.connector_id, ex.vrn_raw))
+
+    out: dict[int, dict[str, Any]] = {
+        ex.row_index: {"is_parallel": False, "partners": []} for ex in excel_rows
+    }
+    for i, (ri, st_i, et_i, c_i, _) in enumerate(intervals):
+        for j, (rj, st_j, et_j, c_j, vrn_j) in enumerate(intervals):
+            if i == j or c_j == c_i:
+                continue
+            if st_j < et_i and st_i < et_j:
+                out[ri]["is_parallel"] = True
+                out[ri]["partners"].append({
+                    "vrn": vrn_j,
+                    "connector": c_j,
+                    "start": st_j.strftime("%H:%M:%S"),
+                    "end": et_j.strftime("%H:%M:%S"),
+                })
+    return out
+
+
+def result_to_dict(r: MatchResult, overlap: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Serializable shape for the dashboard.
+
+    `overlap` is the per-row entry from compute_overlaps() (is_parallel +
+    partners); pass None when overlap analysis isn't available.
+    """
     ex = r.excel_row
     cc = r.cctv_session
+
+    def _fulltime(dt):
+        return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None
+
     return {
         "excel_row": ex.row_index,
         "transaction_id": ex.transaction_id,
         "ocpp_date": ex.date.strftime("%Y-%m-%d") if ex.date else None,
-        "ocpp_start_time": ex.start_dt.strftime("%Y-%m-%d %H:%M:%S") if ex.start_dt else None,
-        "ocpp_end_time":   ex.end_dt.strftime("%Y-%m-%d %H:%M:%S")   if ex.end_dt   else None,
+        "ocpp_start_time": _fulltime(ex.start_dt),
+        "ocpp_end_time":   _fulltime(ex.end_dt),
         "duration_seconds": ex.duration_seconds,
         "connector_id": ex.connector_id,
         "vrn": ex.vrn_raw,
@@ -737,6 +855,11 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "matched_slot_id": cc.slot_id if cc else None,
         "matched_car_number": cc.car_number if cc else None,
         "matched_car_model": cc.car_model if cc else None,
+        # CCTV-side timeline for the expandable OCPP-vs-camera comparison.
+        "matched_in_time":       _fulltime(cc.in_time)       if cc else None,
+        "matched_out_time":      _fulltime(cc.out_time)      if cc else None,
+        "matched_plug_time":     _fulltime(cc.plug_time)     if cc else None,
+        "matched_plug_out_time": _fulltime(cc.plug_out_time) if cc else None,
         "match_score": r.score,
         "match_reasons": r.reasons,
         "confidence": r.confidence,
@@ -751,4 +874,10 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "stop_reason": ex.stop_reason,
         "closed_by": ex.closed_by,
         "id_tag": ex.id_tag,
+        # Data-quality + scenario flags for the dashboard.
+        "time_valid": ex.time_valid,
+        "time_invalid_reason": ex.time_invalid_reason,
+        "balance_cutoff": is_balance_cutoff(ex),
+        "is_parallel": bool(overlap and overlap.get("is_parallel")),
+        "overlap_partners": (overlap or {}).get("partners", []),
     }

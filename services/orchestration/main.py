@@ -1896,6 +1896,7 @@ def dashboard_energy_comparison_upload(
         group_ocpp_transactions,
         match_excel_to_cctv,
         result_to_dict,
+        compute_overlaps,
         CctvSession,
     )
     try:
@@ -2007,12 +2008,51 @@ def dashboard_energy_comparison_upload(
         db.close()
 
     results = match_excel_to_cctv(excel_rows, cctv_sessions)
-    payload = [result_to_dict(r) for r in results]
+
+    # Parallel-charging detection over the OCPP windows (opposite connector +
+    # time overlap), keyed by row_index, so each result row can be flagged.
+    overlaps = compute_overlaps(excel_rows)
+
+    # Per-row "suspicious loss" classification. A positive loss means we
+    # UNDER-counted (client billed more than our meter window captured); a
+    # large negative loss means we OVER-counted (the shared meter was double-
+    # credited). Both warrant a flag, and we attribute the most specific cause
+    # available so the operator/PM can explain it to the client.
+    POS_SUSPICIOUS_KWH = 1.0    # under-count beyond window jitter
+    NEG_SUSPICIOUS_KWH = -5.0   # over-count worth investigating
+    NEG_SUSPICIOUS_PCT = -40.0
+
+    payload = []
+    for r in results:
+        d = result_to_dict(r, overlaps.get(r.excel_row.row_index))
+
+        suspicious = False
+        reason = None
+        loss = d.get("loss_kwh")
+        loss_pct = d.get("loss_pct")
+        if loss is not None:
+            if loss > POS_SUSPICIOUS_KWH:
+                suspicious = True
+            elif loss < NEG_SUSPICIOUS_KWH or (loss_pct is not None and loss_pct < NEG_SUSPICIOUS_PCT):
+                suspicious = True
+        if suspicious:
+            if d.get("is_parallel"):
+                reason = "parallel-charging split"
+            elif d.get("balance_cutoff"):
+                reason = "balance-cutoff split"
+            elif not d.get("time_valid", True):
+                reason = "invalid client time"
+            else:
+                reason = "unexplained"
+        d["suspicious"] = suspicious
+        d["suspicious_reason"] = reason
+        payload.append(d)
 
     matched = sum(1 for r in results if r.cctv_session is not None)
+    # Invalid-time rows are mentioned but excluded from the loss total.
     total_loss = sum(
         r.loss_kwh for r in results
-        if r.loss_kwh is not None
+        if r.loss_kwh is not None and r.excel_row.time_valid
     )
     total_client_kwh = sum(
         r.excel_row.units_kwh for r in results
@@ -2028,6 +2068,10 @@ def dashboard_energy_comparison_upload(
             "total_client_kwh": round(total_client_kwh, 3),
             "total_loss_kwh": round(total_loss, 3),
             "cctv_pool_size": len(cctv_sessions),
+            "parallel_count":       sum(1 for d in payload if d.get("is_parallel")),
+            "balance_cutoff_count": sum(1 for d in payload if d.get("balance_cutoff")),
+            "invalid_count":        sum(1 for d in payload if not d.get("time_valid", True)),
+            "suspicious_count":     sum(1 for d in payload if d.get("suspicious")),
         },
     }
 
