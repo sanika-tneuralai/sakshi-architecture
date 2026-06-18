@@ -595,7 +595,7 @@ function Badge({ text, cls, title }) {
 }
 
 /* Per-row scenario flags: invalid client time, parallel charging,
-   balance-cutoff / merged, and a suspicious-loss marker. */
+   balance-cutoff / merged, and a deviation marker. */
 function FlagBadges({ r }) {
   const flags = [];
   if (r.time_valid === false) {
@@ -614,9 +614,9 @@ function FlagBadges({ r }) {
         ? `Merged from ${r.merged_count} OCPP transactions (balance-cutoff & resume)`
         : 'Charge stopped on balance cutoff'} />);
   }
-  if (r.suspicious) {
-    flags.push(<Badge key="sus" text="Suspicious" cls="bg-amber-100 text-amber-700"
-      title={`Suspicious loss — ${r.suspicious_reason || 'unexplained'}`} />);
+  if (r.deviation) {
+    flags.push(<Badge key="dev" text="Deviation" cls="bg-amber-100 text-amber-700"
+      title={`Deviation — ${r.deviation_reason || 'unexplained'}`} />);
   }
   if (!flags.length) return <span className="text-slate-300">—</span>;
   return <div className="flex flex-wrap gap-1">{flags}</div>;
@@ -682,9 +682,9 @@ function MatchDetail({ r }) {
           )}
         </div>
       </div>
-      {r.suspicious && (
+      {r.deviation && (
         <div className="mt-3 text-amber-700 text-xs font-semibold">
-          Suspicious loss ({r.loss_kwh > 0 ? 'we under-counted vs the client meter' : 'we over-counted vs the client meter'}) — likely cause: {r.suspicious_reason}.
+          Deviation ({r.loss_kwh > 0 ? 'we under-counted vs the client meter' : 'we over-counted vs the client meter'}) — likely cause: {r.deviation_reason}.
         </div>
       )}
     </div>
@@ -774,7 +774,7 @@ function EnergyLossTable({ results, summary }) {
       if (r.is_parallel) par += 1;
       if (r.balance_cutoff) bc += 1;
       if (r.time_valid === false) inv += 1;
-      if (r.suspicious) sus += 1;
+      if (r.deviation) sus += 1;
     }
     return {
       ...summary,
@@ -786,7 +786,7 @@ function EnergyLossTable({ results, summary }) {
       parallel_count: par,
       balance_cutoff_count: bc,
       invalid_count: inv,
-      suspicious_count: sus,
+      deviation_count: sus,
     };
   }, [filteredResults, summary]);
 
@@ -833,8 +833,8 @@ function EnergyLossTable({ results, summary }) {
           {visibleSummary.invalid_count > 0 && (
             <div><span className="font-semibold text-rose-600">{visibleSummary.invalid_count}</span> invalid</div>
           )}
-          {visibleSummary.suspicious_count > 0 && (
-            <div><span className="font-semibold text-amber-700">{visibleSummary.suspicious_count}</span> suspicious</div>
+          {visibleSummary.deviation_count > 0 && (
+            <div><span className="font-semibold text-amber-700">{visibleSummary.deviation_count}</span> deviation</div>
           )}
         </div>
       )}
@@ -885,7 +885,7 @@ function EnergyLossTable({ results, summary }) {
                     <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{r.meter_kwh != null ? r.meter_kwh.toFixed(3) : <NA text="—" />}</td>
                     <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
                       {hasLoss ? (
-                        <span className={(r.suspicious ? 'font-bold ' : 'font-semibold ') + (loss > 0.1 ? 'text-rose-600' : loss < -0.1 ? 'text-amber-600' : 'text-slate-700')}>
+                        <span className={(r.deviation ? 'font-bold ' : 'font-semibold ') + (loss > 0.1 ? 'text-rose-600' : loss < -0.1 ? 'text-amber-600' : 'text-slate-700')}>
                           {loss > 0 ? '+' : ''}{loss.toFixed(3)}
                         </span>
                       ) : <NA text="—" />}
