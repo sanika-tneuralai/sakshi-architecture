@@ -386,15 +386,18 @@ async def health_check():
     - Current mode
     """
     camera_list = camera_manager.list_cameras()
-    
+    cameras = camera_list['cameras']
+    multi = [c for c in cameras if c.get('backend') == 'deepstream-multi']
+    single = [c for c in cameras if c.get('backend') != 'deepstream-multi']
+
     logger.info("✓ health_check completed")
     return {
         "status": "healthy",
         "service": "camera-management-api",
-        "mode": camera_list['mode'],
-        "active_cameras": camera_list['total_count'],
-        "single_stream": len(camera_list['single_stream_cameras']),
-        "multi_stream": len(camera_list['multi_stream_cameras'])
+        "mode": "multi" if multi else ("single" if single else "idle"),
+        "active_cameras": camera_list['total'],
+        "single_stream": len(single),
+        "multi_stream": len(multi)
     }
 
 
