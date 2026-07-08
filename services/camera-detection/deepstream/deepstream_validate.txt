@@ -40,10 +40,12 @@ cudadec-memtype=0
 [sink0]
 enable=1
 # 3 = encode to file (headless-safe). container=1 mp4, codec=1 H264.
+# enc-type=0 = hardware NVENC (T4). Do NOT use enc-type=1 (software) — the
+# DeepStream container lacks libavcodec/x264, so the sw encoder fails to create.
 type=3
 container=1
 codec=1
-enc-type=1
+enc-type=0
 sync=0
 bitrate=4000000
 output-file=/tmp/goec_validate_out.mp4
