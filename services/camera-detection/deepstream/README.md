@@ -118,19 +118,19 @@ first time deepstream-app runs (Step 4). It takes a few minutes; subsequent runs
 ```bash
 cd services/camera-detection/deepstream/DeepStream-Yolo
 
-# point the validator at a real absolute path to a test clip
-ABS=$(cd ../../.. && pwd)   # repo root
-sed -i "s#file:///REPLACE/WITH/ABS/PATH#file://$ABS#" ../deepstream_validate.txt
+# set the source clip and land the annotated output on the host mount (easy to view).
+# Paths are the in-container absolute paths (repo root is mounted at /workspace).
+sed -i 's#^uri=.*#uri=file:///workspace/services/camera-detection/test_videos/gun_front.mp4#' ../deepstream_validate.txt
+sed -i 's#^output-file=.*#output-file=/workspace/services/camera-detection/deepstream/goec_validate_out.mp4#' ../deepstream_validate.txt
 
 deepstream-app -c ../deepstream_validate.txt
 ```
 
-Then inspect the annotated output:
+Then inspect the annotated output (it lands on the host at
+`services/camera-detection/deepstream/goec_validate_out.mp4`, gitignored):
 
 ```bash
-ls -lh /tmp/goec_validate_out.mp4
-# copy it back and eyeball it, or dump a frame:
-ffmpeg -y -i /tmp/goec_validate_out.mp4 -vf "select=eq(n\,50)" -vframes 1 /tmp/frame50.jpg
+ffmpeg -y -i ../goec_validate_out.mp4 -vf "select=eq(n\,120)" -vframes 1 ../frame.jpg
 ```
 
 ### ✅ Pass criteria (all must hold)
