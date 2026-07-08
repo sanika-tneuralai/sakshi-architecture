@@ -1,0 +1,7 @@
+# Cloned upstream + generated artifacts — never commit these
+DeepStream-Yolo/
+*.onnx
+*.engine
+*.so
+*.wts
+*_out.mp4
