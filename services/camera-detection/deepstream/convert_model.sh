@@ -87,9 +87,11 @@ fi
 # don't disturb the service env. ultralytics must be >= the version that trained
 # the checkpoint (8.4.60) to load it cleanly.
 echo "[2/4] Exporting ONNX ..."
-if ! python3 -c "import ultralytics, onnx, onnxslim" 2>/dev/null; then
-  echo "  installing export deps (ultralytics, onnx, onnxslim, onnxruntime) ..."
-  pip3 install --quiet "ultralytics>=8.4.60" onnx onnxslim onnxruntime
+# onnxscript is required by recent torch.onnx.export (the dynamo exporter path
+# imports it); missing it fails the export late with ModuleNotFoundError.
+if ! python3 -c "import ultralytics, onnx, onnxslim, onnxscript" 2>/dev/null; then
+  echo "  installing export deps (ultralytics, onnx, onnxslim, onnxscript, onnxruntime) ..."
+  pip3 install --quiet "ultralytics>=8.4.60" onnx onnxslim onnxscript onnxruntime
 fi
 cp -f "$MODEL_PT" "$WORK_DIR/"
 PT_NAME="$(basename "$MODEL_PT")"
