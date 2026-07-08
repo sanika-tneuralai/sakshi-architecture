@@ -72,8 +72,12 @@ nvbuf-memory-type=0
 [primary-gie]
 enable=1
 gpu-id=0
-# relative to CWD (the DeepStream-Yolo work dir), staged there by convert_model.sh
-config-file=config_infer_goec.txt
+# nvinfer resolves a config's relative paths (onnx-file, custom-lib-path, ...)
+# relative to the CONFIG FILE's own directory — NOT the CWD. So point at the copy
+# staged inside DeepStream-Yolo/ (by convert_model.sh), where the ONNX, labels and
+# parser .so all live, so those relative paths resolve. This path is itself
+# resolved relative to THIS file's dir (deepstream/).
+config-file=DeepStream-Yolo/config_infer_goec.txt
 batch-size=1
 gie-unique-id=1
 nvbuf-memory-type=0

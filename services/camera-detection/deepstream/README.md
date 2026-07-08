@@ -153,7 +153,7 @@ ffmpeg -y -i ../goec_validate_out.mp4 -vf "select=eq(n\,120)" -vframes 1 ../fram
 |---|---|
 | Parser `make` fails | `CUDA_VER` doesn't match the install. Set it to the DS release's CUDA. |
 | Engine build fails on `Unsupported ONNX opset` | Lower `--opset` in `convert_model.sh` (try 16→13) to match TRT 8.6. |
-| deepstream-app: cannot load custom lib | `custom-lib-path` is relative to CWD — run from the `DeepStream-Yolo/` dir. |
+| deepstream-app: cannot load custom lib / ONNX not found | nvinfer resolves a config's relative paths **relative to the config file's own dir**, not CWD. `deepstream_validate.txt` points `config-file` at `DeepStream-Yolo/config_infer_goec.txt` so those paths resolve where the artifacts are staged. |
 | Boxes appear but labels are wrong | `labels.txt` order. Must be motorcycle/car/gun. |
 | No boxes at all | Threshold too high (check `pre-cluster-threshold`), or model-color-format/net-scale mismatch. Confirm the `.pt` actually detects on the same clip first. |
 | `export_yoloV8.py` errors loading the checkpoint | ultralytics too old; `pip install "ultralytics>=8.4.60"`. |
