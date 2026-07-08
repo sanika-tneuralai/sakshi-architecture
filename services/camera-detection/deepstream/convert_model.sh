@@ -97,12 +97,19 @@ cp -f "$MODEL_PT" "$WORK_DIR/"
 PT_NAME="$(basename "$MODEL_PT")"
 pushd "$WORK_DIR" >/dev/null
 # --dynamic => one ONNX serves any batch size; nvinfer picks batch from the config.
-python3 utils/export_yoloV8.py -w "$PT_NAME" -s "$IMGSZ" --opset 16 --simplify --dynamic
+# opset 18: recent torch.onnx can't down-convert below 18, and TensorRT 8.6
+# (DeepStream 6.4) supports up to opset 19, so 18 avoids a noisy failed
+# down-conversion while staying TRT-compatible.
+python3 utils/export_yoloV8.py -w "$PT_NAME" -s "$IMGSZ" --opset 18 --simplify --dynamic
 popd >/dev/null
 
-# export_yoloV8.py writes "<stem>.onnx" and a labels.txt. Normalise the name.
+# export_yoloV8.py writes "<stem>.onnx" (== goec_N_v1.onnx here). Normalise the
+# name only when the export produced something different — copying a file onto
+# itself errors under `set -e`.
 ONNX_SRC="$(ls -t "$WORK_DIR"/*.onnx | head -1)"
-cp -f "$ONNX_SRC" "$WORK_DIR/goec_N_v1.onnx"
+if [ ! "$ONNX_SRC" -ef "$WORK_DIR/goec_N_v1.onnx" ]; then
+  cp -f "$ONNX_SRC" "$WORK_DIR/goec_N_v1.onnx"
+fi
 echo "  ONNX -> $WORK_DIR/goec_N_v1.onnx"
 
 # Use OUR verified labels (do not trust the auto-generated order blindly).
