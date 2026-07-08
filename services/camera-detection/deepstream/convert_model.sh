@@ -94,8 +94,15 @@ echo "[2/4] Exporting ONNX ..."
 # TorchScript exporter in torch<2.6 produces the correct, TRT-parseable graph.
 # onnxscript is only needed by the dynamo path but harmless to keep installed.
 if ! python3 -c "import torch,ultralytics,onnx,onnxslim; assert tuple(map(int,torch.__version__.split('.')[:2]))<(2,6)" 2>/dev/null; then
-  echo "  installing export deps (torch<2.6 legacy ONNX exporter, ultralytics, onnx, onnxslim) ..."
-  pip3 install --quiet "torch==2.5.1" "torchvision==0.20.1" "ultralytics>=8.4.60" onnx onnxslim onnxruntime
+  echo "  installing export deps (CPU torch<2.6 legacy ONNX exporter, ultralytics, onnx, onnxslim) ..."
+  # CPU torch build on purpose: export only traces on CPU, and the CUDA torch
+  # stack (torch + nvidia-* wheels) is ~7 GB and has exhausted the disk here.
+  # The +cpu wheel is ~200 MB. Remove any pre-existing heavy CUDA torch first.
+  pip3 uninstall -y torch torchvision triton >/dev/null 2>&1 || true
+  pip3 freeze 2>/dev/null | grep -i '^nvidia-' | xargs -r pip3 uninstall -y >/dev/null 2>&1 || true
+  pip3 cache purge >/dev/null 2>&1 || true
+  pip3 install --quiet "torch==2.5.1+cpu" "torchvision==0.20.1+cpu" --extra-index-url https://download.pytorch.org/whl/cpu
+  pip3 install --quiet "ultralytics>=8.4.60" onnx onnxslim onnxruntime
 fi
 cp -f "$MODEL_PT" "$WORK_DIR/"
 PT_NAME="$(basename "$MODEL_PT")"
