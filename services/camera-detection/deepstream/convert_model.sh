@@ -27,8 +27,40 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL_PT="${1:-$HERE/../models/goec_N_v1.pt}"
 IMGSZ="${2:-640}"
-DS_PATH="${DS_PATH:-/opt/nvidia/deepstream/deepstream-6.4}"
-CUDA_VER="${CUDA_VER:-12.2}"
+# --- Auto-detect DeepStream install (override with DS_PATH=...) ---------------
+# Order: explicit env -> the 'deepstream' symlink -> highest deepstream-* dir.
+if [ -z "${DS_PATH:-}" ]; then
+  if [ -d /opt/nvidia/deepstream/deepstream ]; then
+    DS_PATH="$(readlink -f /opt/nvidia/deepstream/deepstream)"
+  else
+    DS_PATH="$(ls -d /opt/nvidia/deepstream/deepstream-* 2>/dev/null | sort -V | tail -1 || true)"
+  fi
+fi
+
+if [ -z "${DS_PATH:-}" ] || [ ! -d "$DS_PATH" ]; then
+  echo "ERROR: DeepStream SDK not found under /opt/nvidia/deepstream/."
+  echo "  Found: $(ls -d /opt/nvidia/deepstream/* 2>/dev/null | tr '\n' ' ' || echo '(nothing)')"
+  echo "  If DeepStream only exists inside a Docker container, run this script IN that"
+  echo "  container. Otherwise install the SDK or set DS_PATH=/path/to/deepstream-X.Y."
+  exit 1
+fi
+
+# --- Auto-detect CUDA_VER (override with CUDA_VER=...) ------------------------
+# The parser Makefile needs the CUDA major.minor that matches this DeepStream build.
+if [ -z "${CUDA_VER:-}" ]; then
+  if [ -d /usr/local/cuda ]; then
+    CUDA_VER="$(readlink -f /usr/local/cuda | sed -n 's/.*cuda-\([0-9]\+\.[0-9]\+\).*/\1/p')"
+  fi
+  # Fall back to the CUDA that ships with the detected DeepStream release.
+  if [ -z "${CUDA_VER:-}" ]; then
+    case "$(basename "$DS_PATH")" in
+      *7.1*) CUDA_VER=12.6 ;;
+      *7.0*|*6.4*) CUDA_VER=12.2 ;;
+      *6.3*|*6.2*|*6.1*) CUDA_VER=11.8 ;;
+      *) CUDA_VER=12.2 ;;
+    esac
+  fi
+fi
 
 REPO_DIR="$HERE/DeepStream-Yolo"
 WORK_DIR="$REPO_DIR"   # export + parser + config all live here for validation
@@ -36,12 +68,11 @@ WORK_DIR="$REPO_DIR"   # export + parser + config all live here for validation
 echo "=== Phase 1a: goec_N_v1 -> DeepStream ==="
 echo "  model   : $MODEL_PT"
 echo "  imgsz   : $IMGSZ"
-echo "  DS_PATH : $DS_PATH"
-echo "  CUDA_VER: $CUDA_VER"
+echo "  DS_PATH : $DS_PATH  (detected)"
+echo "  CUDA_VER: $CUDA_VER  (detected — override with CUDA_VER=... if wrong)"
 echo
 
 [ -f "$MODEL_PT" ] || { echo "ERROR: model not found: $MODEL_PT"; exit 1; }
-[ -d "$DS_PATH" ]  || { echo "ERROR: DeepStream not found at $DS_PATH (run on the T4 server)"; exit 1; }
 
 # --- 1. Clone DeepStream-Yolo -------------------------------------------------
 if [ ! -d "$REPO_DIR" ]; then
