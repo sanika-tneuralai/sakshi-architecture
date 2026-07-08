@@ -87,11 +87,15 @@ fi
 # don't disturb the service env. ultralytics must be >= the version that trained
 # the checkpoint (8.4.60) to load it cleanly.
 echo "[2/4] Exporting ONNX ..."
-# onnxscript is required by recent torch.onnx.export (the dynamo exporter path
-# imports it); missing it fails the export late with ModuleNotFoundError.
-if ! python3 -c "import ultralytics, onnx, onnxslim, onnxscript" 2>/dev/null; then
-  echo "  installing export deps (ultralytics, onnx, onnxslim, onnxscript, onnxruntime) ..."
-  pip3 install --quiet "ultralytics>=8.4.60" onnx onnxslim onnxscript onnxruntime
+# torch is pinned < 2.6 ON PURPOSE. Newer torch defaults to the dynamo ONNX
+# exporter, which mis-traces the DeepStream-Yolo output wrapper and produces a
+# graph TensorRT 8.6 rejects at parse time ("node_cat: all concat input tensors
+# must have the same dimensions ... [-1,8400,4] vs [1,1,1]"). The legacy
+# TorchScript exporter in torch<2.6 produces the correct, TRT-parseable graph.
+# onnxscript is only needed by the dynamo path but harmless to keep installed.
+if ! python3 -c "import torch,ultralytics,onnx,onnxslim; assert tuple(map(int,torch.__version__.split('.')[:2]))<(2,6)" 2>/dev/null; then
+  echo "  installing export deps (torch<2.6 legacy ONNX exporter, ultralytics, onnx, onnxslim) ..."
+  pip3 install --quiet "torch==2.5.1" "torchvision==0.20.1" "ultralytics>=8.4.60" onnx onnxslim onnxruntime
 fi
 cp -f "$MODEL_PT" "$WORK_DIR/"
 PT_NAME="$(basename "$MODEL_PT")"
