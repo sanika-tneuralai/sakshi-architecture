@@ -14,19 +14,30 @@
 set -euo pipefail
 
 IMAGE="${DS_IMAGE:-nvcr.io/nvidia/deepstream:6.4-gc-triton-devel}"
+NAME="${DS_CONTAINER:-goec-ds}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"   # deepstream -> camera-detection -> services -> repo root
 
 echo "Image     : $IMAGE"
+echo "Container : $NAME (persistent — pip installs survive exit)"
 echo "Mounting  : $REPO_ROOT  ->  /workspace"
 echo "Workdir   : /workspace/services/camera-detection/deepstream"
 echo
 
-# --gpus all       : expose the T4 (needs nvidia-container-toolkit)
-# --network host   : simplest for pulling git/pip inside; drop if you lock networking
-# -v ... :/workspace: repo is editable from host + container
-docker run --gpus all -it --rm \
-  --network host \
-  -v "$REPO_ROOT":/workspace \
-  -w /workspace/services/camera-detection/deepstream \
-  "$IMAGE" bash
+# NOTE: deliberately NOT using --rm. A --rm container discards its writable layer
+# on exit, so pip installs (torch/ultralytics) would vanish every session. We keep
+# a persistent named container instead; reuse it on re-entry.
+# To wipe and start clean:  docker rm -f goec-ds
+if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
+  echo "Reusing existing container '$NAME'."
+  docker start -ai "$NAME"
+else
+  # --gpus all       : expose the T4 (needs nvidia-container-toolkit)
+  # --network host   : simplest for pulling git/pip inside
+  # -v ... :/workspace: repo editable from host + container
+  docker run --gpus all -it --name "$NAME" \
+    --network host \
+    -v "$REPO_ROOT":/workspace \
+    -w /workspace/services/camera-detection/deepstream \
+    "$IMAGE" bash
+fi
