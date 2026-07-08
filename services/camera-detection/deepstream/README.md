@@ -31,7 +31,45 @@ Generated artifacts (`DeepStream-Yolo/`, `*.onnx`, `*.engine`, `*.so`) are gitig
 
 ---
 
-## Step 0 — verify the server environment
+## Step 0a — provision the environment (Docker, first time only)
+
+DeepStream is **not** installed on the host; it runs in the NVIDIA container (also the
+deployment target). One-time setup on the T4 server:
+
+- **Disk:** the devel image is ~20 GB and building the parser needs `nvcc` (devel-only), so
+  a `-base`/`-samples` image won't work. **Resize the EBS root volume to ~50 GB**:
+  ```bash
+  # AWS side:
+  aws ec2 modify-volume --volume-id vol-XXXX --size 50
+  # instance side:
+  lsblk && sudo growpart /dev/nvme0n1 1 && sudo resize2fs /dev/nvme0n1p1 && df -h /
+  ```
+- **Docker + NVIDIA toolkit:**
+  ```bash
+  sudo apt-get update && sudo apt-get install -y docker.io
+  sudo systemctl enable --now docker && sudo usermod -aG docker $USER   # re-login after
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+  ```
+
+## Step 0b — enter the DeepStream container
+
+Everything below (Steps 0–4) runs **inside** the container. Launch it with the repo mounted:
+
+```bash
+cd services/camera-detection/deepstream
+chmod +x run_in_container.sh
+./run_in_container.sh          # pulls nvcr.io/nvidia/deepstream:6.4-gc-triton-devel (~20 GB) on first run
+# ... now inside the container, at /workspace/services/camera-detection/deepstream
+```
+
+Sanity-check the GPU is visible in the container: `nvidia-smi` should list the T4.
+
+## Step 0 — verify the DeepStream environment (inside the container)
 
 ```bash
 # DeepStream version (expect 6.4)
