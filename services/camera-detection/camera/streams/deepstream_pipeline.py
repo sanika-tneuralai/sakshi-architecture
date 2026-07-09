@@ -471,6 +471,7 @@ if __name__ == "__main__":
                     print(f"{cam}: <no frame yet>")
                 else:
                     labels = ", ".join(f"{d['class_name']}:{d['confidence']:.2f}" for d in st.detections) or "none"
-                    print(f"{cam}: frame#{st.frame_count} {st.frame.shape} dets=[{labels}] ts={st.ts.isoformat()}")
+                    shape = st.frame.shape if st.frame is not None else "meta-only"
+                    print(f"{cam}: frame#{st.frame_count} {shape} dets=[{labels}] ts={st.ts.isoformat()}")
     finally:
         pipe.stop()
