@@ -131,6 +131,7 @@ class CameraManager:
                 width=Config.get_deepstream_width(),
                 height=Config.get_deepstream_height(),
                 publish_fps=Config.get_deepstream_publish_fps(),
+                max_batch=Config.get_deepstream_max_batch(),
             )
             for cam_id, cfg in sources.items():
                 pipe.add_source(cam_id, cfg["rtsp_url"], cfg["fps"])

@@ -71,12 +71,16 @@ class DeepStreamPipeline:
         height: int = 1080,
         labels: Optional[List[str]] = None,
         publish_fps: int = 5,
+        max_batch: int = 8,
     ):
         self.config_path = config_path
         self.width = width
         self.height = height
         self.labels = labels or DEFAULT_LABELS
         self.publish_interval = 1.0 / max(1, publish_fps)
+        # nvinfer runs at a FIXED batch (engine built once); nvstreammux carries
+        # the actual current source count. So reconciles never rebuild the engine.
+        self.max_batch = max_batch
 
         self._sources: Dict[str, dict] = {}     # camera_id -> {index, uri, fps}
         self._by_index: Dict[int, str] = {}      # streammux source_id -> camera_id
@@ -150,7 +154,8 @@ class DeepStreamPipeline:
 
         pgie = self._make("nvinfer", "pgie")
         pgie.set_property("config-file-path", self.config_path)
-        pgie.set_property("batch-size", num)
+        # Fixed engine batch (>= num). Built once, reused across reconciles.
+        pgie.set_property("batch-size", self.max_batch)
         self._pipeline.add(pgie)
 
         conv = self._make("nvvideoconvert", "conv")
@@ -388,9 +393,11 @@ if __name__ == "__main__":
     ap.add_argument("--config", required=True)
     ap.add_argument("--uri", action="append", required=True, help="repeatable; one per camera")
     ap.add_argument("--seconds", type=int, default=20)
+    ap.add_argument("--max-batch", type=int, default=8,
+                    help="fixed nvinfer batch; first run builds the b<N> engine (~minutes)")
     args = ap.parse_args()
 
-    pipe = DeepStreamPipeline(config_path=args.config)
+    pipe = DeepStreamPipeline(config_path=args.config, max_batch=args.max_batch)
     for i, uri in enumerate(args.uri):
         pipe.add_source(f"cam{i}", uri, fps=5)
     pipe.start()

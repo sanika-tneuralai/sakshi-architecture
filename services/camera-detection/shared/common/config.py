@@ -240,6 +240,17 @@ class Config:
         return int(os.getenv("DEEPSTREAM_HEIGHT", "1080"))
 
     @staticmethod
+    def get_deepstream_max_batch() -> int:
+        """
+        Fixed nvinfer max batch size. The TensorRT engine is built ONCE for this
+        batch and reused for any camera count <= it, so adding/removing cameras
+        (which rebuilds the pipeline) never triggers a multi-minute engine
+        rebuild. Set >= the most streams one node will ever run. Override via
+        DEEPSTREAM_MAX_BATCH.
+        """
+        return int(os.getenv("DEEPSTREAM_MAX_BATCH", "8"))
+
+    @staticmethod
     def get_deepstream_publish_fps() -> int:
         """
         Rate at which the pipeline probe copies a fresh frame into the per-camera

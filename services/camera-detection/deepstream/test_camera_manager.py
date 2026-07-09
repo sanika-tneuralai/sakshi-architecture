@@ -45,19 +45,34 @@ async def main():
         await camera_manager.start_single_camera(RTSPConfig(camera_id=cam_id, rtsp_url=uri, fps=5))
         print(f"queued {cam_id}")
 
-    print("waiting for debounce + pipeline build (b2 engine is cached, ~seconds)...")
-    for _ in range(15):
-        time.sleep(2)
-        line = []
+    # Poll until both cameras report frames, up to the timeout. IMPORTANT: the
+    # FIRST run builds the fixed-batch (b8) TensorRT engine, which takes minutes
+    # — do NOT tear down before it finishes (that corrupts the build). Once b8 is
+    # cached, subsequent runs are ~seconds.
+    timeout_s = 420
+    print(f"waiting for debounce + engine build + frames (up to {timeout_s}s; first run builds b8)...")
+    deadline = time.monotonic() + timeout_s
+    ready = False
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        line, have = [], 0
         for cam_id, _uri in CAMS:
             view = camera_manager.get_camera_stream(cam_id)
             st = view.get_latest() if view else None
             if st is None:
                 line.append(f"{cam_id}=<none>")
             else:
+                have += 1
                 labels = ",".join(f"{d['class_name']}:{d['confidence']:.2f}" for d in st.detections) or "none"
                 line.append(f"{cam_id}=frame#{st.frame_count}[{labels}]")
         print("  ", "  ".join(line))
+        if have == len(CAMS):
+            ready = True
+            print("=> both cameras producing frames — cache populated OK")
+            break
+
+    if not ready:
+        print("=> timed out waiting for frames (engine still building? check logs above)")
 
     print("stopping all...")
     await camera_manager.stop_all()
