@@ -60,6 +60,8 @@ services:
       # it isn't rebuilt on every container recreate.
       - ds-yolo:/app/deepstream/DeepStream-Yolo
       - ./logs:/app/logs
+      # test clips for validation (harmless in prod; dir just may be empty)
+      - ./test_videos:/app/test_videos
 
 volumes:
   ds-yolo:
