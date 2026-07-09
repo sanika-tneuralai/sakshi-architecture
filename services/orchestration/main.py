@@ -58,6 +58,7 @@ from shared.database.persistence import (
     persist_alerts_from_results,
     close_stale_sessions,
     upsert_camera_rtsp,
+    upsert_camera_rois,
     list_registered_cameras,
 )
 from shared.database.connection import SessionLocal, ensure_schema
@@ -270,6 +271,8 @@ class CameraStats:
 class CameraConfig(BaseModel):
     """Configuration for a single camera pipeline"""
     camera_id: str = Field(..., description="Unique camera identifier")
+    name: Optional[str] = Field(default=None, description="Human-friendly camera name (dashboard)")
+    location: Optional[str] = Field(default=None, description="Physical location / site of this camera+slot")
     rtsp_url: Optional[str] = Field(
         default=None,
         description=(
@@ -1277,7 +1280,7 @@ async def start_camera_pipeline(camera_id: str, config: CameraConfig):
     # the camera with decode-detect out-of-band.
     rtsp_url = config.rtsp_url
     if rtsp_url:
-        upsert_camera_rtsp(camera_id, rtsp_url, config.fps)
+        upsert_camera_rtsp(camera_id, rtsp_url, config.fps, config.name, config.location)
     else:
         stored = next(
             (c for c in list_registered_cameras() if c["camera_id"] == camera_id),
@@ -1424,6 +1427,8 @@ async def list_cameras_for_management():
         p = live.get(cid, {})
         by_id[cid] = {
             "camera_id": cid,
+            "name": cam.get("name"),
+            "location": cam.get("location"),
             "rtsp_url": cam.get("rtsp_url"),
             "fps": cam.get("fps"),
             "running": bool(p.get("running", False)),
@@ -1448,6 +1453,98 @@ async def list_cameras_for_management():
 
     cameras = sorted(by_id.values(), key=lambda c: c["camera_id"])
     return {"cameras": cameras, "total": len(cameras)}
+
+
+class ROIItem(BaseModel):
+    roi_id: str = Field(..., description="Slot key, e.g. 'ROI_1' — becomes the slot_id")
+    points: List[List[float]] = Field(..., description="Polygon [[x,y], ...] in frame pixels")
+    label: Optional[str] = Field(default=None)
+
+
+class SetROIsRequest(BaseModel):
+    rois: List[ROIItem]
+
+
+@app.get("/camera/{camera_id}/rois", tags=["pipeline"], response_model=dict)
+async def get_camera_rois_endpoint(camera_id: str):
+    """Current parking-slot ROIs for a camera (non-logo), for the ROI editor."""
+    loop = asyncio.get_event_loop()
+    rois = await loop.run_in_executor(None, get_camera_rois, camera_id)
+    slots = [r for r in rois if r.get("roi_type") != "logo"]
+    return {"camera_id": camera_id, "rois": slots}
+
+
+@app.post("/camera/{camera_id}/rois", tags=["pipeline"], response_model=dict)
+async def set_camera_rois_endpoint(camera_id: str, req: SetROIsRequest):
+    """Save the drawn parking-slot polygon(s) for a camera (replaces existing
+    non-logo ROIs). Invalidates the config cache so the next pipeline tick picks
+    them up. Powers the dashboard's draw-on-snapshot onboarding step."""
+    loop = asyncio.get_event_loop()
+    rois = [{"roi_id": r.roi_id, "points": r.points, "label": r.label} for r in req.rois]
+    try:
+        n = await loop.run_in_executor(None, upsert_camera_rois, camera_id, rois)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to save ROIs: {e}")
+    _config_cache.pop(camera_id, None)   # force reload on next tick
+    return {"status": "success", "camera_id": camera_id, "rois_written": n}
+
+
+@app.get("/camera/{camera_id}/snapshot", tags=["pipeline"], response_model=dict)
+async def camera_snapshot(camera_id: str):
+    """Proxy decode-detect's latest frame (base64 JPEG) so the dashboard can draw
+    ROI polygons on it. The camera must be registered + running (its pipeline
+    warmed up) for a frame to be available."""
+    try:
+        r = await http_client.get(
+            f"{CAMERA_DETECTION_URL}/camera/frame/{camera_id}",
+            timeout=DETECTION_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"decode-detect frame unavailable (still warming up?): {e}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"snapshot fetch failed: {e}")
+
+
+@app.get("/dashboard/overview", tags=["dashboard"], response_model=dict)
+async def dashboard_overview():
+    """Multi-location overview: every registered camera with location, running
+    state, and parking-slot count. Powers the dashboard overview grid; click a
+    card to drill into that camera's station view."""
+    loop = asyncio.get_event_loop()
+    try:
+        registered = await loop.run_in_executor(None, list_registered_cameras)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"overview: list_registered_cameras failed: {e}")
+        registered = []
+    status = await pipeline_manager.get_status()
+    live = {p["camera_id"]: p for p in status.get("pipelines", [])}
+
+    cams = []
+    for c in registered:
+        cid = c["camera_id"]
+        p = live.get(cid, {})
+        try:
+            rois = await loop.run_in_executor(None, get_camera_rois, cid)
+            slot_count = len([r for r in rois if r.get("roi_type") != "logo"])
+        except Exception:  # noqa: BLE001
+            slot_count = 0
+        cams.append({
+            "camera_id": cid,
+            "name": c.get("name"),
+            "location": c.get("location"),
+            "rtsp_url": c.get("rtsp_url"),
+            "fps": c.get("fps"),
+            "running": bool(p.get("running", False)),
+            "iterations": p.get("iterations", 0),
+            "errors": p.get("errors", 0),
+            "slot_count": slot_count,
+        })
+    cams.sort(key=lambda x: x["camera_id"])
+    return {"cameras": cams, "total": len(cams),
+            "running": sum(1 for c in cams if c["running"])}
 
 
 @app.post("/pipeline/execute", tags=["pipeline - legacy"], response_model=dict)

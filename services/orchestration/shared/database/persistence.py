@@ -10,7 +10,7 @@ Provides helpers that the orchestration layer uses at pipeline runtime:
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from shared.database.connection import SessionLocal
 from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert, Camera
@@ -20,34 +20,70 @@ from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Al
 # Camera registration helpers
 # ---------------------------------------------------------------------------
 
-def upsert_camera_rtsp(camera_id: str, rtsp_url: str, fps: int) -> None:
-    """Persist the RTSP URL + fps for a camera_id.
+def upsert_camera_rtsp(camera_id: str, rtsp_url: str, fps: int,
+                       name: Optional[str] = None, location: Optional[str] = None) -> None:
+    """Persist the RTSP URL + fps (+ optional name/location) for a camera_id.
 
-    Creates the row if it doesn't exist; otherwise updates rtsp_url/fps in place.
-    Called from POST /pipeline/start so the orchestrator can push /camera/start
-    to decode-detect on its own (now and again on every recovery).
+    Creates the row if it doesn't exist; otherwise updates in place. name/location
+    are only written when provided, so a plain /pipeline/start replay doesn't wipe
+    them. Called from POST /pipeline/start so the orchestrator can push
+    /camera/start to decode-detect on its own (now and again on every recovery).
     """
     session = SessionLocal()
     try:
         cam = session.query(Camera).filter(Camera.camera_id == camera_id).one_or_none()
         if cam is None:
-            cam = Camera(camera_id=camera_id, rtsp_url=rtsp_url, fps=fps)
+            cam = Camera(camera_id=camera_id, rtsp_url=rtsp_url, fps=fps, name=name, location=location)
             session.add(cam)
         else:
             cam.rtsp_url = rtsp_url
             cam.fps = fps
+            if name is not None:
+                cam.name = name
+            if location is not None:
+                cam.location = location
         session.commit()
     finally:
         session.close()
 
 
+def upsert_camera_rois(camera_id: str, rois: List[Dict[str, Any]]) -> int:
+    """Replace a camera's parking-zone (non-logo) ROIs with `rois`.
+
+    Each roi: {"roi_id": str, "points": [[x,y], ...], "label": str|None}. roi_type
+    is forced to 'parking' (any non-'logo' type; the usecase layer treats these as
+    parking slots keyed by roi_id). Logo ROIs are left untouched. Returns the count
+    written. Used by the dashboard's draw-ROI-on-snapshot onboarding step.
+    """
+    session = SessionLocal()
+    try:
+        session.query(ROIConfig).filter(
+            ROIConfig.camera_id == camera_id,
+            ROIConfig.roi_type != "logo",
+        ).delete(synchronize_session=False)
+        for r in rois:
+            session.add(ROIConfig(
+                camera_id=camera_id,
+                roi_id=r["roi_id"],
+                roi_type="parking",
+                points=r["points"],
+                label=r.get("label"),
+            ))
+        session.commit()
+        return len(rois)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def list_registered_cameras() -> List[Dict[str, Any]]:
-    """Return every camera row that has an rtsp_url set.
+    """Return every camera row that has an rtsp_url set (with name/location).
 
     Used by the orchestrator on startup and by the decode-detect heartbeat to
-    re-push /camera/start. Rows without an rtsp_url (legacy rows created before
-    this column existed) are silently skipped — the orchestrator can't push
-    them, the operator must register one via /pipeline/start first.
+    re-push /camera/start, and by the dashboard camera-management/overview views.
+    Rows without an rtsp_url are skipped — register one via /pipeline/start first.
     """
     session = SessionLocal()
     try:
@@ -57,7 +93,10 @@ def list_registered_cameras() -> List[Dict[str, Any]]:
             .all()
         )
         return [
-            {"camera_id": r.camera_id, "rtsp_url": r.rtsp_url, "fps": r.fps}
+            {
+                "camera_id": r.camera_id, "rtsp_url": r.rtsp_url, "fps": r.fps,
+                "name": r.name, "location": r.location,
+            }
             for r in rows
         ]
     finally:
