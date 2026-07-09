@@ -1398,6 +1398,58 @@ async def get_camera_pipeline_status(camera_id: str):
     return await pipeline_manager.get_status(camera_id)
 
 
+@app.get("/pipeline/cameras", tags=["pipeline"], response_model=dict)
+async def list_cameras_for_management():
+    """
+    Registered cameras (persisted rtsp_url + fps) merged with live pipeline state.
+
+    Powers the dashboard's Camera Management view. Unlike /pipeline/status (which
+    only covers pipelines tracked this session and omits rtsp_url), this unions
+    the persisted camera registry with the running stats, so the UI can show the
+    full list — including cameras that are registered but not currently running.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        registered = await loop.run_in_executor(None, list_registered_cameras)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"list_registered_cameras failed: {e}")
+        registered = []
+
+    status = await pipeline_manager.get_status()
+    live = {p["camera_id"]: p for p in status.get("pipelines", [])}
+
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for cam in registered:
+        cid = cam["camera_id"]
+        p = live.get(cid, {})
+        by_id[cid] = {
+            "camera_id": cid,
+            "rtsp_url": cam.get("rtsp_url"),
+            "fps": cam.get("fps"),
+            "running": bool(p.get("running", False)),
+            "iterations": p.get("iterations", 0),
+            "errors": p.get("errors", 0),
+            "last_error": p.get("last_error"),
+            "avg_latency_ms": p.get("avg_latency_ms", 0.0),
+            "last_run": p.get("last_run"),
+        }
+    # Include any running camera not in the persisted registry (e.g. started with
+    # external registration and no stored rtsp_url).
+    for cid, p in live.items():
+        if cid not in by_id:
+            by_id[cid] = {
+                "camera_id": cid, "rtsp_url": None, "fps": None,
+                "running": bool(p.get("running", False)),
+                "iterations": p.get("iterations", 0), "errors": p.get("errors", 0),
+                "last_error": p.get("last_error"),
+                "avg_latency_ms": p.get("avg_latency_ms", 0.0),
+                "last_run": p.get("last_run"),
+            }
+
+    cameras = sorted(by_id.values(), key=lambda c: c["camera_id"])
+    return {"cameras": cameras, "total": len(cameras)}
+
+
 @app.post("/pipeline/execute", tags=["pipeline - legacy"], response_model=dict)
 async def execute_pipeline_once(request: PipelineRequest):
     """
