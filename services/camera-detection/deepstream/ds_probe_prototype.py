@@ -31,7 +31,13 @@ from gi.repository import Gst, GLib
 
 import pyds
 import numpy as np
-import cv2
+
+# cv2 is only needed to write the JPEG dumps; keep it optional so the core
+# validation (metadata + get_nvds_buf_surface) still runs on a bare container.
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Must match labels.txt / the engine's class order.
 LABELS = ["motorcycle", "car", "gun"]
@@ -108,10 +114,14 @@ def make_probe(dump_dir: Path, dump_every: int):
                     # surf is a view into mapped memory (RGBA) — copy before the
                     # buffer is recycled downstream.
                     rgba = np.array(surf, copy=True, order="C")
-                    bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-                    out = dump_dir / f"probe_src{frame_meta.source_id}_f{frame_meta.frame_num}.jpg"
-                    cv2.imwrite(str(out), bgr)
-                    print(f"    -> dumped frame {bgr.shape} to {out}")
+                    print(f"    -> get_nvds_buf_surface OK: shape={rgba.shape} dtype={rgba.dtype}")
+                    if cv2 is not None:
+                        bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+                        out = dump_dir / f"probe_src{frame_meta.source_id}_f{frame_meta.frame_num}.jpg"
+                        cv2.imwrite(str(out), bgr)
+                        print(f"    -> dumped frame to {out}")
+                    else:
+                        print("    (cv2 not installed — skipping JPEG dump; surface extraction still verified)")
                 except Exception as e:
                     print(f"    !! get_nvds_buf_surface FAILED: {e}")
 
