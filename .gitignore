@@ -53,10 +53,17 @@ screenshots/*.png
 !screenshots/.gitkeep
 screenshots/ 
 
-# Models (can be large) — do not commit binaries
+# Models (can be large) — do not commit binaries.
+# Un-anchored (**/) so nested service dirs like services/*/models/ are covered;
+# the plain models/*.pt form is anchored to the repo root and misses them.
 models/*.pt
 models/*.onnx
 models/*.hef
+**/*.pt
+**/*.onnx
+**/*.engine
+**/*.hef
+**/*.wts
 
 # Docker
 .dockerignore
