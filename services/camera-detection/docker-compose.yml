@@ -38,6 +38,9 @@ services:
 
     environment:
       INFERENCE_BACKEND: deepstream
+      # Disable libproxy GIO resolver — it aborts the process during RTSP proxy
+      # auto-detection (the RTSP-only crash). 'dummy' connects directly.
+      GIO_USE_PROXY_RESOLVER: dummy
       DEEPSTREAM_MAX_BATCH: ${DEEPSTREAM_MAX_BATCH:-8}
       DEEPSTREAM_PUBLISH_FPS: ${DEEPSTREAM_PUBLISH_FPS:-5}
       # Set false for metadata-only (no get_nvds_buf_surface frame pull) — used to

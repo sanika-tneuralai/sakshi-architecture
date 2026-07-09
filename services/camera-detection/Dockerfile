@@ -26,7 +26,12 @@ FROM nvcr.io/nvidia/deepstream:6.4-gc-triton-devel
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     DEEPSTREAM_PATH=/opt/nvidia/deepstream/deepstream/lib \
-    INFERENCE_BACKEND=deepstream
+    INFERENCE_BACKEND=deepstream \
+    # Disable GIO's libproxy resolver. GStreamer's RTSP source does GIO proxy
+    # auto-detection on connect, and libgiolibproxy.so (px_proxy_factory_get_proxies)
+    # ABORTS the process — this was the RTSP-only crash (files never hit it).
+    # 'dummy' = no proxy lookup, connect directly.
+    GIO_USE_PROXY_RESOLVER=dummy
 
 WORKDIR /app
 
