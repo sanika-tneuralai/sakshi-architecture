@@ -51,7 +51,7 @@ async def start_camera(config: RTSPConfig):
             "message": f"Camera {config.camera_id} started successfully",
             "camera_id": config.camera_id,
             "fps": config.fps,
-            "backend": "opencv-ffmpeg"
+            "backend": camera_manager.backend,
         }
         
     except ValueError as e:
