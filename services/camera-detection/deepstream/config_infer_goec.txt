@@ -27,14 +27,16 @@ net-scale-factor=0.0039215697906911373
 model-color-format=0
 
 onnx-file=goec_N_v1.onnx
-# model-engine-file intentionally omitted: nvinfer auto-names the engine per
-# batch size (goec_N_v1.onnx_b<N>_gpu0_fp16.engine) and caches it. The live
-# service sets batch-size via the nvinfer property to a fixed MAX (see
-# DEEPSTREAM_MAX_BATCH) so the camera set can change without an engine rebuild.
+# Point directly at the pre-built fixed-max-batch engine AND set batch-size to
+# match it, so nvinfer deserializes it on startup instead of rebuilding every
+# time (it derives the engine name from batch-size; a mismatch => multi-minute
+# rebuild on every launch). This b8 engine is built once by convert/pre-build.
+# Must stay in sync with DEEPSTREAM_MAX_BATCH (default 8): if you change the max
+# batch, rebuild the engine and update the filename + batch-size here.
+model-engine-file=goec_N_v1.onnx_b8_gpu0_fp16.engine
 labelfile-path=labels.txt
 
-# Default for standalone/deepstream-app use; the service overrides this property.
-batch-size=1
+batch-size=8
 # 0=FP32  1=INT8  2=FP16   -> FP16 on T4 (Turing). INT8 needs a calibration table (defer).
 network-mode=2
 num-detected-classes=3
