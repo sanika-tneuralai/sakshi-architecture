@@ -158,7 +158,11 @@ class DeepStreamPipeline:
         streammux.set_property("height", self.height)
         streammux.set_property("batched-push-timeout", 40000)
         streammux.set_property("live-source", 1 if live else 0)
-        streammux.set_property("nvbuf-memory-type", self._mem_type)
+        # Only force CUDA-unified memory when we actually pull frames to CPU
+        # (get_nvds_buf_surface). In metadata-only mode leave the default device
+        # memory — fewer moving parts, and avoids a surface-memory crash path.
+        if self.extract_frames:
+            streammux.set_property("nvbuf-memory-type", self._mem_type)
         self._pipeline.add(streammux)
 
         for camera_id, cfg in self._sources.items():
@@ -191,25 +195,34 @@ class DeepStreamPipeline:
         pgie.set_property("batch-size", self.max_batch)
         self._pipeline.add(pgie)
 
-        conv = self._make("nvvideoconvert", "conv")
-        conv.set_property("nvbuf-memory-type", self._mem_type)
-        self._pipeline.add(conv)
-
-        capsf = self._make("capsfilter", "capsf")
-        capsf.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA"))
-        self._pipeline.add(capsf)
-
         sink = self._make("fakesink", "sink")
         sink.set_property("sync", 0)
         sink.set_property("async", 0)
         self._pipeline.add(sink)
 
         streammux.link(pgie)
-        pgie.link(conv)
-        conv.link(capsf)
-        capsf.link(sink)
 
-        sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._probe)
+        if self.extract_frames:
+            # Frame-pull path: convert to RGBA in CPU-mappable memory so the probe
+            # can get_nvds_buf_surface. probe on the converter output.
+            conv = self._make("nvvideoconvert", "conv")
+            conv.set_property("nvbuf-memory-type", self._mem_type)
+            self._pipeline.add(conv)
+            capsf = self._make("capsfilter", "capsf")
+            capsf.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA"))
+            self._pipeline.add(capsf)
+            pgie.link(conv)
+            conv.link(capsf)
+            capsf.link(sink)
+            probe_pad = sink.get_static_pad("sink")
+        else:
+            # Metadata-only: no nvvideoconvert/RGBA/CUDA-unified at all. Read
+            # NvDsObjectMeta straight off nvinfer's src pad. Minimal C-level
+            # surface machinery — the leanest, most stable path.
+            pgie.link(sink)
+            probe_pad = pgie.get_static_pad("src")
+
+        probe_pad.add_probe(Gst.PadProbeType.BUFFER, self._probe)
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
