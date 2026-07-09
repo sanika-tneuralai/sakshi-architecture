@@ -21,15 +21,31 @@ RUN INSIDE THE DeepStream CONTAINER (engine already built in Phase 1a):
 This is a throwaway validation harness — the real class lands in
 camera/streams/deepstream_pipeline.py (Phase 1b.2). Needs no torch/ultralytics.
 """
+import os
 import sys
 import argparse
 from pathlib import Path
+
+# pyds ships as a .so/wheel under the DeepStream lib dir and isn't always on the
+# default import path. Mirror what the service's main.py does before importing.
+_DS_LIB = os.getenv("DEEPSTREAM_PATH", "/opt/nvidia/deepstream/deepstream/lib")
+if _DS_LIB not in sys.path:
+    sys.path.insert(0, _DS_LIB)
 
 import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst, GLib
 
-import pyds
+try:
+    import pyds
+except ImportError:
+    sys.exit(
+        "ERROR: cannot import pyds (DeepStream Python bindings).\n"
+        f"  Looked in: {_DS_LIB}\n"
+        "  Locate it:   find /opt/nvidia -iname 'pyds*'\n"
+        "  If a wheel:  pip3 install /opt/nvidia/deepstream/deepstream/lib/pyds-*.whl\n"
+        "  Or set DEEPSTREAM_PATH to the dir containing pyds.so and re-run."
+    )
 import numpy as np
 
 # cv2 is only needed to write the JPEG dumps; keep it optional so the core
