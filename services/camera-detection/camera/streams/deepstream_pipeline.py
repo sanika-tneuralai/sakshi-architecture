@@ -100,11 +100,24 @@ class DeepStreamPipeline:
     # ------------------------------------------------------------------
     # Configuration (before start)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _to_gst_uri(source: str) -> str:
+        """Normalise a source to a GStreamer URI for uridecodebin.
+
+        Accepts rtsp(s)://, http(s)://, file:// as-is; converts a plain local
+        path to file://<abspath>. The API validates plain paths / rtsp URLs, so
+        this bridges both forms to what uridecodebin needs.
+        """
+        if source.startswith(("rtsp://", "rtsps://", "http://", "https://", "file://")):
+            return source
+        return "file://" + os.path.abspath(source)
+
     def add_source(self, camera_id: str, uri: str, fps: int = 5) -> None:
         if self.is_running:
             raise RuntimeError("Runtime source add is not supported yet (Phase 1b.4)")
         if camera_id in self._sources:
             raise ValueError(f"camera {camera_id} already added")
+        uri = self._to_gst_uri(uri)
         index = len(self._sources)
         self._sources[camera_id] = {"index": index, "uri": uri, "fps": fps}
         self._by_index[index] = camera_id
