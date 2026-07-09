@@ -21,6 +21,13 @@ services:
     container_name: goec-camera-detection
     restart: unless-stopped
 
+    # Host networking so the container shares the host's tailscale0 interface and
+    # can pull RTSP from tailnet (100.x) restream hosts. With host networking the
+    # service binds directly on the host's :8004 (the `ports:` mapping below is
+    # then ignored). Drop this back to bridge + `ports` if your RTSP sources are
+    # on the normal LAN/internet rather than Tailscale.
+    network_mode: host
+
     deploy:
       resources:
         reservations:
