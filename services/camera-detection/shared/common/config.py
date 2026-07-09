@@ -224,8 +224,11 @@ class Config:
         Defaults to the staged DeepStream-Yolo config produced by
         deepstream/convert_model.sh. Override via NVINFER_CONFIG_PATH.
         """
+        # The single version-controlled config in deepstream/. Its paths are
+        # DeepStream-Yolo/-prefixed and nvinfer resolves them relative to this
+        # file's dir, so it works read-in-place — no staged copy to go stale.
         default_path = str(
-            Config.get_base_dir() / "deepstream" / "DeepStream-Yolo" / "config_infer_goec.txt"
+            Config.get_base_dir() / "deepstream" / "config_infer_goec.txt"
         )
         return os.getenv("NVINFER_CONFIG_PATH", default_path)
 

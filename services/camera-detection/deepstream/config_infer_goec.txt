@@ -26,15 +26,21 @@ net-scale-factor=0.0039215697906911373
 # 0 = RGB (ultralytics), matches export
 model-color-format=0
 
-onnx-file=goec_N_v1.onnx
+# Paths are prefixed DeepStream-Yolo/ because nvinfer resolves a config's
+# relative paths relative to the CONFIG FILE's own directory. This config lives
+# in deepstream/, and the artifacts (ONNX, engine, labels, parser .so) are in
+# deepstream/DeepStream-Yolo/. Keeping ONE version-controlled config read
+# directly (NVINFER_CONFIG_PATH -> deepstream/config_infer_goec.txt) avoids the
+# stale-staged-copy bug we hit when the config was cp'd into DeepStream-Yolo/.
+onnx-file=DeepStream-Yolo/goec_N_v1.onnx
 # Point directly at the pre-built fixed-max-batch engine AND set batch-size to
 # match it, so nvinfer deserializes it on startup instead of rebuilding every
 # time (it derives the engine name from batch-size; a mismatch => multi-minute
 # rebuild on every launch). This b8 engine is built once by convert/pre-build.
 # Must stay in sync with DEEPSTREAM_MAX_BATCH (default 8): if you change the max
 # batch, rebuild the engine and update the filename + batch-size here.
-model-engine-file=goec_N_v1.onnx_b8_gpu0_fp16.engine
-labelfile-path=labels.txt
+model-engine-file=DeepStream-Yolo/goec_N_v1.onnx_b8_gpu0_fp16.engine
+labelfile-path=DeepStream-Yolo/labels.txt
 
 batch-size=8
 # 0=FP32  1=INT8  2=FP16   -> FP16 on T4 (Turing). INT8 needs a calibration table (defer).
@@ -53,7 +59,7 @@ symmetric-padding=1
 
 # DeepStream-Yolo custom bbox parser (built by convert_model.sh)
 parse-bbox-func-name=NvDsInferParseYolo
-custom-lib-path=nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+custom-lib-path=DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
 
 [class-attrs-all]
 nms-iou-threshold=0.45

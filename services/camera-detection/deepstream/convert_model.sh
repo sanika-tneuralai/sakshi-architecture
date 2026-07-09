@@ -125,7 +125,10 @@ echo "  ONNX -> $WORK_DIR/goec_N_v1.onnx"
 
 # Use OUR verified labels (do not trust the auto-generated order blindly).
 cp -f "$HERE/labels.txt" "$WORK_DIR/labels.txt"
-cp -f "$HERE/config_infer_goec.txt" "$WORK_DIR/config_infer_goec.txt"
+# NOTE: we do NOT copy config_infer_goec.txt into DeepStream-Yolo/ anymore. The
+# config is read in place from deepstream/ (its paths are DeepStream-Yolo/-prefixed
+# and nvinfer resolves them relative to the config's own dir). A staged copy used
+# to go stale and cause per-startup engine rebuilds.
 
 # --- 3. Build the custom bbox parser -----------------------------------------
 echo "[3/4] Building libnvdsinfer_custom_impl_Yolo.so (CUDA_VER=$CUDA_VER) ..."
