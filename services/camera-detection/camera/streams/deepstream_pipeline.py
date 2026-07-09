@@ -332,6 +332,45 @@ class DeepStreamPipeline:
         return list(self._sources.keys())
 
 
+class DeepStreamCameraView:
+    """
+    Per-camera adapter over the shared DeepStreamPipeline, returned by
+    CameraManager.get_camera_stream() so the detection API can treat a DeepStream
+    camera like the OpenCV one. `is_deepstream` lets the API skip inline inference
+    and read the pipeline's cached detections instead.
+    """
+    is_deepstream = True
+
+    def __init__(self, pipeline: "DeepStreamPipeline", camera_id: str):
+        self._p = pipeline
+        self.camera_id = camera_id
+
+    def get_latest(self) -> Optional[LatestState]:
+        return self._p.get_latest(self.camera_id)
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        st = self._p.get_latest(self.camera_id)
+        return st.frame if st else None
+
+    async def get_preprocessed_frame(self) -> Optional[dict]:
+        st = self._p.get_latest(self.camera_id)
+        if st is None:
+            return None
+        return {
+            "frame": st.frame,
+            "timestamp": st.ts.timestamp(),
+            "shape": st.frame.shape,
+            "frame_count": st.frame_count,
+        }
+
+    def get_status(self) -> dict:
+        return self._p.get_status(self.camera_id) or {
+            "camera_id": self.camera_id,
+            "is_running": False,
+            "backend": "deepstream",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Standalone validation (Phase 1b.2): run the class on one/more URIs and poll
 # get_latest() from the main thread — proves the cache is populated & readable

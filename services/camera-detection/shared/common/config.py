@@ -216,6 +216,45 @@ class Config:
     def get_deepstream_path() -> Optional[str]:
         """Path to DeepStream installation (only needed for camera-detection service)"""
         return os.getenv("DEEPSTREAM_PATH")
+
+    @staticmethod
+    def get_nvinfer_config_path() -> str:
+        """
+        Path to the nvinfer config for the DeepStream backend.
+        Defaults to the staged DeepStream-Yolo config produced by
+        deepstream/convert_model.sh. Override via NVINFER_CONFIG_PATH.
+        """
+        default_path = str(
+            Config.get_base_dir() / "deepstream" / "DeepStream-Yolo" / "config_infer_goec.txt"
+        )
+        return os.getenv("NVINFER_CONFIG_PATH", default_path)
+
+    @staticmethod
+    def get_deepstream_width() -> int:
+        """nvstreammux output width (detection coords are in this space)."""
+        return int(os.getenv("DEEPSTREAM_WIDTH", "1920"))
+
+    @staticmethod
+    def get_deepstream_height() -> int:
+        """nvstreammux output height."""
+        return int(os.getenv("DEEPSTREAM_HEIGHT", "1080"))
+
+    @staticmethod
+    def get_deepstream_publish_fps() -> int:
+        """
+        Rate at which the pipeline probe copies a fresh frame into the per-camera
+        cache. Detections are read every frame; the (costlier) frame copy is
+        throttled to this. Should be >= the orchestration poll rate.
+        """
+        return int(os.getenv("DEEPSTREAM_PUBLISH_FPS", "5"))
+
+    @staticmethod
+    def get_deepstream_reconcile_debounce() -> float:
+        """
+        Seconds to wait after the last /camera/start|stop before (re)building the
+        batched pipeline, so a burst of starts at boot coalesces into one build.
+        """
+        return float(os.getenv("DEEPSTREAM_RECONCILE_DEBOUNCE", "1.5"))
     
     # ==================== Database Settings ====================
     @staticmethod

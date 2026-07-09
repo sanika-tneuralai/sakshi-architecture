@@ -13,7 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from detection.schemas import (
     DetectionRequest, DetectionResponse, DetectionStats,
-    DetectBatchRequest, DetectBatchResponse, CameraDetectionResult
+    DetectBatchRequest, DetectBatchResponse, CameraDetectionResult,
+    Detection, BoundingBox,
 )
 from detection.service import get_detection_service
 from detection.logo_occlusion import get_logo_occlusion_detector
@@ -29,6 +30,32 @@ router = APIRouter(prefix="/detection", tags=["detection"])
 # orchestration loop if the network or S3 stalls. Tunable via env so we don't
 # need a code change to widen it.
 S3_UPLOAD_TIMEOUT_S = float(os.getenv("S3_UPLOAD_TIMEOUT_S", "3.0"))
+
+
+def _response_from_cached(camera_id: str, latest) -> DetectionResponse:
+    """Build a DetectionResponse from the DeepStream pipeline's cached state.
+
+    nvinfer already applied its (low) pre-cluster-threshold, so these are raw
+    candidates; the per-class post-filter downstream in the handler still owns
+    the orchestration-supplied class_thresholds — identical to the inline path.
+    """
+    detections = [
+        Detection(
+            class_id=d["class_id"],
+            class_name=d["class_name"],
+            confidence=min(1.0, max(0.0, d["confidence"])),
+            bbox=BoundingBox(x1=d["x1"], y1=d["y1"], x2=d["x2"], y2=d["y2"]),
+        )
+        for d in latest.detections
+    ]
+    return DetectionResponse(
+        camera_id=camera_id,
+        timestamp=latest.ts,
+        frame_count=latest.frame_count,
+        detections=detections,
+        total_detections_count=len(detections),
+        processing_time_ms=0.0,
+    )
 
 
 @router.post("/detect", response_model=DetectionResponse)
@@ -77,55 +104,69 @@ async def detect_objects(request: DetectionRequest):
         raise HTTPException(status_code=404, detail=f"Camera {request.camera_id} not found or not running")
     
     print(f"[DETECTION API] Camera stream obtained")
-    
-    # Get frame + capture-time timestamp from camera. We use
-    # get_preprocessed_frame() rather than get_frame() so the response is stamped
-    # with when the frame was actually pulled off the stream — usecase rules
-    # downstream stamp events with this value, which keeps DB timestamps aligned
-    # with reality even when the orchestration loop runs slowly.
-    print(f"[DETECTION API] Retrieving frame from camera")
-    frame_data = await camera.get_preprocessed_frame() if hasattr(camera, "get_preprocessed_frame") else None
-    if frame_data is None:
-        # Legacy / multi-stream cameras without get_preprocessed_frame: fall back
-        # to the raw frame. Timestamp falls back to now() inside detection_service.
-        frame = camera.get_frame()
-        frame_timestamp = None
+
+    if getattr(camera, "is_deepstream", False):
+        # DeepStream backend: nvinfer already computed detections continuously.
+        # Read the pipeline's cached {frame, detections} — no inline inference.
+        # This is the crux of preserving the pull contract: same DetectionResponse
+        # shape, produced from the cache instead of a per-request model.predict().
+        latest = camera.get_latest()
+        if latest is None:
+            print(f"[DETECTION API] ERROR: pipeline has no frame yet for {request.camera_id}")
+            raise HTTPException(status_code=400, detail="No frame available from camera (pipeline warming up)")
+        frame = latest.frame
+        frame_timestamp = latest.ts
+        result = _response_from_cached(request.camera_id, latest)
+        print(f"[DETECTION API] DeepStream cache hit: {result.total_detections_count} det(s), capture_ts={frame_timestamp}")
     else:
-        frame = frame_data["frame"]
-        ts = frame_data.get("timestamp")
-        # capture loop stores last_frame_time as a Unix epoch float; deepstream
-        # returns an ISO string. Normalize both to a tz-aware datetime so the
-        # response schema (datetime) accepts it.
-        if isinstance(ts, (int, float)):
-            frame_timestamp = datetime.fromtimestamp(ts, tz=timezone.utc)
-        elif isinstance(ts, str):
-            try:
-                frame_timestamp = datetime.fromisoformat(ts)
-                if frame_timestamp.tzinfo is None:
-                    frame_timestamp = frame_timestamp.replace(tzinfo=timezone.utc)
-            except ValueError:
-                frame_timestamp = None
-        else:
+        # Get frame + capture-time timestamp from camera. We use
+        # get_preprocessed_frame() rather than get_frame() so the response is stamped
+        # with when the frame was actually pulled off the stream — usecase rules
+        # downstream stamp events with this value, which keeps DB timestamps aligned
+        # with reality even when the orchestration loop runs slowly.
+        print(f"[DETECTION API] Retrieving frame from camera")
+        frame_data = await camera.get_preprocessed_frame() if hasattr(camera, "get_preprocessed_frame") else None
+        if frame_data is None:
+            # Legacy / multi-stream cameras without get_preprocessed_frame: fall back
+            # to the raw frame. Timestamp falls back to now() inside detection_service.
+            frame = camera.get_frame()
             frame_timestamp = None
+        else:
+            frame = frame_data["frame"]
+            ts = frame_data.get("timestamp")
+            # capture loop stores last_frame_time as a Unix epoch float; deepstream
+            # returns an ISO string. Normalize both to a tz-aware datetime so the
+            # response schema (datetime) accepts it.
+            if isinstance(ts, (int, float)):
+                frame_timestamp = datetime.fromtimestamp(ts, tz=timezone.utc)
+            elif isinstance(ts, str):
+                try:
+                    frame_timestamp = datetime.fromisoformat(ts)
+                    if frame_timestamp.tzinfo is None:
+                        frame_timestamp = frame_timestamp.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    frame_timestamp = None
+            else:
+                frame_timestamp = None
 
-    if frame is None:
-        print(f"[DETECTION API] ERROR: No frame available from camera {request.camera_id}")
-        logger.error(f"No frame available from camera {request.camera_id}")
-        raise HTTPException(status_code=400, detail="No frame available from camera")
+        if frame is None:
+            print(f"[DETECTION API] ERROR: No frame available from camera {request.camera_id}")
+            logger.error(f"No frame available from camera {request.camera_id}")
+            raise HTTPException(status_code=400, detail="No frame available from camera")
 
-    print(f"[DETECTION API] Frame retrieved successfully (capture_ts={frame_timestamp})")
+        print(f"[DETECTION API] Frame retrieved successfully (capture_ts={frame_timestamp})")
 
-    # Run detection with configuration values
-    print(f"[DETECTION] Running detection with confidence_threshold: {confidence_threshold}")
-    detection_service = get_detection_service()
-    result = detection_service.detect(
-        frame=frame,
-        camera_id=request.camera_id,
-        confidence_threshold=confidence_threshold,
-        iou_threshold=request.iou_threshold,
-        classes=request.classes,
-        frame_timestamp=frame_timestamp,
-    )
+        # Run detection with configuration values
+        print(f"[DETECTION] Running detection with confidence_threshold: {confidence_threshold}")
+        detection_service = get_detection_service()
+        result = detection_service.detect(
+            frame=frame,
+            camera_id=request.camera_id,
+            confidence_threshold=confidence_threshold,
+            iou_threshold=request.iou_threshold,
+            classes=request.classes,
+            frame_timestamp=frame_timestamp,
+        )
     
     # Post-filter: apply per-class thresholds when provided
     if class_thresholds:
@@ -233,27 +274,38 @@ def _detect_single_camera(
                 error=f"Camera {camera_id} not found or not running"
             )
 
-        # Get frame from camera
-        frame = camera.get_frame()
-        if frame is None:
-            return CameraDetectionResult(
-                camera_id=camera_id,
-                status="failed",
-                total_detections_count=0,
-                processing_time_ms=0,
-                detections=[],
-                error="No frame available"
-            )
+        # DeepStream: read cached detections; otherwise fetch frame + run inference.
+        if getattr(camera, "is_deepstream", False):
+            latest = camera.get_latest()
+            if latest is None:
+                return CameraDetectionResult(
+                    camera_id=camera_id, status="failed", total_detections_count=0,
+                    processing_time_ms=0, detections=[],
+                    error="No frame available (pipeline warming up)",
+                )
+            frame = latest.frame
+            result = _response_from_cached(camera_id, latest)
+        else:
+            frame = camera.get_frame()
+            if frame is None:
+                return CameraDetectionResult(
+                    camera_id=camera_id,
+                    status="failed",
+                    total_detections_count=0,
+                    processing_time_ms=0,
+                    detections=[],
+                    error="No frame available"
+                )
 
-        # Run detection
-        detection_service = get_detection_service()
-        result = detection_service.detect(
-            frame=frame,
-            camera_id=camera_id,
-            confidence_threshold=confidence_threshold,
-            iou_threshold=iou_threshold,
-            classes=classes
-        )
+            # Run detection
+            detection_service = get_detection_service()
+            result = detection_service.detect(
+                frame=frame,
+                camera_id=camera_id,
+                confidence_threshold=confidence_threshold,
+                iou_threshold=iou_threshold,
+                classes=classes
+            )
 
         processing_time_ms = (time.time() - start_time) * 1000
 
@@ -465,6 +517,13 @@ async def detection_health():
     Check detection service health.
     """
     try:
+        # DeepStream backend has no inline BaseDetector — report pipeline mode
+        # without triggering a model load.
+        from shared.common.config import Config
+        if Config.get_inference_backend() == "deepstream":
+            print("✓ detection_health completed (deepstream)")
+            return {"status": "healthy", "service": "detection", "backend": "deepstream"}
+
         detection_service = get_detection_service()
         print("✓ detection_health completed")
         return {
