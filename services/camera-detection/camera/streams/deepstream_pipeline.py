@@ -449,9 +449,14 @@ if __name__ == "__main__":
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--max-batch", type=int, default=8,
                     help="fixed nvinfer batch; first run builds the b<N> engine (~minutes)")
+    ap.add_argument("--metadata-only", action="store_true",
+                    help="disable frame extraction (mirrors DEEPSTREAM_EXTRACT_FRAMES=false)")
     args = ap.parse_args()
 
-    pipe = DeepStreamPipeline(config_path=args.config, max_batch=args.max_batch)
+    pipe = DeepStreamPipeline(
+        config_path=args.config, max_batch=args.max_batch,
+        extract_frames=not args.metadata_only,
+    )
     for i, uri in enumerate(args.uri):
         pipe.add_source(f"cam{i}", uri, fps=5)
     pipe.start()
