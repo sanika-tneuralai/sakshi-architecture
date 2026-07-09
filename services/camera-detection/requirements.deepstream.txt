@@ -1,0 +1,17 @@
+# Runtime deps for the DeepStream backend ONLY.
+# Deliberately NO torch / ultralytics / opencv-python(non-headless): under
+# INFERENCE_BACKEND=deepstream, nvinfer/TensorRT does all inference, so the heavy
+# CUDA torch stack (~7 GB) is pure bloat. The ONNX export at build time uses a
+# small CPU torch + ultralytics installed only in the builder stage (see Dockerfile).
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+requests==2.31.0
+psutil==5.9.8
+python-dotenv==1.0.0
+boto3==1.34.34
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
