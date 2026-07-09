@@ -163,8 +163,24 @@ class DeepStreamPipeline:
 
         for camera_id, cfg in self._sources.items():
             idx = cfg["index"]
-            src = self._make("uridecodebin", f"src-{idx}")
-            src.set_property("uri", cfg["uri"])
+            uri = cfg["uri"]
+            # nvurisrcbin (DeepStream's own source bin) instead of plain
+            # uridecodebin: it guarantees NVIDIA HW decode + NVMM output that
+            # nvstreammux expects. Plain uridecodebin negotiated a non-NVMM /
+            # CPU-decode path for RTSP and segfaulted nvstreammux (files happened
+            # to work). nvurisrcbin also gives RTSP TCP + auto-reconnect.
+            src = self._make("nvurisrcbin", f"src-{idx}")
+            src.set_property("uri", uri)
+            if uri.startswith(("rtsp://", "rtsps://")):
+                for prop, val in (
+                    ("select-rtp-protocol", 4),      # 4 = TCP (reliable)
+                    ("rtsp-reconnect-interval", 10),  # seconds; auto-reconnect
+                    ("latency", 200),
+                ):
+                    try:
+                        src.set_property(prop, val)
+                    except Exception:  # noqa: BLE001 — property varies by DS version
+                        pass
             self._pipeline.add(src)
             mux_sink = streammux.get_request_pad(f"sink_{idx}")
             src.connect("pad-added", self._cb_newpad, mux_sink)

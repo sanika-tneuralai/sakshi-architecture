@@ -226,9 +226,12 @@ async def detect_objects(request: DetectionRequest):
     # Empty slots with empty logos still skip the upload to keep S3 cheap.
     # frame is None in metadata-only mode → nothing to upload.
     if (result.total_detections_count > 0 or any_logo_occluded) and frame is not None:
-        store = get_s3_frame_store()
         frame_id = str(int(time.time() * 1000))
         try:
+            # get_s3_frame_store() raises if AWS_S3_BUCKET is unset — keep it
+            # INSIDE the try so a missing/mis-set bucket yields snapshot_url=None
+            # (fail-open) instead of 500-ing the whole detection response.
+            store = get_s3_frame_store()
             result.snapshot_url = await asyncio.wait_for(
                 asyncio.to_thread(store.upload_frame, request.camera_id, frame, frame_id),
                 timeout=S3_UPLOAD_TIMEOUT_S,
