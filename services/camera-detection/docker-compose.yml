@@ -1,15 +1,26 @@
-version: '3.8'
-
+# =============================================================================
+# Camera-Detection (DeepStream backend) — single GPU service.
+#
+# Postgres is intentionally NOT here: per the architecture the DB lives only
+# behind the orchestration service; decode-detect needs no DB (init fails
+# non-fatally). This compose is just the GPU inference service.
+#
+# First `docker compose up` builds the image AND (on first /camera/start) builds
+# the b8 TensorRT engine (~5 min, one time) into the ds-yolo volume. After that,
+# restarts deserialize the cached engine in seconds.
+#
+# Requires: docker + nvidia-container-toolkit, and models/goec_N_v1.pt present
+# in the build context.
+# =============================================================================
 services:
   camera-detection:
     build:
       context: .
       dockerfile: Dockerfile
-    image: camera-detection-service:latest
-    container_name: camera-detection
+    image: goec-camera-detection:deepstream
+    container_name: goec-camera-detection
     restart: unless-stopped
-    
-    # GPU support for NVIDIA DeepStream and YOLO
+
     deploy:
       resources:
         reservations:
@@ -17,85 +28,29 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    
+
     environment:
-      # Database connection
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/goec}
-      
-      # DeepStream configuration
-      DEEPSTREAM_PATH: ${DEEPSTREAM_PATH:-/opt/nvidia/deepstream/deepstream-6.4/lib}
-      
-      # Model configuration
-      YOLO_MODEL_PATH: ${YOLO_MODEL_PATH:-/app/models/yolo11n.pt}
-      
-      # Detection parameters
-      DEFAULT_CONFIDENCE_THRESHOLD: ${DEFAULT_CONFIDENCE_THRESHOLD:-0.5}
-      DEFAULT_IOU_THRESHOLD: ${DEFAULT_IOU_THRESHOLD:-0.45}
-      
-      # Storage paths
-      SCREENSHOTS_DIR: ${SCREENSHOTS_DIR:-/app/screenshots}
-      
-      # Logging
+      INFERENCE_BACKEND: deepstream
+      DEEPSTREAM_MAX_BATCH: ${DEEPSTREAM_MAX_BATCH:-8}
+      DEEPSTREAM_PUBLISH_FPS: ${DEEPSTREAM_PUBLISH_FPS:-5}
+      DEEPSTREAM_WIDTH: ${DEEPSTREAM_WIDTH:-1920}
+      DEEPSTREAM_HEIGHT: ${DEEPSTREAM_HEIGHT:-1080}
+      # S3 frame store (optional — snapshot_url is null if unset; fail-open).
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    
+
     ports:
       - "8004:8004"
-    
+
     volumes:
-      # Mount models directory
-      - ./models:/app/models:ro
-      
-      # Mount screenshots directory (persistent storage)
-      - ./screenshots:/app/screenshots
-      
-      # Mount logs directory (optional)
+      # Persists the DeepStream-Yolo artifacts + the built b8 TensorRT engine so
+      # it isn't rebuilt on every container recreate.
+      - ds-yolo:/app/deepstream/DeepStream-Yolo
       - ./logs:/app/logs
-    
-    networks:
-      - goec-network
-    
-    depends_on:
-      postgres:
-        condition: service_healthy
-    
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-  # PostgreSQL database (shared across all services)
-  postgres:
-    image: postgres:15-alpine
-    container_name: goec-postgres
-    restart: unless-stopped
-    
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-goec}
-      PGDATA: /var/lib/postgresql/data/pgdata
-    
-    ports:
-      - "5432:5432"
-    
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    
-    networks:
-      - goec-network
-    
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-networks:
-  goec-network:
-    driver: bridge
 
 volumes:
-  postgres_data:
+  ds-yolo:
     driver: local

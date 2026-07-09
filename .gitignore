@@ -66,7 +66,7 @@ models/*.hef
 **/*.wts
 
 # Docker
-.dockerignore
+# (.dockerignore is intentionally tracked so the build context is reproducible)
 
 # Database
 *.db

@@ -1,0 +1,24 @@
+# Keep the build context small and reproducible.
+# NOTE: models/*.pt is deliberately NOT ignored — the ONNX export at build time
+# needs models/goec_N_v1.pt in the context.
+
+.git
+.venv
+venv
+.genv
+__pycache__
+*.pyc
+*.log
+logs/
+screenshots/
+test_videos/
+slot_refs/
+
+# Rebuilt inside the image by convert_model.sh — never ship the host's copy.
+deepstream/DeepStream-Yolo/
+deepstream/*_out.mp4
+deepstream/frame*.jpg
+
+# Generated engines/onnx (rebuilt on the target GPU)
+*.engine
+*.onnx
