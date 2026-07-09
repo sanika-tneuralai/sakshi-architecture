@@ -77,7 +77,7 @@ def bus_call(bus, message, loop):
 def make_probe(dump_dir: Path, dump_every: int):
     dump_dir.mkdir(parents=True, exist_ok=True)
 
-    def probe(pad, info, _u):
+    def probe(pad, info):
         buf = info.get_buffer()
         if not buf:
             return Gst.PadProbeReturn.OK
