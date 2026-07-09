@@ -254,6 +254,17 @@ class Config:
         return int(os.getenv("DEEPSTREAM_MAX_BATCH", "8"))
 
     @staticmethod
+    def get_deepstream_extract_frames() -> bool:
+        """
+        Whether the pipeline probe pulls the decoded frame to numpy
+        (pyds.get_nvds_buf_surface) for S3 upload / logo-occlusion. Set false for
+        metadata-only mode (detections only) — useful to isolate a
+        get_nvds_buf_surface crash or to maximise throughput when frames aren't
+        needed. Override via DEEPSTREAM_EXTRACT_FRAMES.
+        """
+        return os.getenv("DEEPSTREAM_EXTRACT_FRAMES", "true").lower() in ("true", "1", "yes")
+
+    @staticmethod
     def get_deepstream_publish_fps() -> int:
         """
         Rate at which the pipeline probe copies a fresh frame into the per-camera

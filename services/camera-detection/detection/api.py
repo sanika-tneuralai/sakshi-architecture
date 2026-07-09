@@ -114,7 +114,7 @@ async def detect_objects(request: DetectionRequest):
         if latest is None:
             print(f"[DETECTION API] ERROR: pipeline has no frame yet for {request.camera_id}")
             raise HTTPException(status_code=400, detail="No frame available from camera (pipeline warming up)")
-        frame = latest.frame
+        frame = latest.frame   # may be None in metadata-only mode (DEEPSTREAM_EXTRACT_FRAMES=false)
         frame_timestamp = latest.ts
         result = _response_from_cached(request.camera_id, latest)
         print(f"[DETECTION API] DeepStream cache hit: {result.total_detections_count} det(s), capture_ts={frame_timestamp}")
@@ -197,7 +197,7 @@ async def detect_objects(request: DetectionRequest):
     # an occluded logo still reach S3 — that is exactly the missed-detection
     # case this whole feature exists to fix.
     logo_occluded: Dict[str, bool] = {}
-    if request.logo_rois:
+    if request.logo_rois and frame is not None:
         try:
             logo_occluded = get_logo_occlusion_detector().evaluate(
                 camera_id=request.camera_id,
@@ -224,7 +224,8 @@ async def detect_objects(request: DetectionRequest):
     #
     # Upload gate: YOLO saw something OR a logo is occluded (YOLO-miss case).
     # Empty slots with empty logos still skip the upload to keep S3 cheap.
-    if result.total_detections_count > 0 or any_logo_occluded:
+    # frame is None in metadata-only mode → nothing to upload.
+    if (result.total_detections_count > 0 or any_logo_occluded) and frame is not None:
         store = get_s3_frame_store()
         frame_id = str(int(time.time() * 1000))
         try:
@@ -311,7 +312,7 @@ def _detect_single_camera(
 
         # Logo-occlusion check (YOLO-independent occupancy signal).
         logo_occluded: Dict[str, bool] = {}
-        if logo_rois:
+        if logo_rois and frame is not None:
             try:
                 logo_occluded = get_logo_occlusion_detector().evaluate(
                     camera_id=camera_id,
@@ -328,7 +329,7 @@ def _detect_single_camera(
 
         snapshot_url = None
         # Upload gate: YOLO saw something OR a logo is occluded (YOLO-miss case).
-        if result.total_detections_count > 0 or any_logo_occluded:
+        if (result.total_detections_count > 0 or any_logo_occluded) and frame is not None:
             print(f"[S3 DEBUG] Attempting S3 upload for camera={camera_id} (batch) | frame shape={frame.shape}")
             try:
                 store = get_s3_frame_store()

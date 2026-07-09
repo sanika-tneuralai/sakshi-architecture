@@ -48,10 +48,10 @@ DEFAULT_LABELS = ["motorcycle", "car", "gun"]
 @dataclass
 class LatestState:
     """Most recent frame + detections for one camera, produced by the probe."""
-    frame: np.ndarray          # BGR, HxWx3, already a private copy
-    detections: List[dict]     # [{class_id, class_name, confidence, x1,y1,x2,y2}, ...]
+    frame: Optional[np.ndarray]  # BGR HxWx3 copy, or None in metadata-only mode
+    detections: List[dict]       # [{class_id, class_name, confidence, x1,y1,x2,y2}, ...]
     frame_count: int
-    ts: datetime               # capture time (tz-aware, UTC)
+    ts: datetime                 # capture time (tz-aware, UTC)
 
 
 class DeepStreamPipeline:
@@ -72,12 +72,16 @@ class DeepStreamPipeline:
         labels: Optional[List[str]] = None,
         publish_fps: int = 5,
         max_batch: int = 8,
+        extract_frames: bool = True,
     ):
         self.config_path = config_path
         self.width = width
         self.height = height
         self.labels = labels or DEFAULT_LABELS
         self.publish_interval = 1.0 / max(1, publish_fps)
+        # When False, the probe stores detections only (frame=None) and never
+        # calls get_nvds_buf_surface — metadata-only mode.
+        self.extract_frames = extract_frames
         # nvinfer runs at a FIXED batch (engine built once); nvstreammux carries
         # the actual current source count. So reconciles never rebuild the engine.
         self.max_batch = max_batch
@@ -224,17 +228,25 @@ class DeepStreamPipeline:
                 last = self._last_pub.get(camera_id, 0.0)
                 if now - last >= self.publish_interval:
                     dets = self._read_detections(frame_meta)
-                    frame = self._extract_frame(buf, frame_meta.batch_id)
-                    if frame is not None:
-                        state = LatestState(
-                            frame=frame,
-                            detections=dets,
-                            frame_count=frame_meta.frame_num,
-                            ts=datetime.now(timezone.utc),
-                        )
-                        with self._lock:
-                            self._state[camera_id] = state
-                        self._last_pub[camera_id] = now
+                    frame = None
+                    if self.extract_frames:
+                        frame = self._extract_frame(buf, frame_meta.batch_id)
+                        if frame is None:
+                            # extraction failed this tick — keep last good state
+                            try:
+                                l_frame = l_frame.next
+                            except StopIteration:
+                                break
+                            continue
+                    state = LatestState(
+                        frame=frame,
+                        detections=dets,
+                        frame_count=frame_meta.frame_num,
+                        ts=datetime.now(timezone.utc),
+                    )
+                    with self._lock:
+                        self._state[camera_id] = state
+                    self._last_pub[camera_id] = now
 
             try:
                 l_frame = l_frame.next

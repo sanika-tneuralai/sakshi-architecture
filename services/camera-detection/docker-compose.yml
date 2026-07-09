@@ -40,6 +40,9 @@ services:
       INFERENCE_BACKEND: deepstream
       DEEPSTREAM_MAX_BATCH: ${DEEPSTREAM_MAX_BATCH:-8}
       DEEPSTREAM_PUBLISH_FPS: ${DEEPSTREAM_PUBLISH_FPS:-5}
+      # Set false for metadata-only (no get_nvds_buf_surface frame pull) — used to
+      # isolate/avoid a frame-extraction segfault; S3 snapshots are disabled then.
+      DEEPSTREAM_EXTRACT_FRAMES: ${DEEPSTREAM_EXTRACT_FRAMES:-true}
       DEEPSTREAM_WIDTH: ${DEEPSTREAM_WIDTH:-1920}
       DEEPSTREAM_HEIGHT: ${DEEPSTREAM_HEIGHT:-1080}
       # S3 frame store (optional — snapshot_url is null if unset; fail-open).
