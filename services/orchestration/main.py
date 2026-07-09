@@ -125,6 +125,10 @@ logger.info("Logging configured: dir=%s (info+debug, rotating)", LOG_DIR.resolve
 
 # Service URLs
 
+# decode-detect service. The DeepStream backend (decode-detect-deepstream) is a
+# drop-in for the old OpenCV/PyTorch one — same /camera/start, /detection/detect,
+# /health contract — so integrating it is just pointing this at the DeepStream
+# box (its Tailscale/host IP + :8004). Set CAMERA_DETECTION_URL in the env on deploy.
 CAMERA_DETECTION_URL = os.getenv("CAMERA_DETECTION_URL", "http://100.123.244.59:8004")
 USECASE_SERVICE_URL = os.getenv("USECASE_SERVICE_URL", "http://100.112.71.40:8001")
 ALERT_SERVICE_URL = os.getenv("ALERT_SERVICE_URL", "http://100.112.71.40:8002")
@@ -204,6 +208,15 @@ ALERT_CONCURRENCY = int(os.getenv("ALERT_CONCURRENCY", "30"))
 # before the camera is paused.
 CAMERA_OFFLINE_AFTER_ERRORS = int(os.getenv("CAMERA_OFFLINE_AFTER_ERRORS", "3"))
 
+# Grace window (seconds) after a camera pipeline starts during which we DON'T
+# fire a camera_offline alert, even on consecutive errors. The DeepStream
+# decode-detect backend builds its batched pipeline + connects RTSP on the first
+# /camera/start (~10s), during which /detection/detect 404s; without this grace
+# every startup would emit a spurious offline→recovered alert pair. A camera that
+# has been running and later drops still alerts normally (grace only covers the
+# initial warmup after started_at).
+CAMERA_WARMUP_GRACE_S = float(os.getenv("CAMERA_WARMUP_GRACE_S", "25.0"))
+
 # Default poll interval between pipeline iterations
 DEFAULT_POLL_INTERVAL = float(os.getenv("DEFAULT_POLL_INTERVAL", "1.0"))
 
@@ -230,6 +243,9 @@ class CameraStats:
     iterations: int = 0
     errors: int = 0
     consecutive_errors: int = 0
+    # When this camera's pipeline worker started — used for the warmup grace so a
+    # slow decode-detect pipeline build doesn't trigger a spurious offline alert.
+    started_at: Optional[datetime] = None
     last_run: Optional[datetime] = None
     last_error: Optional[str] = None
     # True once a camera_offline alert has been fired for the current outage;
@@ -832,6 +848,10 @@ class PipelineManager:
 
         logger.info(f"[{camera_id}] Pipeline worker started | poll_interval={config.poll_interval}s")
 
+        # Mark start for the warmup grace (suppresses offline alerts while the
+        # decode-detect DeepStream pipeline is still building/connecting RTSP).
+        stats.started_at = datetime.now()
+
         loop = asyncio.get_event_loop()
 
         while not stop_event.is_set():
@@ -995,7 +1015,17 @@ class PipelineManager:
                 # Camera has stopped delivering frames (rotated / powered off /
                 # link dropped) → fire a one-shot offline alert. The flag is
                 # cleared on the next successful iteration (recovery alert above).
-                if stats.consecutive_errors >= CAMERA_OFFLINE_AFTER_ERRORS and not stats.offline_alerted:
+                # Suppressed during the initial warmup grace so the decode-detect
+                # DeepStream pipeline build (~10s of 404s) doesn't false-alarm.
+                in_warmup = (
+                    stats.started_at is not None
+                    and (datetime.now() - stats.started_at).total_seconds() < CAMERA_WARMUP_GRACE_S
+                )
+                if (
+                    stats.consecutive_errors >= CAMERA_OFFLINE_AFTER_ERRORS
+                    and not stats.offline_alerted
+                    and not in_warmup
+                ):
                     stats.offline_alerted = True
                     await send_camera_state_alert(
                         camera_id, "offline",
