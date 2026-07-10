@@ -1273,9 +1273,35 @@ function CameraManagement({ onClose }) {
   );
 }
 
-/* ── Multi-location overview grid (landing) ── */
+/* ── Group cameras into locations ──
+   A "location" is the camera's free-text `location` field; cameras sharing it
+   collapse into one location. A camera with no location set becomes its own
+   single-stream location (keyed by camera_id). Each location holds one or more
+   streams (cameras) today, ready for multi-stream sites later. */
+function groupByLocation(cams) {
+  const map = new Map();
+  for (const c of cams) {
+    const label = (c.location || '').trim();
+    const key   = label || c.camera_id;
+    if (!map.has(key)) map.set(key, { location: key, named: !!label, cameras: [] });
+    map.get(key).cameras.push(c);
+  }
+  return Array.from(map.values())
+    .map(g => ({
+      ...g,
+      streamCount: g.cameras.length,
+      running:     g.cameras.filter(c => c.running).length,
+      slotCount:   g.cameras.reduce((s, c) => s + (c.slot_count || 0), 0),
+      errors:      g.cameras.reduce((s, c) => s + (c.errors || 0), 0),
+    }))
+    .sort((a, b) => a.location.localeCompare(b.location));
+}
+
+/* ── Location-oriented landing ──
+   Top-level unit is the location. Each card drills into that location's
+   monitoring view; a stream switcher there selects among its camera(s). */
 function Overview({ onSelect, onManage }) {
-  const [data, setData] = React.useState({ cameras: [], total: 0, running: 0 });
+  const [data, setData] = React.useState({ cameras: [] });
   const [err, setErr]   = React.useState(null);
 
   React.useEffect(() => {
@@ -1289,10 +1315,10 @@ function Overview({ onSelect, onManage }) {
     load(); const id = setInterval(load, 5000); return () => clearInterval(id);
   }, []);
 
-  const cams       = data.cameras || [];
-  const running    = cams.filter(c => c.running).length;
-  const offline    = cams.length - running;
-  const totalSlots = cams.reduce((sum, c) => sum + (c.slot_count || 0), 0);
+  const cams        = data.cameras || [];
+  const locations   = groupByLocation(cams);
+  const liveStreams = cams.filter(c => c.running).length;
+  const totalSlots  = cams.reduce((sum, c) => sum + (c.slot_count || 0), 0);
 
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
@@ -1329,13 +1355,13 @@ function Overview({ onSelect, onManage }) {
       <div className="bg-gradient-to-br from-brand-600 via-brand-600 to-brand-700 text-white">
         <div className="max-w-[1600px] mx-auto px-6 lg:px-10 py-8">
           <h1 className="text-2xl font-bold tracking-tight">Charging Locations</h1>
-          <p className="text-sm text-brand-100 mt-1">Live monitoring across all registered camera stations.</p>
+          <p className="text-sm text-brand-100 mt-1">Live monitoring across all charging locations.</p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
             {[
-              { label: 'Cameras',    value: cams.length },
-              { label: 'Live',       value: running,  dot: 'bg-success-400' },
-              { label: 'Offline',    value: offline,  dot: 'bg-white/50' },
-              { label: 'Total Slots',value: totalSlots },
+              { label: 'Locations',   value: locations.length },
+              { label: 'Streams',     value: cams.length },
+              { label: 'Live',        value: liveStreams,  dot: 'bg-success-400' },
+              { label: 'Total Slots', value: totalSlots },
             ].map(s => (
               <div key={s.label} className="bg-white/10 backdrop-blur rounded-xl border border-white/15 px-4 py-3">
                 <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand-100">
@@ -1356,41 +1382,47 @@ function Overview({ onSelect, onManage }) {
           </div>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-          {cams.map(c => (
-            <button key={c.camera_id} onClick={() => onSelect(c)}
-              className="group text-left bg-white rounded-2xl border border-slate-100 shadow-card hover:shadow-card-hover hover:border-brand-300 hover:-translate-y-0.5 transition-all p-5 relative overflow-hidden">
-              <span className={`absolute top-0 left-0 right-0 h-1 ${c.running ? 'bg-success-500' : 'bg-slate-200'}`} />
-              <div className="flex items-start justify-between gap-3 mb-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-400'}`}>
-                    <IconStation />
+          {locations.map(loc => {
+            const someLive = loc.running > 0;
+            return (
+              <button key={loc.location} onClick={() => onSelect(loc)}
+                className="group text-left bg-white rounded-2xl border border-slate-100 shadow-card hover:shadow-card-hover hover:border-brand-300 hover:-translate-y-0.5 transition-all p-5 relative overflow-hidden">
+                <span className={`absolute top-0 left-0 right-0 h-1 ${someLive ? 'bg-success-500' : 'bg-slate-200'}`} />
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${someLive ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-400'}`}>
+                      <IconStation />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-800 truncate">{loc.location}</div>
+                      <div className="text-xs text-slate-400 truncate">
+                        {loc.streamCount} stream{loc.streamCount === 1 ? '' : 's'} · {loc.slotCount} slot{loc.slotCount === 1 ? '' : 's'}
+                      </div>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <div className="font-semibold text-slate-800 truncate">{c.name || c.camera_id}</div>
-                    <div className="text-xs text-slate-400 truncate">{c.location || 'No location set'}</div>
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold flex-shrink-0 ${someLive ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${someLive ? 'bg-success-500 animate-pulse-dot' : 'bg-slate-400'}`} />
+                    {loc.running}/{loc.streamCount} live
+                  </span>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-50 text-xs text-slate-500 gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-mono text-slate-400 truncate">
+                      {loc.cameras.map(c => c.name || c.camera_id).join(', ')}
+                    </span>
+                    {loc.errors > 0 && <span className="text-amber-600 flex-shrink-0">{loc.errors} err</span>}
                   </div>
+                  <span className="text-brand-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap flex-shrink-0">Open →</span>
                 </div>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold flex-shrink-0 ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${c.running ? 'bg-success-500 animate-pulse-dot' : 'bg-slate-400'}`} />
-                  {c.running ? 'live' : 'stopped'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between pt-3 border-t border-slate-50 text-xs text-slate-500">
-                <div className="flex items-center gap-3">
-                  <span className="font-medium text-slate-600">{c.slot_count} slot{c.slot_count === 1 ? '' : 's'}</span>
-                  <span className="font-mono text-slate-400 truncate">{c.camera_id}</span>
-                  {c.errors > 0 && <span className="text-amber-600">{c.errors} err</span>}
-                </div>
-                <span className="text-brand-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">Open →</span>
-              </div>
-            </button>
-          ))}
-          {cams.length === 0 && (
+              </button>
+            );
+          })}
+          {locations.length === 0 && (
             <div className="col-span-full text-center text-slate-400 py-16 border border-dashed border-slate-200 rounded-2xl bg-white">
               <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-100 text-slate-300 flex items-center justify-center">
                 <IconStation />
               </div>
-              <p className="text-sm">No cameras yet. Click <span className="font-semibold text-slate-500">Manage Cameras</span> to add one.</p>
+              <p className="text-sm">No locations yet. Click <span className="font-semibold text-slate-500">Manage Cameras</span> to add a camera.</p>
             </div>
           )}
         </div>
@@ -1456,6 +1488,29 @@ function TabBar({ tab, setTab, violCount }) {
   );
 }
 
+/* ── Stream switcher ──
+   Picks which stream (camera) within the current location the tabs show. Today
+   a location has one stream, so this renders a single active pill; it becomes a
+   real selector the moment a location has more than one camera. */
+function StreamSwitcher({ cameras, activeId, onPick }) {
+  if (!cameras || cameras.length === 0) return null;
+  return (
+    <div className="inline-flex items-center gap-1 bg-white rounded-xl border border-slate-200 p-1 shadow-sm overflow-x-auto scrollbar-hide max-w-full">
+      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 hidden sm:inline flex-shrink-0">Stream</span>
+      {cameras.map(c => {
+        const active = c.camera_id === activeId;
+        return (
+          <button key={c.camera_id} onClick={() => onPick(c.camera_id)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${active ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${c.running ? (active ? 'bg-white' : 'bg-success-500') : 'bg-slate-300'}`} />
+            {c.name || c.camera_id}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [stationData, setStationData] = React.useState(null);
   const [sessions,    setSessions]    = React.useState([]);
@@ -1478,6 +1533,8 @@ function App() {
   const [view,               setView]               = React.useState('overview');  // 'overview' | 'station'
   const [cameraId,           setCameraId]           = React.useState(null);
   const [stationId,          setStationId]          = React.useState('station_01');
+  const [location,           setLocation]           = React.useState(null);   // selected location label
+  const [locationCameras,    setLocationCameras]    = React.useState([]);      // streams (cameras) in that location
   const [tab,                setTab]                = React.useState('bays');  // bays | sessions | energy | violations
 
   const handleExcelUpload = async (file) => {
@@ -1574,11 +1631,15 @@ function App() {
       <React.Fragment>
         <Overview
           onManage={() => setShowCameras(true)}
-          onSelect={(cam) => {
-            setCameraId(cam.camera_id);
-            setStationId(cam.location || cam.camera_id);
+          onSelect={(loc) => {
+            const cams = loc.cameras || [];
+            setLocation(loc.location);
+            setLocationCameras(cams);
+            setCameraId(cams[0] ? cams[0].camera_id : null);   // default to first stream
+            setStationId(loc.location);
             setStationData(null); setSessions([]); setViolations([]); setActiveViolations([]);
             setError(null); setLastUpdated(null);
+            setTab('bays');
             setView('station');
           }}
         />
@@ -1619,8 +1680,7 @@ function App() {
             <span className="text-slate-300 text-sm">/</span>
             <div className="flex items-center gap-1.5 text-slate-800 text-sm font-semibold">
               <IconStation />
-              <span>{stationId}</span>
-              <span className="text-slate-400 font-normal hidden sm:inline">· {cameraId}</span>
+              <span>{location}</span>
             </div>
           </div>
 
@@ -1665,9 +1725,20 @@ function App() {
           </div>
         )}
 
+        {/* ── Location header + stream switcher ── */}
+        <div className="flex items-end justify-between gap-4 flex-wrap mb-6">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-800 tracking-tight">{location}</h1>
+            <p className="text-sm text-slate-400 mt-0.5">
+              {locationCameras.length} stream{locationCameras.length === 1 ? '' : 's'} · {slotIds.length} slot{slotIds.length === 1 ? '' : 's'}
+            </p>
+          </div>
+          <StreamSwitcher cameras={locationCameras} activeId={cameraId} onPick={setCameraId} />
+        </div>
+
         {/* ── Stat Cards (persistent summary strip above the tabs) ── */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
-          <StatCard label="Total Stations"   value={1}            accent="slate" icon={<IconStation />} />
+          <StatCard label="Streams"          value={locationCameras.length} sub="At this location" accent="slate" icon={<IconStation />} />
           <StatCard label="Active Sessions"  value={activeCount}  sub="Currently charging" accent="green" icon={<IconBolt />} />
           <StatCard label="Idle Slots"       value={idleSlots}    sub="Available now"      accent="blue"  icon={<IconPlug />} />
           <StatCard label="Live Energy"      value={totalKwh > 0 ? `${totalKwh.toFixed(2)} kWh` : '—'} sub="Across active slots" accent="blue" icon={<IconBolt />} />
