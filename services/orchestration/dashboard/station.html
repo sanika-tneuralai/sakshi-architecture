@@ -1324,7 +1324,7 @@ function Overview({ onSelect, onManage }) {
     <div className="min-h-screen bg-[#F9FAFB]">
       {/* ── Top nav ── */}
       <nav className="bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-6 lg:px-10 h-16 flex items-center justify-between">
+        <div className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
               <IconBolt />
@@ -1353,7 +1353,7 @@ function Overview({ onSelect, onManage }) {
 
       {/* ── Hero banner ── */}
       <div className="bg-gradient-to-br from-brand-600 via-brand-600 to-brand-700 text-white">
-        <div className="max-w-[1600px] mx-auto px-6 lg:px-10 py-8">
+        <div className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 py-8">
           <h1 className="text-2xl font-bold tracking-tight">Charging Locations</h1>
           <p className="text-sm text-brand-100 mt-1">Live monitoring across all charging locations.</p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
@@ -1375,7 +1375,7 @@ function Overview({ onSelect, onManage }) {
         </div>
       </div>
 
-      <main className="max-w-[1600px] mx-auto px-6 lg:px-10 py-8">
+      <main className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 py-8">
         {err && (
           <div className="mb-6 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
             <IconWarning /><span className="font-medium">API Error:</span> {err}
@@ -1668,7 +1668,7 @@ function App() {
 
       {/* ── Top Nav ── */}
       <nav className="bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-6 lg:px-10 h-16 flex items-center justify-between">
+        <div className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 h-16 flex items-center justify-between">
           {/* Left: brand + breadcrumb */}
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
@@ -1715,7 +1715,7 @@ function App() {
       </nav>
 
       {/* ── Main content ── */}
-      <main className="max-w-[1600px] mx-auto px-6 lg:px-10 py-8">
+      <main className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 py-8">
 
         {/* Error banner */}
         {error && (
