@@ -59,17 +59,19 @@
 
 /* ── Constants ── */
 const BASE           = 'http://13.201.133.171:8000';
-const STATION_URL    = `${BASE}/dashboard/station?camera_id=camera_01&station_id=station_01`;
-const COMPLIANCE_URL = `${BASE}/dashboard/compliance-violations?camera_id=camera_01&station_id=station_01&limit=200`;
-const ACTIVE_VIOLATIONS_URL = `${BASE}/dashboard/active-violations?camera_id=camera_01&station_id=station_01`;
+// Per-camera dashboard URLs (station_id is cosmetic; backend filters by camera_id).
+const stationUrl          = (cid, sid) => `${BASE}/dashboard/station?camera_id=${encodeURIComponent(cid)}&station_id=${encodeURIComponent(sid)}`;
+const complianceUrl       = (cid, sid) => `${BASE}/dashboard/compliance-violations?camera_id=${encodeURIComponent(cid)}&station_id=${encodeURIComponent(sid)}&limit=200`;
+const activeViolationsUrl = (cid, sid) => `${BASE}/dashboard/active-violations?camera_id=${encodeURIComponent(cid)}&station_id=${encodeURIComponent(sid)}`;
 const CAMERAS_URL    = `${BASE}/pipeline/cameras`;
+const OVERVIEW_URL   = `${BASE}/dashboard/overview`;
 const POLL_MS        = 2000;
 
 /* Usecases offered when registering a camera (EV charging surveillance set). */
 const USECASE_OPTIONS = ['parking_detection', 'vehicle_extraction', 'gun_detection', 'parking_compliance'];
 
-function sessionsUrl(date) {
-  const base = `${BASE}/dashboard/sessions?camera_id=camera_01&limit=100`;
+function sessionsUrl(cid, date) {
+  const base = `${BASE}/dashboard/sessions?camera_id=${encodeURIComponent(cid)}&limit=100`;
   return date ? `${base}&date=${date}` : base;
 }
 
@@ -965,11 +967,133 @@ function ViolationToasts({ active }) {
 }
 
 /* ── App ── */
+/* ── ROI drawing: draw the parking-slot polygon on a live snapshot ── */
+function ROIEditor({ cameraId, onClose, onSaved }) {
+  const canvasRef = React.useRef(null);
+  const imgRef    = React.useRef(null);
+  const [pts, setPts]       = React.useState([]);   // image-pixel coords [[x,y],...]
+  const [status, setStatus] = React.useState('loading'); // loading|ready|error|saving|saved
+  const [err, setErr]       = React.useState(null);
+  const [dims, setDims]     = React.useState({ w: 900, h: 506, scale: 1 });
+  const DISPLAY_W = 900;
+
+  // Pull a live frame (retry while the pipeline warms up ~10s).
+  React.useEffect(() => {
+    let cancelled = false, tries = 0;
+    async function loadSnap() {
+      try {
+        const r = await fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/snapshot`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (!d.frame) throw new Error('no frame yet');
+        const img = new Image();
+        img.onload = () => {
+          if (cancelled) return;
+          const scale = DISPLAY_W / img.naturalWidth;
+          imgRef.current = img;
+          setDims({ w: DISPLAY_W, h: Math.round(img.naturalHeight * scale), scale });
+          setStatus('ready');
+        };
+        img.src = `data:image/jpeg;base64,${d.frame}`;
+      } catch (e) {
+        tries += 1;
+        if (!cancelled && tries < 15) { setStatus('loading'); setTimeout(loadSnap, 2000); }
+        else if (!cancelled) { setErr(e.message); setStatus('error'); }
+      }
+    }
+    loadSnap();
+    return () => { cancelled = true; };
+  }, [cameraId]);
+
+  // Redraw frame + polygon on every change.
+  React.useEffect(() => {
+    const c = canvasRef.current, img = imgRef.current;
+    if (!c || !img || !(status === 'ready' || status === 'saving' || status === 'saved')) return;
+    c.width = dims.w; c.height = dims.h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, dims.w, dims.h);
+    if (pts.length) {
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = p[0] * dims.scale, y = p[1] * dims.scale;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      if (pts.length > 2) ctx.closePath();
+      ctx.strokeStyle = '#e11d48'; ctx.lineWidth = 2; ctx.stroke();
+      if (pts.length > 2) { ctx.fillStyle = 'rgba(225,29,72,0.15)'; ctx.fill(); }
+      pts.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p[0] * dims.scale, p[1] * dims.scale, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#e11d48'; ctx.fill();
+      });
+    }
+  }, [pts, status, dims]);
+
+  const onCanvasClick = (e) => {
+    if (status !== 'ready') return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / dims.scale;
+    const y = (e.clientY - rect.top) / dims.scale;
+    setPts(prev => [...prev, [Math.round(x), Math.round(y)]]);
+  };
+
+  async function save() {
+    if (pts.length < 3) { setErr('Draw at least 3 points around the slot.'); return; }
+    setStatus('saving'); setErr(null);
+    try {
+      const r = await fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/rois`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rois: [{ roi_id: 'ROI_1', points: pts, label: 'Slot 1' }] }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
+      setStatus('saved');
+      if (onSaved) onSaved();
+      setTimeout(onClose, 900);
+    } catch (e) { setErr(e.message); setStatus('ready'); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/50 flex items-start justify-center overflow-y-auto py-8 px-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 className="text-base font-bold text-slate-800">Draw parking slot — {cameraId}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div className="p-6 space-y-4">
+          <p className="text-sm text-slate-500">Click around the parking slot to outline it (≥3 points). This region defines the slot for detection.</p>
+          {status === 'loading' && <div className="text-sm text-slate-500">Waiting for a live frame (camera warming up)…</div>}
+          {status === 'error' && <div className="text-sm text-rose-600">Couldn't get a frame: {err}. Is the camera running?</div>}
+          {(status === 'ready' || status === 'saving' || status === 'saved') && (
+            <div className="space-y-3">
+              <canvas ref={canvasRef} onClick={onCanvasClick} className="border border-slate-200 rounded-lg cursor-crosshair max-w-full" />
+              {err && <div className="text-sm text-rose-600">{err}</div>}
+              {status === 'saved' && <div className="text-sm text-success-600">Saved ✓</div>}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-500">{pts.length} point(s)</span>
+                <div className="flex gap-2">
+                  <button onClick={() => setPts(p => p.slice(0, -1))} className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50">Undo</button>
+                  <button onClick={() => setPts([])} className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50">Clear</button>
+                  <button onClick={save} disabled={status === 'saving' || pts.length < 3}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-semibold text-white ${status === 'saving' || pts.length < 3 ? 'bg-slate-300' : 'bg-brand-600 hover:bg-brand-700'}`}>
+                    {status === 'saving' ? 'Saving…' : 'Save slot'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Camera Management (register / list / stop cameras) ── */
 function CameraManagement({ onClose }) {
   const [cameras, setCameras] = React.useState([]);
   const [loadErr, setLoadErr] = React.useState(null);
   const [camId, setCamId]     = React.useState('');
+  const [name, setName]       = React.useState('');
+  const [location, setLocation] = React.useState('');
   const [rtsp, setRtsp]       = React.useState('');
   const [fps, setFps]         = React.useState(5);
   const [conf, setConf]       = React.useState(0.5);
@@ -977,6 +1101,7 @@ function CameraManagement({ onClose }) {
   const [ucs, setUcs]         = React.useState(['parking_detection']);
   const [busy, setBusy]       = React.useState(false);
   const [msg, setMsg]         = React.useState(null);
+  const [roiCam, setRoiCam]   = React.useState(null);   // camera_id whose ROI editor is open
 
   async function load() {
     try {
@@ -999,15 +1124,18 @@ function CameraManagement({ onClose }) {
       const r = await fetch(`${BASE}/pipeline/start/${encodeURIComponent(camId.trim())}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          camera_id: camId.trim(), rtsp_url: rtsp.trim(), fps: Number(fps),
+          camera_id: camId.trim(), name: name.trim() || null, location: location.trim() || null,
+          rtsp_url: rtsp.trim(), fps: Number(fps),
           usecases: ucs, confidence_threshold: Number(conf), poll_interval: Number(poll),
         }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
-      setMsg({ ok: true, text: `Camera "${camId.trim()}" registered — it may take ~10s to warm up.` });
-      setCamId(''); setRtsp('');
+      const newId = camId.trim();
+      setMsg({ ok: true, text: `Camera "${newId}" registered — draw its parking slot once it warms up (~10s).` });
+      setCamId(''); setName(''); setLocation(''); setRtsp('');
       load();
+      setRoiCam(newId);   // jump straight to drawing the slot ROI
     } catch (e) { setMsg({ ok: false, text: e.message }); }
     finally { setBusy(false); }
   }
@@ -1025,6 +1153,7 @@ function CameraManagement({ onClose }) {
   const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500';
 
   return (
+    <React.Fragment>
     <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center overflow-y-auto py-10 px-4" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -1035,6 +1164,14 @@ function CameraManagement({ onClose }) {
         <div className="p-6 space-y-6">
           <form onSubmit={register} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1">Name</label>
+                <input className={inputCls} value={name} onChange={e => setName(e.target.value)} placeholder="Front gate camera" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1">Location</label>
+                <input className={inputCls} value={location} onChange={e => setLocation(e.target.value)} placeholder="Station 1 · Bengaluru" />
+              </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">Camera ID</label>
                 <input className={inputCls} value={camId} onChange={e => setCamId(e.target.value)} placeholder="station1_cam1" />
@@ -1112,7 +1249,8 @@ function CameraManagement({ onClose }) {
                         </span>
                         {c.errors > 0 && <span className="ml-2 text-xs text-amber-600">{c.errors} err</span>}
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        <button onClick={() => setRoiCam(c.camera_id)} className="text-xs font-semibold text-brand-600 hover:text-brand-700 mr-3">Draw ROI</button>
                         <button onClick={() => stopCam(c.camera_id)} className="text-xs font-semibold text-rose-600 hover:text-rose-700">Stop</button>
                       </td>
                     </tr>
@@ -1123,6 +1261,81 @@ function CameraManagement({ onClose }) {
           </div>
         </div>
       </div>
+    </div>
+    {roiCam && <ROIEditor cameraId={roiCam} onClose={() => setRoiCam(null)} onSaved={load} />}
+    </React.Fragment>
+  );
+}
+
+/* ── Multi-location overview grid (landing) ── */
+function Overview({ onSelect, onManage }) {
+  const [data, setData] = React.useState({ cameras: [], total: 0, running: 0 });
+  const [err, setErr]   = React.useState(null);
+
+  React.useEffect(() => {
+    async function load() {
+      try {
+        const r = await fetch(OVERVIEW_URL);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        setData(await r.json()); setErr(null);
+      } catch (e) { setErr(e.message); }
+    }
+    load(); const id = setInterval(load, 5000); return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-[#F9FAFB]">
+      <nav className="bg-white border-b border-slate-100 shadow-sm sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-brand-600">
+            <IconBolt />
+            <span className="font-bold text-slate-800 text-sm">EV Monitor</span>
+            <span className="text-slate-300 text-sm mx-1">/</span>
+            <span className="text-slate-800 text-sm font-semibold">All Locations</span>
+          </div>
+          <button onClick={onManage}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 transition-colors">
+            + Manage Cameras
+          </button>
+        </div>
+      </nav>
+
+      <main className="max-w-6xl mx-auto px-6 py-8">
+        <div className="mb-6">
+          <h1 className="text-lg font-bold text-slate-800">Locations</h1>
+          <p className="text-sm text-slate-500">{data.total} camera(s) · {data.running} running</p>
+        </div>
+        {err && (
+          <div className="mb-6 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+            <IconWarning /><span className="font-medium">API Error:</span> {err}
+          </div>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+          {data.cameras.map(c => (
+            <button key={c.camera_id} onClick={() => onSelect(c)}
+              className="text-left bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-brand-500 transition-all p-5">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-semibold text-slate-800 truncate">{c.name || c.camera_id}</span>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${c.running ? 'bg-success-500 animate-pulse-dot' : 'bg-slate-400'}`} />
+                  {c.running ? 'live' : 'stopped'}
+                </span>
+              </div>
+              <div className="text-xs text-slate-500 mb-4">{c.location || '—'}</div>
+              <div className="flex items-center gap-4 text-xs text-slate-500">
+                <span>{c.slot_count} slot{c.slot_count === 1 ? '' : 's'}</span>
+                <span className="truncate">{c.camera_id}</span>
+                {c.errors > 0 && <span className="text-amber-600 ml-auto">{c.errors} err</span>}
+              </div>
+            </button>
+          ))}
+          {data.cameras.length === 0 && (
+            <div className="col-span-full text-center text-slate-400 py-12 border border-dashed border-slate-200 rounded-2xl">
+              No cameras yet. Click <span className="font-semibold">Manage Cameras</span> to add one.
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
 }
@@ -1146,6 +1359,9 @@ function App() {
   const [analysing,          setAnalysing]          = React.useState(false);
   const [analyseError,       setAnalyseError]       = React.useState(null);
   const [showCameras,        setShowCameras]        = React.useState(false);
+  const [view,               setView]               = React.useState('overview');  // 'overview' | 'station'
+  const [cameraId,           setCameraId]           = React.useState(null);
+  const [stationId,          setStationId]          = React.useState('station_01');
 
   const handleExcelUpload = async (file) => {
     if (!file) return;
@@ -1155,7 +1371,7 @@ function App() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch(`${BASE}/dashboard/energy-comparison/upload?camera_id=camera_01`, {
+      const res = await fetch(`${BASE}/dashboard/energy-comparison/upload?camera_id=${encodeURIComponent(cameraId || 'camera_01')}`, {
         method: 'POST',
         body: form,
       });
@@ -1201,13 +1417,14 @@ function App() {
   };
 
   React.useEffect(() => {
+    if (view !== 'station' || !cameraId) return;   // only poll when viewing a specific camera
     async function poll() {
       try {
         const [stRes, seRes, coRes, avRes] = await Promise.all([
-          fetch(STATION_URL),
-          fetch(sessionsUrl(filterDate)),
-          fetch(COMPLIANCE_URL),
-          fetch(ACTIVE_VIOLATIONS_URL),
+          fetch(stationUrl(cameraId, stationId)),
+          fetch(sessionsUrl(cameraId, filterDate)),
+          fetch(complianceUrl(cameraId, stationId)),
+          fetch(activeViolationsUrl(cameraId, stationId)),
         ]);
         if (!stRes.ok) throw new Error(`Station API: HTTP ${stRes.status}`);
         if (!seRes.ok) throw new Error(`Sessions API: HTTP ${seRes.status}`);
@@ -1232,11 +1449,32 @@ function App() {
     poll();
     const id = setInterval(poll, POLL_MS);
     return () => clearInterval(id);
-  }, [filterDate]);
+  }, [filterDate, view, cameraId, stationId]);
+
+  // Landing: multi-location overview. Click a card to drill into its station view.
+  if (view === 'overview') {
+    return (
+      <React.Fragment>
+        <Overview
+          onManage={() => setShowCameras(true)}
+          onSelect={(cam) => {
+            setCameraId(cam.camera_id);
+            setStationId(cam.location || cam.camera_id);
+            setStationData(null); setSessions([]); setViolations([]); setActiveViolations([]);
+            setError(null); setLastUpdated(null);
+            setView('station');
+          }}
+        />
+        {showCameras && <CameraManagement onClose={() => setShowCameras(false)} />}
+      </React.Fragment>
+    );
+  }
 
   const slots        = stationData?.slots || {};
+  // Use this camera's actual slot ROIs when present; fall back to the legacy pair.
+  const slotIds      = Object.keys(slots).length ? Object.keys(slots).sort() : SLOTS;
   const activeCount  = sessions.filter(s => ['charging', 'active'].includes((s.session_status || '').toLowerCase())).length;
-  const slotStatuses = SLOTS.map(id => (slots[id]?.status || 'empty').toLowerCase());
+  const slotStatuses = slotIds.map(id => (slots[id]?.status || 'empty').toLowerCase());
   const idleSlots    = slotStatuses.filter(s => s === 'empty').length;
   const violCount    = deduplicateViolations(violations).length;
   const totalKwh     = Object.values(slots).reduce((sum, s) => sum + (s?.energy_kwh ?? 0), 0);
@@ -1260,12 +1498,13 @@ function App() {
               <span className="font-bold text-slate-800 text-sm">EV Monitor</span>
             </div>
             <span className="text-slate-300 text-sm">/</span>
-            <div className="flex items-center gap-1.5 text-slate-500 text-sm">
-              <IconStation />
-              <span>station_01</span>
-            </div>
+            <button onClick={() => setView('overview')} className="text-slate-500 hover:text-brand-600 text-sm">All Locations</button>
             <span className="text-slate-300 text-sm">/</span>
-            <span className="text-slate-800 text-sm font-semibold">Live Dashboard</span>
+            <div className="flex items-center gap-1.5 text-slate-800 text-sm font-semibold">
+              <IconStation />
+              <span>{stationId}</span>
+              <span className="text-slate-400 font-normal">· {cameraId}</span>
+            </div>
           </div>
 
           {/* Right: manage-cameras + live indicator + time */}
@@ -1314,10 +1553,10 @@ function App() {
           <SectionHeader
             icon={<IconCar />}
             title="Live Parking Bays"
-            sub={`station_01 · ${SLOTS.length} slots`}
+            sub={`${stationId} · ${slotIds.length} slot${slotIds.length === 1 ? '' : 's'}`}
           />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            {SLOTS.map(slotId => (
+            {slotIds.map(slotId => (
               <BayCard key={slotId} slotId={slotId} data={slots[slotId]} />
             ))}
           </div>
