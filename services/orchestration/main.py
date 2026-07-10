@@ -141,7 +141,14 @@ ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://100.112.71.40
 # visible without freezing the loop.
 REQUEST_TIMEOUT          = float(os.getenv("REQUEST_TIMEOUT", "30.0"))     # legacy default
 DETECTION_TIMEOUT        = float(os.getenv("DETECTION_TIMEOUT", "8.0"))    # Pi inference call
-USECASE_TIMEOUT          = float(os.getenv("USECASE_TIMEOUT", "5.0"))      # local-network call
+# The usecase call is synchronous: the usecase API holds the request open
+# until its shard worker has run EVERY usecase for the frame (queue path,
+# workers/tasks.evaluate_frame_task), and its await_frame_result waits up to
+# TAKE_RESULT_TIMEOUT=30s. So this MUST exceed that 30s or orchestration aborts
+# a frame the worker is still legitimately processing (retry storm, no
+# ChargingSession update). Backpressure-skipped frames return [] near-instantly,
+# so this ceiling only bites on frames that genuinely run long (LLM rules).
+USECASE_TIMEOUT          = float(os.getenv("USECASE_TIMEOUT", "35.0"))     # >= usecase await (30s)
 ALERT_TIMEOUT            = float(os.getenv("ALERT_TIMEOUT", "5.0"))        # local-network call
 RETRY_ATTEMPTS           = int(os.getenv("RETRY_ATTEMPTS", "1"))           # was 3 — compound delays
 

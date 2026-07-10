@@ -7,23 +7,35 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Service URLs (update these based on your deployment)
-      - CAMERA_DETECTION_URL=${CAMERA_DETECTION_URL:-http://camera-detection:8000}
-      - USECASE_SERVICE_URL=${USECASE_SERVICE_URL:-http://usecase:8001}
-      - ALERT_SERVICE_URL=${ALERT_SERVICE_URL:-http://alert:8002}
-      
+      # Service URLs. Defaults assume each service runs as its own compose
+      # project on the SAME host (camera-detection :8004, the sharded usecase
+      # stack :8001, alert :8002) reached via host.docker.internal. Override
+      # with Tailscale/host IPs on a distributed deploy.
+      - CAMERA_DETECTION_URL=${CAMERA_DETECTION_URL:-http://host.docker.internal:8004}
+      - USECASE_SERVICE_URL=${USECASE_SERVICE_URL:-http://host.docker.internal:8001}
+      - ALERT_SERVICE_URL=${ALERT_SERVICE_URL:-http://host.docker.internal:8002}
+
       # Request configuration
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+      # Must exceed the usecase queue-path await (30s): the usecase API holds
+      # the request open until its shard worker finishes the whole frame.
+      - USECASE_TIMEOUT=${USECASE_TIMEOUT:-35}
+      - DETECTION_TIMEOUT=${DETECTION_TIMEOUT:-8}
+      - ALERT_TIMEOUT=${ALERT_TIMEOUT:-5}
       - MAX_RETRIES=${MAX_RETRIES:-3}
       - RETRY_BACKOFF_FACTOR=${RETRY_BACKOFF_FACTOR:-0.5}
-      
+
       # Database (optional - for logging pipeline executions)
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/goec}
-      
+
       # Application settings
       - PORT=${PORT:-8000}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    
+
+    # Reach the other services published on the host (host.docker.internal above).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     volumes:
       - ./logs:/app/logs
     
