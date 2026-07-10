@@ -348,7 +348,7 @@ function SessionsTable({ sessions }) {
   return (
     <div className="overflow-x-auto">
     <table className="w-full text-sm">
-      <thead>
+      <thead className="bg-slate-50/80">
         <tr>
           {cols.map(c => (
             <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
@@ -364,7 +364,7 @@ function SessionsTable({ sessions }) {
           const isAnomaly = parkSecs !== null && parkSecs > ANOMALY_HOURS * 3600;
           const slotLabel = s.slot_id ? s.slot_id.replace(/ROI_?/i, 'Slot ').trim() : null;
           return (
-            <tr key={s.session_id} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
+            <tr key={s.session_id} className={`transition-colors hover:bg-brand-50/40 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}`}>
               <td className="px-4 py-3 font-mono text-xs">
                 <span className="font-semibold text-slate-700">#{sessions.length - i}</span>
               </td>
@@ -674,7 +674,7 @@ function EnergyLossTable({ results, summary }) {
       )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
-          <thead>
+          <thead className="bg-slate-50/80">
             <tr>
               {cols.map(c => (
                 <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
@@ -691,7 +691,7 @@ function EnergyLossTable({ results, summary }) {
                 ? r.loss_pct
                 : (loss != null && r.client_kwh > 0 ? parseFloat(((loss / r.client_kwh) * 100).toFixed(1)) : null); */
               return (
-                <tr key={r.excel_row + '-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
+                <tr key={r.excel_row + '-' + i} className={`transition-colors hover:bg-brand-50/40 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}`}>
                   <td className="px-4 py-3 text-slate-600 text-xs whitespace-nowrap">{r.ocpp_date || <NA text="—" />}</td>
                   <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(r.vrn) || <NA />}</td>
                   <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
@@ -730,20 +730,24 @@ function EnergyLossTable({ results, summary }) {
 }
 
 /* ── Stat Card ── */
-function StatCard({ label, value, sub, accent }) {
+function StatCard({ label, value, sub, accent, icon }) {
   const accents = {
-    blue:  { bar: 'bg-brand-500',   val: 'text-brand-600' },
-    green: { bar: 'bg-success-500', val: 'text-success-600' },
-    amber: { bar: 'bg-amber-400',   val: 'text-amber-600' },
-    slate: { bar: 'bg-slate-300',   val: 'text-slate-700' },
+    blue:  { tile: 'bg-brand-50 text-brand-600',     glow: 'from-brand-500/10' },
+    green: { tile: 'bg-success-50 text-success-600', glow: 'from-success-500/10' },
+    amber: { tile: 'bg-amber-50 text-amber-600',     glow: 'from-amber-400/10' },
+    slate: { tile: 'bg-slate-100 text-slate-500',    glow: 'from-slate-400/10' },
   };
-  const { bar, val } = accents[accent] || accents.slate;
+  const a = accents[accent] || accents.slate;
   return (
-    <div className="bg-white rounded-2xl shadow-card p-5 flex flex-col gap-1 relative overflow-hidden">
-      <div className={`absolute top-0 left-0 right-0 h-0.5 ${bar}`} />
-      <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</p>
-      <p className={`text-3xl font-bold ${val} leading-none`}>{value}</p>
-      {sub && <p className="text-xs text-slate-400">{sub}</p>}
+    <div className="bg-white rounded-2xl shadow-card p-5 relative overflow-hidden hover:shadow-card-hover transition-shadow">
+      {/* soft corner glow for depth */}
+      <div className={`absolute -top-10 -right-10 w-28 h-28 rounded-full bg-gradient-to-br ${a.glow} to-transparent pointer-events-none`} />
+      <div className="flex items-start justify-between mb-3">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</p>
+        {icon && <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${a.tile}`}>{icon}</div>}
+      </div>
+      <p className="text-3xl font-bold text-slate-800 leading-none">{value}</p>
+      {sub && <p className="text-xs text-slate-400 mt-1.5">{sub}</p>}
     </div>
   );
 }
@@ -751,10 +755,10 @@ function StatCard({ label, value, sub, accent }) {
 /* ── Section Header ── */
 function SectionHeader({ icon, title, sub }) {
   return (
-    <div className="flex items-center gap-2 mb-4">
-      <div className="text-slate-400">{icon}</div>
+    <div className="flex items-center gap-3 mb-4">
+      <div className="w-9 h-9 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center flex-shrink-0">{icon}</div>
       <div>
-        <h2 className="text-sm font-bold text-slate-700">{title}</h2>
+        <h2 className="text-base font-bold text-slate-800">{title}</h2>
         {sub && <p className="text-xs text-slate-400">{sub}</p>}
       </div>
     </div>
@@ -1602,21 +1606,21 @@ function App() {
       {showCameras && <CameraManagement onClose={() => setShowCameras(false)} />}
 
       {/* ── Top Nav ── */}
-      <nav className="bg-white border-b border-slate-100 shadow-sm sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-6 lg:px-10 h-14 flex items-center justify-between">
+      <nav className="bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm sticky top-0 z-50">
+        <div className="max-w-[1600px] mx-auto px-6 lg:px-10 h-16 flex items-center justify-between">
           {/* Left: brand + breadcrumb */}
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-brand-600">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
               <IconBolt />
-              <span className="font-bold text-slate-800 text-sm">EV Monitor</span>
             </div>
-            <span className="text-slate-300 text-sm">/</span>
+            <span className="font-bold text-slate-800 text-sm hidden sm:block">EV Monitor</span>
+            <span className="text-slate-300 text-sm hidden sm:block">/</span>
             <button onClick={() => setView('overview')} className="text-slate-500 hover:text-brand-600 text-sm">All Locations</button>
             <span className="text-slate-300 text-sm">/</span>
             <div className="flex items-center gap-1.5 text-slate-800 text-sm font-semibold">
               <IconStation />
               <span>{stationId}</span>
-              <span className="text-slate-400 font-normal">· {cameraId}</span>
+              <span className="text-slate-400 font-normal hidden sm:inline">· {cameraId}</span>
             </div>
           </div>
 
@@ -1663,12 +1667,12 @@ function App() {
 
         {/* ── Stat Cards (persistent summary strip above the tabs) ── */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
-          <StatCard label="Total Stations"   value={1}            accent="slate" />
-          <StatCard label="Active Sessions"  value={activeCount}  sub="Currently charging" accent="green" />
-          <StatCard label="Idle Slots"       value={idleSlots}    sub="Available now"      accent="blue" />
-          <StatCard label="Live Energy"      value={totalKwh > 0 ? `${totalKwh.toFixed(2)} kWh` : '—'} sub="Across active slots" accent="blue" />
+          <StatCard label="Total Stations"   value={1}            accent="slate" icon={<IconStation />} />
+          <StatCard label="Active Sessions"  value={activeCount}  sub="Currently charging" accent="green" icon={<IconBolt />} />
+          <StatCard label="Idle Slots"       value={idleSlots}    sub="Available now"      accent="blue"  icon={<IconPlug />} />
+          <StatCard label="Live Energy"      value={totalKwh > 0 ? `${totalKwh.toFixed(2)} kWh` : '—'} sub="Across active slots" accent="blue" icon={<IconBolt />} />
           <button onClick={() => setTab('violations')} className="text-left focus:outline-none">
-            <StatCard label="Violations"     value={violCount}    sub="Tap to review"      accent="amber" />
+            <StatCard label="Violations"     value={violCount}    sub="Tap to review"      accent="amber" icon={<IconWarning />} />
           </button>
         </div>
 
@@ -1679,7 +1683,7 @@ function App() {
         {tab === 'bays' && (
         <div className="mb-8">
           <SectionHeader
-            icon={<IconCar />}
+            icon={<IconGrid />}
             title="Live Parking Bays"
             sub={`${stationId} · ${slotIds.length} slot${slotIds.length === 1 ? '' : 's'}`}
           />
@@ -1767,10 +1771,10 @@ function App() {
         {tab === 'sessions' && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <div className="text-slate-400"><IconBolt /></div>
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center flex-shrink-0"><IconList /></div>
               <div>
-                <h2 className="text-sm font-bold text-slate-700">Charging Sessions</h2>
+                <h2 className="text-base font-bold text-slate-800">Charging Sessions</h2>
                 <p className="text-xs text-slate-400">
                   {sessions.length} session{sessions.length !== 1 ? 's' : ''} on {filterDate}
                 </p>
@@ -1803,10 +1807,10 @@ function App() {
         {tab === 'violations' && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <div className="text-slate-400"><IconWarning /></div>
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center flex-shrink-0"><IconWarning /></div>
               <div>
-                <h2 className="text-sm font-bold text-slate-700">Parking Compliance Violations</h2>
+                <h2 className="text-base font-bold text-slate-800">Parking Compliance Violations</h2>
                 <p className="text-xs text-slate-400">Snapshot evidence of unauthorized or wrong parking</p>
               </div>
             </div>
