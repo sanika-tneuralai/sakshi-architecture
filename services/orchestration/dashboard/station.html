@@ -1325,21 +1325,23 @@ function Overview({ onSelect, onManage }) {
       {/* ── Top nav ── */}
       <nav className="bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm sticky top-0 z-50">
         <div className="w-full px-4 sm:px-6 lg:px-10 xl:px-14 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
-              <IconBolt />
-            </div>
-            <div className="leading-tight">
-              <div className="font-bold text-slate-800 text-sm">EV Monitor</div>
-              <div className="text-[11px] text-slate-400">All Locations</div>
-            </div>
-          </div>
           <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
+                <IconBolt />
+              </div>
+              <div className="leading-tight">
+                <div className="font-bold text-slate-800 text-sm">EV Monitor</div>
+                <div className="text-[11px] text-slate-400">All Locations</div>
+              </div>
+            </div>
+            <span className="w-px h-6 bg-slate-200 hidden sm:block" />
             <button onClick={onManage}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 shadow-sm transition-colors">
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 transition-colors">
               + Manage Cameras
             </button>
-            <span className="w-px h-5 bg-slate-200 hidden sm:block" />
+          </div>
+          <div className="flex items-center gap-3">
             <button
               onClick={() => Auth.logout()}
               title="Sign out"
@@ -1682,15 +1684,16 @@ function App() {
               <IconStation />
               <span>{location}</span>
             </div>
-          </div>
-
-          {/* Right: manage-cameras + live indicator + time */}
-          <div className="flex items-center gap-3">
+            <span className="w-px h-6 bg-slate-200 mx-1 hidden sm:block" />
             <button
               onClick={() => setShowCameras(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 transition-colors">
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 transition-colors">
               + Manage Cameras
             </button>
+          </div>
+
+          {/* Right: live indicator + sign out */}
+          <div className="flex items-center gap-3">
             {lastUpdated ? (
               <>
                 <div className="flex items-center gap-1.5">
