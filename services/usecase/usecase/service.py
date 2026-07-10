@@ -1,23 +1,30 @@
 """
 Usecase/service.py - Orchestrator. Decides: direct path or queue path?
 
-Two Execution paths:
-1.Async path(default, production):
-submit_usecase_tasks() -> RabbitMQ -> Celery Worker -> Redis -> await results
-Best for 100 camereas, high throughput, parallel execution
+Two execution paths, both run the SAME engine (evaluate_all_usecases), so
+behaviour is identical — the only difference is WHERE the frame is evaluated.
 
-2. Direct path(fallback, testing):
-evaluate_all_usecases() -> sequential evaluation in the API process
-Best fir: development without RabbitMQ, unit tests, small deployments
+1. Queue path (production, USE_WORKER_QUEUE=true):
+   submit_frame_task() -> RabbitMQ (camera's shard queue) -> Celery worker
+   (concurrency=1) runs evaluate_all_usecases -> Redis -> await one result.
+   ONE whole-frame task per (camera, frame), routed by camera_id. Cameras run
+   in parallel across shard workers; each camera's frames stay ordered on its
+   own lane. This is what makes 5 (and later 500) streams run in parallel
+   without corrupting the per-camera slot state / ChargingSession.
 
-The path is selected by the USE_WORKER_QUEUE env variable. 
-This means you can develop locally without Docker/RabbbitMQ and 
-switch to queue mode in production with a simple environment variable change.
+2. Direct path (dev/test, USE_WORKER_QUEUE=false):
+   evaluate_all_usecases() runs inline in the API process. Simple, no broker,
+   but all cameras serialize on the one event loop — fine for local dev.
 
-100 cmaeras * 15 usecases = 1500 tasks per poll cycle(every one second)
+The path is selected by the USE_WORKER_QUEUE env variable, so you can develop
+locally without Docker/RabbitMQ and switch to queue mode in production with a
+single env change.
 
-Async path: 1500 tasks distributed across N workers (camera processing time: slowest usecases)
-Direct path: 1500 evaluations in the API process(sequential per camera)(camera processing time: sum of all usecases, much slower, not scalable, but simple for testing and development)
+Note on granularity: we submit ONE task per frame (all usecases together),
+NOT one task per usecase. Fanning out per usecase would run parking/gun/
+vehicle in parallel and break the within-frame data dependency
+(parking_detection must run first and hand `tracked_cars` downstream), which
+is what previously produced incomplete/garbled ChargingSession rows.
 """
 
 import os
@@ -67,29 +74,41 @@ async def _queue_path(
         detection_output: Dict[str, Any],
         usecases: List[str],) -> List[UsecaseResult]:
     """
-    Submit tasks to RabbitMQ workers and wait for results.
-    If RabbitMQ/Redis aren't running, importing workers.queue at module level would crash the entire service on startup. Lazy import means the service starts fine and only fails when actually trying to use the queue. This make development without docker much easier.
+    Submit ONE whole-frame task to the camera's shard queue and await it.
+    Lazy import: if RabbitMQ/Redis aren't running, importing workers.queue at
+    module level would crash the service on startup. Lazy import lets the
+    service start and only fails when the queue is actually used.
+
+    A None handle means backpressure kicked in (a frame for this camera is
+    still being processed) — we return [] so the caller simply skips this
+    cycle. The in-flight frame will produce the next ChargingSession update.
     """
-    from workers.queue import submit_usecase_tasks, await_usecase_results
+    from workers.queue import submit_frame_task, await_frame_result
 
-    task_handles = submit_usecase_tasks(camera_id=camera_id, detection_output=detection_output, usecases=usecases)
+    handle = submit_frame_task(
+        camera_id=camera_id, detection_output=detection_output, usecases=usecases
+    )
+    if handle is None:
+        logger.info(
+            f"[SERVICE] camera={camera_id}: previous frame still in flight — skipping this cycle"
+        )
+        return []
 
-    results = await await_usecase_results(task_handles = task_handles,
-    camera_id=camera_id)
-    return results
+    return await await_frame_result(handle=handle, camera_id=camera_id)
 
 def _direct_path(
         camera_id: str,
         detection_output: Dict[str, Any],
         usecases: List[str],) -> List[UsecaseResult]:
     """
-    Evaluate usecases directly in the API process (no queue). 
+    Evaluate usecases directly in the API process (no queue).
 
-    Why this uses the same engine as the queue path. 
-    evaluate_all_usecases() calls the evaluate_single_uusecase() in a loop.
-    evaluate_usecase_task(the celery task) also calls evaluate_single_usecase().
+    Both paths call the SAME engine function, evaluate_all_usecases():
+      - direct path: this function calls it inline;
+      - queue path: workers.tasks.evaluate_frame_task calls it inside a worker.
 
-    same engine function -> identical behavior-> no behavioral divergence between dev and production. If you have different logic in the direct path vs the queue path, you might end up with bugs that only appear in production and are hard to debug. By using the same engine function for both paths, you ensure that the core logic is consistent regardless of how it's executed.
+    Same engine -> identical behaviour -> no divergence between dev and
+    production, so bugs can't hide in a path that only runs in one environment.
     """
     return evaluate_all_usecases(
         camera_id = camera_id,

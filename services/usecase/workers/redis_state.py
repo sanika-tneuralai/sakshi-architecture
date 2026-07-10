@@ -26,6 +26,7 @@ Connection errors are handled gracefully:
 import json
 import logging
 import os
+from typing import Optional
 
 import redis
 
@@ -212,3 +213,104 @@ def reset_slot_state(camera_id: str, slot_id: str) -> None:
     fresh = _default_slot_state()
     fresh["frame_counter"] = current.get("frame_counter", 0)
     set_state(key, fresh)
+
+
+# ---------------------------------------------------------------------------
+# Per-camera in-flight guard — backpressure for the whole-frame queue path.
+#
+# A camera is pinned to one shard queue drained by a single-slot worker, so
+# frames of that camera are already processed in order. The guard stops the
+# producer from piling up frames faster than the worker drains them: while a
+# frame for a camera is being processed we skip submitting new ones. Acquired
+# by the producer (workers.queue.submit_frame_task) before enqueueing and
+# released by the worker (workers.tasks.evaluate_frame_task) when the frame
+# finishes. The TTL is a crash backstop so a dead worker can't wedge a camera
+# forever.
+#
+# Key: usecase:state:inflight:{camera_id}
+# ---------------------------------------------------------------------------
+
+def try_acquire_inflight(camera_id: str, ttl_seconds: int = 120) -> bool:
+    """
+    Atomically claim the in-flight slot for *camera_id*.
+
+    Returns True if the slot was free (caller may submit a frame), False if a
+    frame for this camera is already being processed (caller should skip).
+
+    Fails OPEN: on any Redis error we return True so a Redis hiccup degrades to
+    "process the frame" rather than silently dropping every frame.
+    """
+    key = f"{_KEY_PREFIX}inflight:{camera_id}"
+    try:
+        return bool(_client.set(key, "1", nx=True, ex=ttl_seconds))
+    except redis.RedisError as exc:
+        logger.warning("[redis_state] try_acquire_inflight failed for %s: %s", camera_id, exc)
+        return True
+
+
+def release_inflight(camera_id: str) -> None:
+    """Release the in-flight slot for *camera_id* (worker calls this when done)."""
+    key = f"{_KEY_PREFIX}inflight:{camera_id}"
+    try:
+        _client.delete(key)
+    except redis.RedisError as exc:
+        logger.warning("[redis_state] release_inflight failed for %s: %s", camera_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Sticky, balanced camera -> shard assignment.
+#
+# Pure crc32(camera_id) % N_SHARDS is stateless and stable, but for a SMALL
+# fleet it collides badly (e.g. camera_01/03/05 -> same shard, other shards
+# idle) — which would serialize streams that should run in parallel. Instead
+# we assign each camera, on first sight, to the LEAST-loaded shard and remember
+# it in a Redis hash. So the first N_SHARDS cameras each get their own lane,
+# and the mapping is stable for the camera's lifetime (required: a camera must
+# always hit the same shard or its frame ordering breaks).
+#
+# The get-or-assign is a single atomic Lua script (no lock, no races). If the
+# stored shard is out of range after a shrink, it is reassigned.
+#
+# Rescaling note: after changing N_SHARDS, clearing the map key rebalances all
+# cameras (do it while idle — a live camera changing lanes can momentarily
+# reorder frames).
+# ---------------------------------------------------------------------------
+
+_SHARD_MAP_KEY = f"{_KEY_PREFIX}shard_map"
+
+# KEYS[1] = shard map hash, ARGV[1] = camera_id, ARGV[2] = n_shards
+_ASSIGN_SHARD_LUA = """
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+local n = tonumber(ARGV[2])
+if cur then
+  local c = tonumber(cur)
+  if c ~= nil and c >= 0 and c < n then return c end
+end
+local counts = {}
+for i = 0, n - 1 do counts[i] = 0 end
+local all = redis.call('HGETALL', KEYS[1])
+for i = 2, #all, 2 do
+  local s = tonumber(all[i])
+  if s ~= nil and s >= 0 and s < n then counts[s] = counts[s] + 1 end
+end
+local best = 0
+local bestc = counts[0]
+for i = 1, n - 1 do
+  if counts[i] < bestc then bestc = counts[i]; best = i end
+end
+redis.call('HSET', KEYS[1], ARGV[1], best)
+return best
+"""
+
+
+def get_or_assign_shard(camera_id: str, n_shards: int) -> Optional[int]:
+    """
+    Return the shard index for *camera_id*, assigning the least-loaded shard on
+    first sight (atomic + sticky). Returns None on any Redis error so the caller
+    can fall back to stateless crc32 hashing.
+    """
+    try:
+        return int(_client.eval(_ASSIGN_SHARD_LUA, 1, _SHARD_MAP_KEY, camera_id, n_shards))
+    except redis.RedisError as exc:
+        logger.warning("[redis_state] get_or_assign_shard failed for %s: %s", camera_id, exc)
+        return None

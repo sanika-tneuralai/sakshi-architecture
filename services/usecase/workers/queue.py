@@ -4,144 +4,147 @@ This is the bridge between the FastAPI layer and the celery/rabbitmq layer.
 
 import asyncio
 import logging
+import os
 import threading
+import zlib
 from typing import Dict, Any, List, Optional
 
 from celery.result import AsyncResult
 from workers.celery_app import celery_app
-from workers.tasks import evaluate_usecase_task
-from usecase.engine import build_slim_payload
+from workers.tasks import evaluate_frame_task
+from workers.redis_state import try_acquire_inflight, release_inflight, get_or_assign_shard
 from usecase.schemas import UsecaseResult
 
 logger = logging.getLogger(__name__)
 
 TAKE_RESULT_TIMEOUT = int(30)
 
+# Number of camera shards (= number of ordered lanes / single-slot workers).
+# A camera is pinned to shard crc32(camera_id) % N_SHARDS, so its frames are
+# always processed in order by one worker while different cameras run in
+# parallel across shards. Scale by raising N_SHARDS and adding shard workers;
+# the producer and the workers MUST agree on this value.
+N_SHARDS = int(os.getenv("N_SHARDS", "5"))
+
+# How long the per-camera in-flight guard survives a worker crash. Slightly
+# above the frame task's time_limit (120s) so a live-but-slow frame is never
+# evicted mid-flight.
+INFLIGHT_TTL = int(os.getenv("INFLIGHT_TTL", "130"))
+
 # redis-py connections are not thread-safe. asyncio.gather runs concurrent
 # handle.get() calls on multiple threads, causing interleaved reads and
 # Protocol Errors. This lock serializes Redis reads to prevent that.
 _redis_read_lock = threading.Lock()
 
-def submit_usecase_tasks(
+
+def _shard_for(camera_id: str) -> int:
+    """
+    Shard index for a camera. Prefers sticky, balanced assignment via Redis
+    (get_or_assign_shard) so a small fleet spreads one-camera-per-lane instead
+    of colliding. Falls back to stateless crc32 hashing if Redis is
+    unavailable — still stable per camera, just not collision-balanced.
+    """
+    shard = get_or_assign_shard(camera_id, N_SHARDS)
+    if shard is None:
+        shard = zlib.crc32(camera_id.encode("utf-8")) % N_SHARDS
+    return shard
+
+
+def submit_frame_task(
         camera_id: str,
-        detection_output : Dict[str, Any],
+        detection_output: Dict[str, Any],
         usecases: List[str],
-) -> Dict[str, AsyncResult]:
+) -> Optional[AsyncResult]:
     """
-    Submit one celery task per usecase. Returns task handles immediately.
+    Submit ONE whole-frame task for a camera, routed to that camera's shard.
 
-    If you submit 15 separate tasks, the worker pool distributes them. with 8 workers and 15 usecases: first 8 runs parallel,
-    then the remaining 7 tasks start as soon as a worker becomes available.
+    This is the production path: one task per (camera, frame) carrying every
+    usecase, NOT one task per usecase. The task runs evaluate_all_usecases in
+    a single-slot shard worker, so usecases run in dependency order and the
+    frame's results come back complete and ordered (correct ChargingSession).
 
-    build_slim_payload() strips detection output to only what rules need. 
-    we call it once and pass the same slim_payload to all 15 tasks. That means each task message in rabbitmq carries minimal data.
+    Backpressure: if a frame for this camera is still being processed we skip
+    submitting a new one and return None — the caller treats that as "no
+    results this cycle". This stops a slow camera (e.g. an LLM frame > poll
+    interval) from piling unbounded frames onto its shard queue.
 
-    without this: 15 tasks * full_detection_payload = 15* the bandwidth.
-    with_this: 15 tasks * slim_payload = much smaller,identical per task.
-
-    Args:
-        camera_id: the id of the camera that captured the detection
-        detection_output: tfull detection api response.
-        usecases: a list of usecase ID to evaluate.
-
-    Returns:
-        Dict mapping usecase_id->celery AsyncResult handle. The caller can use these handles to check task status or get results later.
+    Returns the AsyncResult handle, or None if skipped by backpressure.
     """
+    if not try_acquire_inflight(camera_id, ttl_seconds=INFLIGHT_TTL):
+        logger.info(
+            f'[Queue] camera={camera_id} still has a frame in flight — '
+            f'skipping this frame (backpressure)'
+        )
+        return None
 
-    slim_payload = build_slim_payload(detection_output)
-    task_handles: Dict[str, AsyncResult] = {}
-    for usecase_id in usecases:
-        # Route to a dedicated per-usecase queue so each usecase's frames are
-        # processed in order by a single worker (concurrency=1 per queue).
-        # This prevents the frame N+1 / stale Redis state race condition where
-        # a faster worker picks up Frame N+1 before Frame N finishes writing state.
-        queue_name = f"usecase_queue_{usecase_id}"
-        handle = evaluate_usecase_task.apply_async(
+    shard = _shard_for(camera_id)
+    queue_name = f"usecase_shard_{shard}"
+    try:
+        handle = evaluate_frame_task.apply_async(
             kwargs={
-                "usecase_id": usecase_id,
-                "slim_payload": slim_payload,
                 "camera_id": camera_id,
+                "detection_output": detection_output,
+                "usecases": usecases,
             },
             queue=queue_name,
         )
-        task_handles[usecase_id] = handle
-        logger.debug(
-            f'[Queue] Submitted task for usecase_id={usecase_id}, camera_id={camera_id}, task_id={handle.id}'
-        )
-    return task_handles
-    
-async def await_usecase_results(
-        task_handles: Dict[str, AsyncResult],
+    except Exception:
+        # Enqueue failed after acquiring the guard — release it now so the
+        # camera isn't wedged until the TTL expires. (The worker releases it
+        # on the normal path; here the task never reached a worker.)
+        release_inflight(camera_id)
+        raise
+
+    logger.debug(
+        f'[Queue] Submitted FRAME task camera_id={camera_id} -> {queue_name}, task_id={handle.id}'
+    )
+    return handle
+
+
+async def await_frame_result(
+        handle: AsyncResult,
         camera_id: str,
         timeout: int = TAKE_RESULT_TIMEOUT,
 ) -> List[UsecaseResult]:
-    
-    """ 
-    collect results from all the submitted tasks. waits up to 'timeouts' seconds per tasks.
-    FasAPI endpoints are async. We need to await results without blocking the event loop (which would prevent other requests from being served).
-    asyncio.to_thread() runs thee blocking celery.get() in a thread pool.
-    
-    Args:
-        task_handles: dict of usecase_id->celery AsyncResult handle returned by submit_usecase_tasks()
-        camera_id: for logging
-        timeout: how long to wait for each task result before giving up
-
-    Returns:
-        List of UsecaseResult objects(one per usecase, in submission order)
     """
-    results: List[UsecaseResult] = []
+    Wait for a whole-frame task's result without blocking the event loop.
 
-    #Collect all tasks concurrently using asyncio gather
-    # Each task waits independently- a slow task doesn't delay others
-    async def collect_one(usecase_id: str, handle:AsyncResult) -> UsecaseResult:
-        try:
-            def get_with_lock():
-                with _redis_read_lock:
-                    return handle.get(timeout=timeout, propagate=False)
+    Returns the full list of UsecaseResult for the frame, or [] on
+    timeout/failure (a safe "no results this cycle" — the worker still owns
+    the in-flight guard until it finishes, so no newer frame is submitted in
+    the meantime).
+    """
+    def get_with_lock():
+        with _redis_read_lock:
+            return handle.get(timeout=timeout, propagate=False)
 
-            result_dict = await asyncio.to_thread(get_with_lock)
+    try:
+        result_list = await asyncio.to_thread(get_with_lock)
+    except Exception as e:
+        logger.error(
+            f'[Queue] Failed to collect FRAME result for camera={camera_id}, '
+            f'task_id={handle.id}: {e}'
+        )
+        return []
 
-            if isinstance(result_dict,Exception):
-                logger.error(f'[Queue] Task for usecase_id={usecase_id} failed with exception: {result_dict}')
-                return _safe_default_result(usecase_id, handle.id)
-            
-            return UsecaseResult(**result_dict)
-        
-        except Exception as e:
-            logger.error(f'[Queue] Failed to collect {camera_id}:{usecase_id} with task_id={handle.id} due to exception: {e}')
-            return _safe_default_result(usecase_id, handle.id)
+    if isinstance(result_list, Exception):
+        logger.error(
+            f'[Queue] FRAME task for camera={camera_id} failed: {result_list}'
+        )
+        return []
 
-    coroutines = [
-        collect_one(usecase_id, handle) for usecase_id, handle in task_handles.items()
+    if not result_list:
+        return []
 
-    ]
-    results = list(await asyncio.gather(*coroutines))
-
+    results = [UsecaseResult(**d) for d in result_list]
     triggered_count = sum(1 for r in results if r.triggered)
-
-    logger.info(f'[Queue] Collected {len(results)} results for camera={camera_id}, tiggered={triggered_count}/{len(results)}')
-
+    logger.info(
+        f'[Queue] Collected {len(results)} results for camera={camera_id}, '
+        f'triggered={triggered_count}/{len(results)}'
+    )
     return results
 
 
-
-def _safe_default_result(usecase_id:str, task_id: str) -> UsecaseResult:
-    """
-    Return a safe non-triggered result when a task fails or times out.
-    Failing one usecase should never break the entire pipeline.
-    The orchestrator and alert service expect a result for every usecase that was requested. We return triggered=False as a safe fallback so the pipeline continues normally"""
-
-    logger.warning(
-        f'[Queue] Returning safe default result for usecase_id={usecase_id}, task_id={task_id}'
-    )
-    return UsecaseResult(
-        usecase_id=usecase_id,
-        triggered=False,
-        matched_count=0,
-        matched_objects=[],
-        detection_id=None,
-        snapshot_url=None)
-    
 def get_task_status(task_id: str) -> Dict[str, Any]:
     """
     Get the current status of a celery task by ID.

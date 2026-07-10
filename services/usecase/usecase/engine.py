@@ -105,26 +105,42 @@ def evaluate_single_usecase(usecase_id: str, slim_payload: Dict[str, Any], camer
 
 def evaluate_all_usecases(
         camera_id: str,
-        detection_output: Dict[str, Any], usecases: List[str]) -> List[UsecaseResult]:
+        detection_output: Dict[str, Any], usecases: List[str],
+        task_id: str = None) -> List[UsecaseResult]:
 
         """
-        Evaluate multiple usecases sequentially(no celery)
+        Evaluate ALL usecases for ONE frame of ONE camera, sequentially.
 
-        For the legacy API endpoint, testing and small deployyment where RabbitMQ isn't running. It uses the same evaluate_single_usecase() function - so behavior is identical to the worker path.
+        This is the single unit of work for both execution paths:
+        - direct path (service.py): called inline in the API process.
+        - queue path (workers/tasks.evaluate_frame_task): called inside a
+          per-camera Celery worker (one whole-frame task, NOT one task per
+          usecase). Running every usecase for a frame in this one function —
+          in order, in one process — is what keeps ChargingSession correct:
+          parking_detection runs first and hands `tracked_cars` to
+          gun_detection / vehicle_extraction (see the injection below), and
+          the caller receives the complete, ordered result list to assemble
+          one ChargingSession row from.
 
-        -celery path:worker calls evaluate_single_usecase() per task
-        -direct path: this funnction calls evaluate_single_usecase() in a loop
-        -Tests: both paths produce identical results because same engine
+        Each usecase is wrapped in try/except and continues on failure, so one
+        bad usecase never drops the rest of the frame's results.
 
         Args:
                 camera_id: camera_identifier
                 detection_output: full detection API response
                 usecases: list of usecase IDs
+                task_id: Celery task id (queue path only). Injected as
+                        slim["_task_id"] so rules can dedupe event publishes
+                        across task retries. None in the direct path.
             Returns:
                 List of UsecaseResult objects
 
         """
         slim = build_slim_payload(detection_output)
+        # Idempotency key for the queue path: a Celery retry reuses the same
+        # task id, so rules keyed on _task_id won't re-publish the same event.
+        if task_id is not None:
+            slim["_task_id"] = task_id
         results = []
 
         for usecase_id in usecases:

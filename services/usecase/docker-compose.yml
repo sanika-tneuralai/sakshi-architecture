@@ -1,5 +1,44 @@
 version: '3.9'
 
+# ---------------------------------------------------------------------------
+# Camera-sharded usecase workers.
+#
+# Each camera is pinned to shard  crc32(camera_id) % N_SHARDS  (see
+# workers/queue.py). One worker per shard, --concurrency=1, so:
+#   * a camera's frames are processed strictly in order on its shard lane;
+#   * different cameras run in parallel across shard workers.
+# ONE whole-frame task carries all usecases (workers/tasks.evaluate_frame_task),
+# so usecases run in dependency order and ChargingSession assembles correctly.
+#
+# Scaling: keep N_SHARDS == the number of worker-shard-* services below and set
+# it in BOTH the shared env and the usecase service. 5 shards for ~5 cameras;
+# raise to 12-16 for ~50, 32-64 (across hosts) for ~500.
+# ---------------------------------------------------------------------------
+
+x-worker-env: &worker-env
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+  REDIS_URL: redis://redis:6379/0
+  N_SHARDS: '5'
+  GEMINI_API_KEY: ${GEMINI_API_KEY}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_REGION: ${AWS_REGION:-ap-south-1}
+  AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
+
+x-shard-worker: &shard-worker
+  build: .
+  environment: *worker-env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
 
   rabbitmq:
@@ -8,7 +47,6 @@ services:
     ports:
       - '5672:5672' #AMQP port (Celery broker)
       - '15672:15672' #management UI -> http://localhost:15672 (guest/guest)
-
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -17,7 +55,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  
+
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -28,94 +66,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    
-  # Workers grouped by usecase category, concurrency=1 each.
-  # concurrency=1 guarantees frames for each usecase are processed in
-  # submission order — preventing the stale Redis state race condition.
-  # Each worker listens on all queues in its category; tasks for different
-  # usecases within a category are still sequential (which is fine since
-  # they don't share Redis state with each other).
 
-  worker-vehicles:
-    build: .
+  # One single-slot worker per shard. To change the shard count, add/remove
+  # worker-shard-N services here and update N_SHARDS above + in the usecase env.
+  worker-shard-0:
+    <<: *shard-worker
     command: >
       celery -A workers.celery_app worker
-      --loglevel=info
-      --concurrency=1
-      --queues=usecase_queue_parking_detection,usecase_queue_gun_detection,usecase_queue_vehicle_extraction,usecase_queue_parking_compliance
-      --hostname=worker-vehicles@%h
-    environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
-      REDIS_URL: redis://redis:6379/0
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-ap-south-1}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      --loglevel=info --concurrency=1
+      --queues=usecase_shard_0 --hostname=worker-shard-0@%h
 
-  worker-safety:
-    build: .
+  worker-shard-1:
+    <<: *shard-worker
     command: >
       celery -A workers.celery_app worker
-      --loglevel=info
-      --concurrency=1
-      --queues=usecase_queue_safety_monitoring
-      --hostname=worker-safety@%h
-    environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
-      REDIS_URL: redis://redis:6379/0
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-ap-south-1}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      --loglevel=info --concurrency=1
+      --queues=usecase_shard_1 --hostname=worker-shard-1@%h
 
-  worker-stores:
-    build: .
+  worker-shard-2:
+    <<: *shard-worker
     command: >
       celery -A workers.celery_app worker
-      --loglevel=info
-      --concurrency=1
-      --queues=usecase_queue_people_counter,usecase_queue_heatmap,usecase_queue_phone_detection,usecase_queue_smoking_detection,usecase_queue_mopping_detection,usecase_queue_cash_detection,usecase_queue_bag_detection,usecase_queue_dress_code,usecase_queue_restricted_area,usecase_queue_staff_detector
-      --hostname=worker-stores@%h
-    environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
-      REDIS_URL: redis://redis:6379/0
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-ap-south-1}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      --loglevel=info --concurrency=1
+      --queues=usecase_shard_2 --hostname=worker-shard-2@%h
+
+  worker-shard-3:
+    <<: *shard-worker
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info --concurrency=1
+      --queues=usecase_shard_3 --hostname=worker-shard-3@%h
+
+  worker-shard-4:
+    <<: *shard-worker
+    command: >
+      celery -A workers.celery_app worker
+      --loglevel=info --concurrency=1
+      --queues=usecase_shard_4 --hostname=worker-shard-4@%h
 
   flower:
     build: .
@@ -128,7 +115,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      worker-vehicles:
+      worker-shard-0:
         condition: service_started
 
   usecase:
@@ -140,6 +127,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
       USE_WORKER_QUEUE: 'true'
+      N_SHARDS: '5'          # MUST match the number of worker-shard-* services
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -155,7 +143,3 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-
-
-
-

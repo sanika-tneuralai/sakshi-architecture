@@ -184,13 +184,41 @@ Use Docker Compose to build and start all containers from `services/usecase/`. T
 
 ---
 
-## Running Workers
+## Running Workers (camera-sharded)
 
-Workers are started as separate processes from the main API. They consume tasks from the `usecase_queue` and process them with configurable concurrency.
+The service scales **per camera stream**, not per usecase. Each camera is
+pinned to a shard `crc32(camera_id) % N_SHARDS`, and every shard is drained by
+one worker running `--concurrency=1`. Consequences:
 
-Set `USE_WORKER_QUEUE=true` in the environment to activate queue mode. When disabled, the service falls back to direct (synchronous) evaluation within the API process — no RabbitMQ or Redis required.
+- A single **whole-frame task** (`workers.tasks.evaluate_frame_task`) carries
+  all usecases for one frame and runs them in dependency order via
+  `evaluate_all_usecases` — `parking_detection` first, then it hands
+  `tracked_cars` to `gun_detection` / `vehicle_extraction`. This is why the
+  ChargingSession row assembles correctly (the old per-usecase fan-out ran
+  them in parallel and broke that dependency).
+- Frames of one camera are processed strictly in order on its shard lane, so
+  the per-camera Redis slot state (`slot:{camera_id}:{slot_id}`) never races.
+- Different cameras run in parallel across shard workers.
+- A per-camera in-flight guard provides backpressure: while a camera's frame
+  is being processed, new frames for it are skipped rather than piling up.
 
-The Flower dashboard (port 5555 in Docker) provides a real-time view of worker activity, task history, queue depth, and retry counts.
+**Scaling knob:** `N_SHARDS`. Keep it equal to the number of shard workers you
+run, and set it identically for the API and every worker. Rule of thumb: 5 for
+~5 cameras, 12–16 for ~50, 32–64 (spread across hosts) for ~500.
+
+- **Docker:** `docker compose up` starts `worker-shard-0..4` plus RabbitMQ,
+  Redis, Flower and the API. To change the shard count, add/remove
+  `worker-shard-N` services in `docker-compose.yml` and update `N_SHARDS` in
+  both the `x-worker-env` anchor and the `usecase` service.
+- **Bare metal / systemd:** run `deploy/start_shard_workers.sh` (reads
+  `N_SHARDS`, default 5) alongside the API unit.
+
+Set `USE_WORKER_QUEUE=true` to activate queue mode. When disabled, the service
+falls back to direct (synchronous) evaluation in the API process — no
+RabbitMQ/Redis required (dev/test only; cameras do not run in parallel there).
+
+The Flower dashboard (port 5555 in Docker) shows per-shard worker activity,
+task history, queue depth, and retry counts.
 
 ---
 
@@ -217,6 +245,8 @@ The new rule will be available immediately to any caller that includes its `USEC
 | `LOG_LEVEL` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `LOG_FILE` | Path to the log output file | _(console only)_ |
 | `USE_WORKER_QUEUE` | Enable async Celery processing | `false` |
+| `N_SHARDS` | Number of camera shards / single-slot worker lanes. Must match the worker count and be identical for API and workers. | `5` |
+| `INFLIGHT_TTL` | Seconds the per-camera in-flight guard survives a worker crash (backstop; > frame `time_limit`). | `130` |
 | `RABBITMQ_URL` | RabbitMQ AMQP connection URL | `amqp://guest:guest@localhost:5672//` |
 | `REDIS_URL` | Redis connection URL for Celery results | `redis://localhost:6379/0` |
 | `DEFAULT_CONFIDENCE_THRESHOLD` | Minimum detection confidence to consider | `0.5` |
