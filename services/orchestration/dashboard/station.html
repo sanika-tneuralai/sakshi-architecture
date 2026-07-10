@@ -1285,55 +1285,108 @@ function Overview({ onSelect, onManage }) {
     load(); const id = setInterval(load, 5000); return () => clearInterval(id);
   }, []);
 
+  const cams       = data.cameras || [];
+  const running    = cams.filter(c => c.running).length;
+  const offline    = cams.length - running;
+  const totalSlots = cams.reduce((sum, c) => sum + (c.slot_count || 0), 0);
+
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
-      <nav className="bg-white border-b border-slate-100 shadow-sm sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-1.5 text-brand-600">
-            <IconBolt />
-            <span className="font-bold text-slate-800 text-sm">EV Monitor</span>
-            <span className="text-slate-300 text-sm mx-1">/</span>
-            <span className="text-slate-800 text-sm font-semibold">All Locations</span>
+      {/* ── Top nav ── */}
+      <nav className="bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white flex items-center justify-center shadow-sm">
+              <IconBolt />
+            </div>
+            <div className="leading-tight">
+              <div className="font-bold text-slate-800 text-sm">EV Monitor</div>
+              <div className="text-[11px] text-slate-400">All Locations</div>
+            </div>
           </div>
-          <button onClick={onManage}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 transition-colors">
-            + Manage Cameras
-          </button>
+          <div className="flex items-center gap-3">
+            <button onClick={onManage}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 shadow-sm transition-colors">
+              + Manage Cameras
+            </button>
+            <span className="w-px h-5 bg-slate-200 hidden sm:block" />
+            <button
+              onClick={() => Auth.logout()}
+              title="Sign out"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors">
+              <IconLogout />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
+          </div>
         </div>
       </nav>
 
-      <main className="max-w-6xl mx-auto px-6 py-8">
-        <div className="mb-6">
-          <h1 className="text-lg font-bold text-slate-800">Locations</h1>
-          <p className="text-sm text-slate-500">{data.total} camera(s) · {data.running} running</p>
+      {/* ── Hero banner ── */}
+      <div className="bg-gradient-to-br from-brand-600 via-brand-600 to-brand-700 text-white">
+        <div className="max-w-6xl mx-auto px-6 py-8">
+          <h1 className="text-2xl font-bold tracking-tight">Charging Locations</h1>
+          <p className="text-sm text-brand-100 mt-1">Live monitoring across all registered camera stations.</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
+            {[
+              { label: 'Cameras',    value: cams.length },
+              { label: 'Live',       value: running,  dot: 'bg-success-400' },
+              { label: 'Offline',    value: offline,  dot: 'bg-white/50' },
+              { label: 'Total Slots',value: totalSlots },
+            ].map(s => (
+              <div key={s.label} className="bg-white/10 backdrop-blur rounded-xl border border-white/15 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand-100">
+                  {s.dot && <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />}
+                  {s.label}
+                </div>
+                <div className="text-2xl font-bold mt-0.5">{s.value}</div>
+              </div>
+            ))}
+          </div>
         </div>
+      </div>
+
+      <main className="max-w-6xl mx-auto px-6 py-8">
         {err && (
           <div className="mb-6 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
             <IconWarning /><span className="font-medium">API Error:</span> {err}
           </div>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {data.cameras.map(c => (
+          {cams.map(c => (
             <button key={c.camera_id} onClick={() => onSelect(c)}
-              className="text-left bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-brand-500 transition-all p-5">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-semibold text-slate-800 truncate">{c.name || c.camera_id}</span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
+              className="group text-left bg-white rounded-2xl border border-slate-100 shadow-card hover:shadow-card-hover hover:border-brand-300 hover:-translate-y-0.5 transition-all p-5 relative overflow-hidden">
+              <span className={`absolute top-0 left-0 right-0 h-1 ${c.running ? 'bg-success-500' : 'bg-slate-200'}`} />
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-400'}`}>
+                    <IconStation />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-800 truncate">{c.name || c.camera_id}</div>
+                    <div className="text-xs text-slate-400 truncate">{c.location || 'No location set'}</div>
+                  </div>
+                </div>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold flex-shrink-0 ${c.running ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${c.running ? 'bg-success-500 animate-pulse-dot' : 'bg-slate-400'}`} />
                   {c.running ? 'live' : 'stopped'}
                 </span>
               </div>
-              <div className="text-xs text-slate-500 mb-4">{c.location || '—'}</div>
-              <div className="flex items-center gap-4 text-xs text-slate-500">
-                <span>{c.slot_count} slot{c.slot_count === 1 ? '' : 's'}</span>
-                <span className="truncate">{c.camera_id}</span>
-                {c.errors > 0 && <span className="text-amber-600 ml-auto">{c.errors} err</span>}
+              <div className="flex items-center justify-between pt-3 border-t border-slate-50 text-xs text-slate-500">
+                <div className="flex items-center gap-3">
+                  <span className="font-medium text-slate-600">{c.slot_count} slot{c.slot_count === 1 ? '' : 's'}</span>
+                  <span className="font-mono text-slate-400 truncate">{c.camera_id}</span>
+                  {c.errors > 0 && <span className="text-amber-600">{c.errors} err</span>}
+                </div>
+                <span className="text-brand-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">Open →</span>
               </div>
             </button>
           ))}
-          {data.cameras.length === 0 && (
-            <div className="col-span-full text-center text-slate-400 py-12 border border-dashed border-slate-200 rounded-2xl">
-              No cameras yet. Click <span className="font-semibold">Manage Cameras</span> to add one.
+          {cams.length === 0 && (
+            <div className="col-span-full text-center text-slate-400 py-16 border border-dashed border-slate-200 rounded-2xl bg-white">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-100 text-slate-300 flex items-center justify-center">
+                <IconStation />
+              </div>
+              <p className="text-sm">No cameras yet. Click <span className="font-semibold text-slate-500">Manage Cameras</span> to add one.</p>
             </div>
           )}
         </div>
