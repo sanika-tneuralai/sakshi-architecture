@@ -13,6 +13,16 @@
 # raise to 12-16 for ~50, 32-64 (across hosts) for ~500.
 # ---------------------------------------------------------------------------
 
+# Cap container stdout logs. Docker's default json-file driver keeps logs
+# UNBOUNDED, so 8 chatty containers over a multi-day soak will fill the disk
+# and take the box down. 10 MB x 3 files = 30 MB/container ceiling (~240 MB
+# for the whole stack). Applied to every service below.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-worker-env: &worker-env
   RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
   REDIS_URL: redis://redis:6379/0
@@ -29,6 +39,7 @@ x-worker-env: &worker-env
 x-shard-worker: &shard-worker
   build: .
   environment: *worker-env
+  logging: *default-logging
   extra_hosts:
     - "host.docker.internal:host-gateway"
   # The image HEALTHCHECK pings :8001 (the API). Workers run celery, not the
@@ -47,6 +58,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.12-management
     container_name: rabbitmq
+    logging: *default-logging
     ports:
       - '5672:5672' #AMQP port (Celery broker)
       - '15672:15672' #management UI -> http://localhost:15672 (guest/guest)
@@ -62,6 +74,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
+    logging: *default-logging
     ports:
       - '6379:6379'
     healthcheck:
@@ -110,6 +123,7 @@ services:
   flower:
     build: .
     command: celery -A workers.celery_app flower --port=5555
+    logging: *default-logging
     # Flower serves on 5555, not the API's 8001 — disable the image healthcheck
     # so it isn't mislabelled "unhealthy".
     healthcheck:
@@ -127,7 +141,10 @@ services:
 
   usecase:
     build: .
-    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+    # No --reload for a soak run: the file-watcher adds overhead and an
+    # accidental edit would restart the API mid-test. Add it back for dev.
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    logging: *default-logging
     ports:
       - '8001:8001'
     environment:
