@@ -1,5 +1,3 @@
-version: '3.9'
-
 # ---------------------------------------------------------------------------
 # Camera-sharded usecase workers.
 #
@@ -33,6 +31,11 @@ x-shard-worker: &shard-worker
   environment: *worker-env
   extra_hosts:
     - "host.docker.internal:host-gateway"
+  # The image HEALTHCHECK pings :8001 (the API). Workers run celery, not the
+  # API, so that probe always fails and mislabels a healthy worker "unhealthy".
+  # Disable it here — worker liveness is visible in Flower and the logs.
+  healthcheck:
+    disable: true
   depends_on:
     rabbitmq:
       condition: service_healthy
@@ -107,6 +110,10 @@ services:
   flower:
     build: .
     command: celery -A workers.celery_app flower --port=5555
+    # Flower serves on 5555, not the API's 8001 — disable the image healthcheck
+    # so it isn't mislabelled "unhealthy".
+    healthcheck:
+      disable: true
     ports:
       - '5555:5555' # Flower UI -> http://localhost:5555
     environment:
