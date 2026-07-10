@@ -11,7 +11,9 @@
   <script>Auth.requireAuth();</script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Pinned to 7.x: Babel 8 (unpinned "@babel/standalone") breaks the in-browser
+       JSX transform and renders the dashboard blank. -->
+  <script crossorigin src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -1340,6 +1342,63 @@ function Overview({ onSelect, onManage }) {
   );
 }
 
+/* ── Icons for nav / tabs ── */
+const IconGrid = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.8"/>
+    <rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.8"/>
+    <rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.8"/>
+    <rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.8"/>
+  </svg>
+);
+const IconList = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+  </svg>
+);
+const IconLogout = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+/* ── Tab Bar ── */
+/* Splits the previously one-long-scroll station page into focused tabs so the
+   operator sees one concern at a time. The stat-card strip above stays
+   persistent as an at-a-glance summary. */
+function TabBar({ tab, setTab, violCount }) {
+  const tabs = [
+    { key: 'bays',       label: 'Live Bays',   icon: <IconGrid /> },
+    { key: 'sessions',   label: 'Sessions',    icon: <IconList /> },
+    { key: 'energy',     label: 'Energy Loss', icon: <IconBolt /> },
+    { key: 'violations', label: 'Violations',  icon: <IconWarning />, badge: violCount },
+  ];
+  return (
+    <div className="border-b border-slate-200 mb-6">
+      <div className="flex gap-1 -mb-px overflow-x-auto scrollbar-hide">
+        {tabs.map(t => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`group inline-flex items-center gap-2 px-4 py-3 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors ${active ? 'border-brand-600 text-brand-700' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-200'}`}
+            >
+              <span className={active ? 'text-brand-600' : 'text-slate-400 group-hover:text-slate-500'}>{t.icon}</span>
+              {t.label}
+              {t.badge > 0 && (
+                <span className={`ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${active ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-500'}`}>
+                  {t.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [stationData, setStationData] = React.useState(null);
   const [sessions,    setSessions]    = React.useState([]);
@@ -1362,6 +1421,7 @@ function App() {
   const [view,               setView]               = React.useState('overview');  // 'overview' | 'station'
   const [cameraId,           setCameraId]           = React.useState(null);
   const [stationId,          setStationId]          = React.useState('station_01');
+  const [tab,                setTab]                = React.useState('bays');  // bays | sessions | energy | violations
 
   const handleExcelUpload = async (file) => {
     if (!file) return;
@@ -1525,6 +1585,14 @@ function App() {
             ) : (
               <span className="text-xs text-slate-400">Connecting…</span>
             )}
+            <span className="w-px h-5 bg-slate-200 mx-0.5 hidden sm:block" />
+            <button
+              onClick={() => Auth.logout()}
+              title="Sign out"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors">
+              <IconLogout />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
           </div>
         </div>
       </nav>
@@ -1540,15 +1608,22 @@ function App() {
           </div>
         )}
 
-        {/* ── Stat Cards ── */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">
+        {/* ── Stat Cards (persistent summary strip above the tabs) ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
           <StatCard label="Total Stations"   value={1}            accent="slate" />
           <StatCard label="Active Sessions"  value={activeCount}  sub="Currently charging" accent="green" />
           <StatCard label="Idle Slots"       value={idleSlots}    sub="Available now"      accent="blue" />
           <StatCard label="Live Energy"      value={totalKwh > 0 ? `${totalKwh.toFixed(2)} kWh` : '—'} sub="Across active slots" accent="blue" />
+          <button onClick={() => setTab('violations')} className="text-left focus:outline-none">
+            <StatCard label="Violations"     value={violCount}    sub="Tap to review"      accent="amber" />
+          </button>
         </div>
 
+        {/* ── Tabs ── */}
+        <TabBar tab={tab} setTab={setTab} violCount={violCount} />
+
         {/* ── Parking Bays ── */}
+        {tab === 'bays' && (
         <div className="mb-8">
           <SectionHeader
             icon={<IconCar />}
@@ -1561,7 +1636,11 @@ function App() {
             ))}
           </div>
         </div>
+        )}
 
+        {/* ── Energy Loss tab: OCPP upload + comparison table + AI insight ── */}
+        {tab === 'energy' && (
+        <React.Fragment>
         {/* ── OCPP Excel Upload (sits above the Energy Loss table it feeds) ── */}
         <div className="flex items-center justify-end gap-3 mb-3">
           {uploadName && (
@@ -1628,8 +1707,11 @@ function App() {
           )}
           {insight && <InsightPanel insight={insight} aggregates={insightAggregates} results={lossResults} onDismiss={() => { setInsight(null); setInsightAggregates(null); }} />}
         </div>
+        </React.Fragment>
+        )}
 
         {/* ── Sessions Table ── */}
+        {tab === 'sessions' && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -1662,8 +1744,10 @@ function App() {
             <SessionsTable sessions={sessions} />
           </div>
         </div>
+        )}
 
         {/* ── Parking Compliance Violations ── */}
+        {tab === 'violations' && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -1699,6 +1783,7 @@ function App() {
             />
           </div>
         </div>
+        )}
 
       </main>
     </div>
