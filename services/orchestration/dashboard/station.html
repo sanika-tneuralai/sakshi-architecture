@@ -26,8 +26,11 @@
         extend: {
           fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
           colors: {
-            brand: { 50:'#eff6ff', 100:'#dbeafe', 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8' },
-            success: { 50:'#f0fdf4', 100:'#dcfce7', 500:'#22c55e', 600:'#16a34a', 700:'#15803d' },
+            /* "Deep Tech Teal & Clean Slate" — mint/emerald accent (#10B981).
+               Bright steps (400/500) for live dots + glows; deep steps (600/700)
+               are text/CTA-safe on white (AA). */
+            brand: { 50:'#ecfdf5', 100:'#d1fae5', 300:'#6ee7b7', 400:'#34d399', 500:'#10b981', 600:'#047857', 700:'#065f46' },
+            success: { 50:'#ecfdf5', 100:'#d1fae5', 500:'#10b981', 600:'#059669', 700:'#047857' },
             amber:  { 50:'#fffbeb', 100:'#fef3c7', 500:'#f59e0b', 600:'#d97706', 700:'#b45309' },
             rose:   { 50:'#fff1f2', 100:'#ffe4e6', 500:'#f43f5e', 600:'#e11d48', 700:'#be123c' },
             violet: { 50:'#f5f3ff', 100:'#ede9fe', 500:'#8b5cf6', 600:'#7c3aed' },
@@ -47,7 +50,7 @@
           boxShadow: {
             card: '0 1px 3px 0 rgba(0,0,0,.06), 0 4px 24px 0 rgba(0,0,0,.04)',
             'card-hover': '0 4px 12px 0 rgba(0,0,0,.08), 0 8px 32px 0 rgba(0,0,0,.06)',
-            'bay-active': '0 0 0 2px #22c55e, 0 4px 24px 0 rgba(34,197,94,.10)',
+            'bay-active': '0 0 0 2px #10b981, 0 4px 24px 0 rgba(16,185,129,.10)',
             'bay-idle':   '0 1px 3px 0 rgba(0,0,0,.06), 0 4px 16px 0 rgba(0,0,0,.04)',
           },
           animation: { 'pulse-dot': 'pulseDot 2s ease-in-out infinite' },
@@ -57,7 +60,7 @@
     }
   </script>
   <style>
-    body { background-color: #F9FAFB; }
+    body { background-color: #f4f7f9; }
     .scrollbar-hide::-webkit-scrollbar { display: none; }
     .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   </style>
@@ -1478,28 +1481,27 @@ function Overview({ onSelect }) {
 
   return (
     <React.Fragment>
-      {/* ── Hero banner ── */}
-      <div className="relative overflow-hidden bg-gradient-to-br from-ink-900 via-brand-700 to-brand-600 text-white">
-        {/* subtle grid depth */}
-        <div className="absolute inset-0 opacity-[0.07] pointer-events-none"
-             style={{ backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)', backgroundSize: '44px 44px' }} />
+      {/* ── Hero band (light, GOEC-green accents) ── */}
+      <div className="relative overflow-hidden bg-[#0f2c3d] border-b border-[#22475b] text-white">
+        <div className="absolute -top-24 -right-16 w-96 h-96 rounded-full pointer-events-none"
+             style={{ background: 'radial-gradient(circle, rgba(16,185,129,0.20) 0%, transparent 70%)' }} />
         <div className="relative w-full px-4 sm:px-6 lg:px-10 xl:px-14 py-9">
-          <div className="text-[11px] font-semibold uppercase tracking-widest text-cyan-300/90 mb-1">Sakshi.AI · GOEC</div>
-          <h1 className="text-2xl font-bold tracking-tight">Charging Locations</h1>
-          <p className="text-sm text-brand-100 mt-1">Real-time vehicle detection and parking compliance across every charging location.</p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
+          <div className="text-[11px] font-semibold uppercase tracking-widest text-white/80 mb-1.5">Sakshi.AI · GOEC</div>
+          <h1 className="text-2xl font-bold tracking-tight text-white">Charging Locations</h1>
+          <p className="text-sm text-slate-300 mt-1">Real-time vehicle detection and parking compliance across every charging location.</p>
+          <div className="flex flex-wrap items-center gap-x-10 gap-y-4 mt-7">
             {[
               { label: 'Locations',   value: locations.length },
               { label: 'Streams',     value: cams.length },
-              { label: 'Live',        value: liveStreams,  dot: 'bg-success-400' },
+              { label: 'Live',        value: liveStreams,  dot: true },
               { label: 'Total Slots', value: totalSlots },
-            ].map(s => (
-              <div key={s.label} className="bg-white/10 backdrop-blur rounded-xl border border-white/15 px-4 py-3">
-                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand-100">
-                  {s.dot && <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />}
+            ].map((s, i) => (
+              <div key={s.label} className={`flex flex-col ${i > 0 ? 'sm:border-l sm:border-white/15 sm:pl-10' : ''}`}>
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-300">
+                  {s.dot && <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse-dot" />}
                   {s.label}
                 </div>
-                <div className="text-2xl font-bold mt-0.5">{s.value}</div>
+                <div className="text-3xl font-bold mt-1 tabular-nums text-white">{s.value}</div>
               </div>
             ))}
           </div>
@@ -1515,35 +1517,38 @@ function Overview({ onSelect }) {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
           {locations.map(loc => {
             const someLive = loc.running > 0;
+            const allLive  = loc.running === loc.streamCount && loc.running > 0;
             return (
               <button key={loc.location} onClick={() => onSelect(loc)}
-                className="group text-left bg-white rounded-2xl border border-slate-100 shadow-card hover:shadow-card-hover hover:border-brand-300 hover:-translate-y-0.5 transition-all p-5 relative overflow-hidden">
-                <span className={`absolute top-0 left-0 right-0 h-1 ${someLive ? 'bg-success-500' : 'bg-slate-200'}`} />
+                className="group text-left bg-white rounded-2xl border border-slate-200/70 shadow-card hover:shadow-card-hover hover:border-brand-300 hover:-translate-y-0.5 transition-all duration-200 p-5">
                 <div className="flex items-start justify-between gap-3 mb-4">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${someLive ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-400'}`}>
+                    <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-slate-50 text-slate-400 group-hover:bg-brand-50 group-hover:text-brand-600 transition-colors">
                       <IconStation />
                     </div>
                     <div className="min-w-0">
-                      <div className="font-semibold text-slate-800 truncate">{loc.location}</div>
-                      <div className="text-xs text-slate-400 truncate">
-                        {loc.streamCount} stream{loc.streamCount === 1 ? '' : 's'} · {loc.slotCount} slot{loc.slotCount === 1 ? '' : 's'}
-                      </div>
+                      <div className="font-bold text-slate-800 text-[15px] truncate">{loc.location}</div>
+                      <div className="text-xs text-slate-400">Charging station</div>
                     </div>
                   </div>
-                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold flex-shrink-0 ${someLive ? 'bg-success-50 text-success-600' : 'bg-slate-100 text-slate-500'}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${someLive ? 'bg-success-500 animate-pulse-dot' : 'bg-slate-400'}`} />
-                    {loc.running}/{loc.streamCount} live
+                  <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold flex-shrink-0 ${someLive ? 'bg-brand-50 text-brand-700' : 'bg-slate-100 text-slate-500'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${someLive ? 'bg-brand-500 animate-pulse-dot' : 'bg-slate-400'}`} />
+                    {allLive ? 'Live' : someLive ? `${loc.running}/${loc.streamCount} live` : 'Offline'}
                   </span>
                 </div>
-                <div className="flex items-center justify-between pt-3 border-t border-slate-50 text-xs text-slate-500 gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="font-mono text-slate-400 truncate">
-                      {loc.cameras.map(c => c.name || c.camera_id).join(', ')}
-                    </span>
-                    {loc.errors > 0 && <span className="text-amber-600 flex-shrink-0">{loc.errors} err</span>}
-                  </div>
-                  <span className="text-brand-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap flex-shrink-0">Open →</span>
+                {/* stat chips */}
+                <div className="flex flex-wrap items-center gap-2 mb-4">
+                  <span className="px-2 py-1 rounded-lg bg-slate-50 text-slate-600 text-xs font-medium">{loc.slotCount} slot{loc.slotCount === 1 ? '' : 's'}</span>
+                  <span className="px-2 py-1 rounded-lg bg-slate-50 text-slate-600 text-xs font-medium">{loc.streamCount} stream{loc.streamCount === 1 ? '' : 's'}</span>
+                  {loc.errors > 0
+                    ? <span className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-xs font-medium">{loc.errors} err</span>
+                    : <span className="px-2 py-1 rounded-lg bg-brand-50 text-brand-700 text-xs font-medium">healthy</span>}
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-100 gap-3">
+                  <span className="font-mono text-xs text-slate-400 truncate">
+                    {loc.cameras.map(c => c.name || c.camera_id).join(', ')}
+                  </span>
+                  <span className="text-brand-600 font-semibold text-sm opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap flex-shrink-0">Open →</span>
                 </div>
               </button>
             );
@@ -1679,11 +1684,11 @@ function StreamSwitcher({ cameras, activeId, onPick }) {
 /* ── Shared page chrome ── */
 function PageHeader({ title, sub, right }) {
   return (
-    <div className="bg-white border-b border-slate-100">
+    <div className="bg-[#0f2c3d] border-b border-[#22475b]">
       <div className="w-full px-4 sm:px-6 lg:px-10 py-5 flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-xl font-bold text-slate-800 tracking-tight">{title}</h1>
-          {sub && <p className="text-sm text-slate-400 mt-0.5">{sub}</p>}
+          <h1 className="text-xl font-bold text-white tracking-tight">{title}</h1>
+          {sub && <p className="text-sm text-slate-300 mt-0.5">{sub}</p>}
         </div>
         {right}
       </div>
@@ -1700,10 +1705,10 @@ function ErrorBanner({ msg }) {
 function LiveDot({ ok }) {
   return ok ? (
     <div className="flex items-center gap-1.5">
-      <span className="w-2 h-2 rounded-full bg-success-500 animate-pulse-dot" />
-      <span className="text-xs font-semibold text-success-600">Live</span>
+      <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse-dot" />
+      <span className="text-xs font-semibold text-brand-300">Live</span>
     </div>
-  ) : <span className="text-xs text-slate-400">Connecting…</span>;
+  ) : <span className="text-xs text-slate-300">Connecting…</span>;
 }
 
 /* ── Sidebar navigation ── */
@@ -1716,15 +1721,17 @@ const NAV = [
 function Sidebar({ page, setPage, onNavigate }) {
   const user = Auth.getUser();
   return (
-    <div className="flex flex-col h-full bg-ink-900 text-slate-300">
+    <div className="flex flex-col h-full bg-[#0f2c3d] border-r border-[#22475b] text-slate-200">
       {/* Brand */}
-      <div className="px-5 pt-6 pb-5 border-b border-white/5">
-        <img src="sakshi-logo.png" alt="Sakshi.AI" className="h-8 w-auto" />
-        <p className="mt-3 text-[11px] leading-snug text-slate-400">
-          Intelligent Vision for <span className="text-cyan-300 font-medium">Every Camera</span>
+      <div className="px-5 pt-6 pb-5 border-b border-[#22475b]">
+        <div className="inline-flex bg-white rounded-xl px-3.5 py-2.5 shadow-sm ring-1 ring-black/5">
+          <img src="sakshi-logo.png" alt="Sakshi.AI" className="h-8 w-auto" />
+        </div>
+        <p className="mt-3 text-[11px] leading-snug text-slate-300">
+          Intelligent Vision for <span className="text-white font-semibold">Every Camera</span>
         </p>
-        <div className="mt-3 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" /> GOEC Deployment
+        <div className="mt-3 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/10 text-[10px] font-semibold uppercase tracking-wider text-white">
+          <span className="w-1.5 h-1.5 rounded-full bg-white" /> GOEC Deployment
         </div>
       </div>
       {/* Nav */}
@@ -1733,35 +1740,38 @@ function Sidebar({ page, setPage, onNavigate }) {
           const active = page === item.key;
           return (
             <button key={item.key} onClick={() => { setPage(item.key); if (onNavigate) onNavigate(); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors relative ${active ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'}`}>
-              {active && <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-cyan-400" />}
-              <span className={active ? 'text-cyan-300' : 'text-slate-500'}>{item.icon}</span>
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors relative ${active ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-200 hover:text-white hover:bg-white/10'}`}>
+              {active && <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r-full bg-brand-400" />}
+              <span className={active ? 'text-brand-600' : 'text-slate-300'}>{item.icon}</span>
               <span className="flex flex-col items-start leading-tight">
                 <span>{item.label}</span>
-                <span className="text-[10px] font-normal text-slate-500">{item.sub}</span>
+                <span className={`text-[10px] font-normal ${active ? 'text-slate-400' : 'text-slate-300/70'}`}>{item.sub}</span>
               </span>
             </button>
           );
         })}
       </nav>
       {/* User + signout */}
-      <div className="px-3 py-3 border-t border-white/5">
+      <div className="px-3 py-3 border-t border-[#22475b]">
         <div className="flex items-center justify-between px-2 py-1.5">
           <div className="flex items-center gap-2 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-xs font-bold text-cyan-300 uppercase">{(user?.username || '?').slice(0, 1)}</div>
+            <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-xs font-bold text-brand-700 uppercase">{(user?.username || '?').slice(0, 1)}</div>
             <div className="min-w-0">
-              <div className="text-xs font-semibold text-slate-200 truncate">{user?.username || 'operator'}</div>
-              <div className="text-[10px] text-slate-500">Signed in</div>
+              <div className="text-xs font-semibold text-slate-100 truncate">{user?.username || 'operator'}</div>
+              <div className="text-[10px] text-slate-300/80">Signed in</div>
             </div>
           </div>
-          <button onClick={() => Auth.logout()} title="Sign out" className="text-slate-500 hover:text-rose-400 p-1.5 rounded-lg hover:bg-white/5"><IconLogout /></button>
+          <button onClick={() => Auth.logout()} title="Sign out" className="text-slate-300 hover:text-rose-300 p-1.5 rounded-lg hover:bg-white/10"><IconLogout /></button>
         </div>
       </div>
       {/* Powered by */}
-      <a href="https://thinkneural.ai" target="_blank" rel="noopener noreferrer" className="block px-5 py-4 border-t border-white/5 hover:bg-white/5 transition-colors">
-        <div className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Powered by</div>
-        <img src="thinkneuralai_logo.png" alt="thinkneural.ai" className="h-6 w-auto rounded opacity-90" />
-      </a>
+      <div className="px-5 pb-5 pt-3 border-t border-[#22475b]">
+        <div className="text-[9px] uppercase tracking-widest text-slate-300/70 mb-1">Powered by</div>
+        <a href="https://thinkneural.ai" target="_blank" rel="noopener noreferrer"
+           className="text-sm font-bold text-white hover:text-brand-300 transition-colors">
+          thinkneural<span className="font-normal text-slate-300/80">.ai</span>
+        </a>
+      </div>
     </div>
   );
 }
@@ -1769,14 +1779,14 @@ function Sidebar({ page, setPage, onNavigate }) {
 function AppShell({ page, setPage, children }) {
   const [mobileNav, setMobileNav] = React.useState(false);
   return (
-    <div className="min-h-screen bg-[#F7F8FA]">
+    <div className="min-h-screen bg-[#f4f7f9]">
       {/* Desktop sidebar */}
-      <aside className="hidden lg:flex flex-col fixed inset-y-0 left-0 w-64 z-40 shadow-xl">
+      <aside className="hidden lg:flex flex-col fixed inset-y-0 left-0 w-64 z-40">
         <Sidebar page={page} setPage={setPage} />
       </aside>
       {/* Mobile top bar */}
-      <div className="lg:hidden sticky top-0 z-40 flex items-center justify-between h-14 px-4 bg-ink-900 text-white">
-        <img src="sakshi-logo.png" alt="Sakshi.AI" className="h-6 w-auto" />
+      <div className="lg:hidden sticky top-0 z-40 flex items-center justify-between h-14 px-4 bg-[#0f2c3d] border-b border-[#22475b] text-white">
+        <span className="inline-flex bg-white rounded-lg px-2.5 py-1.5 shadow-sm ring-1 ring-black/5"><img src="sakshi-logo.png" alt="Sakshi.AI" className="h-5 w-auto" /></span>
         <button onClick={() => setMobileNav(true)} className="p-2 rounded-lg hover:bg-white/10">
           <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
         </button>
@@ -2176,16 +2186,16 @@ function App() {
       <ViolationToasts active={activeViolations} />
 
       {/* ── Breadcrumb / status bar ── */}
-      <div className="bg-white border-b border-slate-100">
+      <div className="bg-[#0f2c3d] border-b border-[#22475b]">
         <div className="w-full px-4 sm:px-6 lg:px-10 h-14 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm min-w-0">
-            <button onClick={() => setView('overview')} className="text-slate-500 hover:text-brand-600 flex-shrink-0">Locations</button>
-            <span className="text-slate-300">/</span>
-            <div className="flex items-center gap-1.5 text-slate-800 font-semibold truncate"><IconStation /><span className="truncate">{location}</span></div>
+            <button onClick={() => setView('overview')} className="text-slate-300 hover:text-white flex-shrink-0">Locations</button>
+            <span className="text-white/40">/</span>
+            <div className="flex items-center gap-1.5 text-white font-semibold truncate"><IconStation /><span className="truncate">{location}</span></div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
             <LiveDot ok={!!lastUpdated} />
-            {lastUpdated && <span className="text-xs text-slate-400 hidden sm:block">Updated {lastUpdated}</span>}
+            {lastUpdated && <span className="text-xs text-slate-300 hidden sm:block">Updated {lastUpdated}</span>}
             <button
               onClick={() => setPage('capacity')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 transition-colors">

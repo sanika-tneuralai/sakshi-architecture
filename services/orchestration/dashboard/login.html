@@ -11,9 +11,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --brand-600: #2563eb;
-      --brand-700: #1d4ed8;
-      --brand-500: #3b82f6;
+      --brand-600: #047857;
+      --brand-700: #065f46;
+      --brand-500: #10b981;
       --ink:       #0f172a;
       --ink-soft:  #475569;
       --line:      #e2e8f0;
@@ -50,9 +50,9 @@
       flex-direction: column;
       justify-content: space-between;
       background:
-        radial-gradient(120% 120% at 12% 10%, #22d3ee 0%, transparent 42%),
-        radial-gradient(100% 120% at 90% 92%, #2563eb 0%, transparent 52%),
-        linear-gradient(155deg, #0c111d 0%, #14204a 46%, #1e3a8a 100%);
+        radial-gradient(120% 120% at 12% 10%, rgba(16,185,129,0.34) 0%, transparent 42%),
+        radial-gradient(100% 120% at 90% 92%, rgba(15,44,61,0.60) 0%, transparent 52%),
+        linear-gradient(155deg, #0a2230 0%, #103041 50%, #0f2c3d 100%);
     }
     /* Subtle grid overlay for depth */
     .auth-hero::before {
@@ -194,12 +194,12 @@
     .form-group input:focus {
       background: #fff;
       border-color: var(--brand-500);
-      box-shadow: 0 0 0 4px rgba(59,130,246,0.14);
+      box-shadow: 0 0 0 4px rgba(16,185,129,0.18);
     }
 
     .login-btn {
       width: 100%;
-      background: linear-gradient(180deg, #2563eb, #1d4ed8);
+      background: linear-gradient(180deg, #10b981, #047857);
       color: #fff;
       border: none;
       border-radius: 10px;
@@ -210,10 +210,10 @@
       cursor: pointer;
       margin-top: 6px;
       transition: transform 0.12s, box-shadow 0.18s, opacity 0.2s;
-      box-shadow: 0 8px 20px rgba(37,99,235,0.28);
+      box-shadow: 0 8px 20px rgba(16,185,129,0.32);
       display: flex; align-items: center; justify-content: center; gap: 8px;
     }
-    .login-btn:hover { box-shadow: 0 10px 26px rgba(37,99,235,0.36); transform: translateY(-1px); }
+    .login-btn:hover { box-shadow: 0 10px 26px rgba(16,185,129,0.42); transform: translateY(-1px); }
     .login-btn:active { transform: translateY(0); }
     .login-btn:disabled { opacity: 0.65; cursor: not-allowed; box-shadow: none; transform: none; }
 
@@ -275,9 +275,9 @@
       </div>
     </div>
 
-    <div class="hero-foot" style="display:flex;align-items:center;gap:10px;">
+    <div class="hero-foot" style="display:flex;align-items:center;gap:12px;">
       <span>Powered by</span>
-      <img src="thinkneuralai_logo.png" alt="thinkneural.ai" style="height:22px;width:auto;border-radius:4px;" />
+      <img src="thinkneuralai_logo.png" alt="thinkneural.ai" style="height:34px;width:auto;border-radius:6px;" />
     </div>
   </aside>
 
