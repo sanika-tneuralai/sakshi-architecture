@@ -58,6 +58,7 @@ from shared.database.persistence import (
     persist_alerts_from_results,
     close_stale_sessions,
     upsert_camera_rtsp,
+    update_camera_meta,
     upsert_camera_rois,
     list_registered_cameras,
 )
@@ -1460,6 +1461,58 @@ async def list_cameras_for_management():
 
     cameras = sorted(by_id.values(), key=lambda c: c["camera_id"])
     return {"cameras": cameras, "total": len(cameras)}
+
+
+class CameraMetaUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, description="Camera display name ('' clears it)")
+    location: Optional[str] = Field(default=None, description="Station / location ('' clears it)")
+    rtsp_url: Optional[str] = Field(default=None, description="RTSP stream URL (cannot be blank)")
+    fps: Optional[int] = Field(default=None, ge=1, le=30, description="Frame rate 1–30")
+
+
+@app.patch("/pipeline/cameras/{camera_id}", tags=["pipeline"], response_model=dict)
+async def update_camera(camera_id: str, patch: CameraMetaUpdate):
+    """Edit a registered camera's name / station (location) / rtsp_url / fps and
+    persist to the `camera` table.
+
+    If rtsp_url or fps actually changed for a *running* camera, re-push
+    /camera/start to decode-detect so the new stream takes effect without a
+    manual stop/start. Powers the dashboard onboarding inline edit.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _find(cid):
+        return next((c for c in list_registered_cameras() if c["camera_id"] == cid), None)
+
+    before = await loop.run_in_executor(None, _find, camera_id)
+    if before is None:
+        raise HTTPException(status_code=404, detail=f"camera '{camera_id}' not found")
+
+    ok = await loop.run_in_executor(
+        None, update_camera_meta, camera_id, patch.name, patch.location, patch.rtsp_url, patch.fps,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"camera '{camera_id}' not found")
+
+    after = await loop.run_in_executor(None, _find, camera_id) or before
+
+    # Re-push to decode-detect only when the stream itself changed and the
+    # camera is currently running (otherwise the next /pipeline/start handles it).
+    stream_changed = (after.get("rtsp_url") != before.get("rtsp_url")
+                      or after.get("fps") != before.get("fps"))
+    restarted = False
+    if stream_changed and after.get("rtsp_url"):
+        status = await pipeline_manager.get_status()
+        live = {p["camera_id"]: p for p in status.get("pipelines", [])}
+        if live.get(camera_id, {}).get("running", False):
+            try:
+                await push_camera_to_decode_detect(camera_id, after["rtsp_url"], after["fps"])
+                restarted = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[{camera_id}] rtsp/fps edit: re-push to decode-detect failed: {e}")
+
+    _config_cache.pop(camera_id, None)   # force config reload on next tick
+    return {"status": "success", "camera_id": camera_id, "camera": after, "stream_restarted": restarted}
 
 
 class ROIItem(BaseModel):

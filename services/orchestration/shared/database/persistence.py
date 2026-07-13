@@ -47,6 +47,36 @@ def upsert_camera_rtsp(camera_id: str, rtsp_url: str, fps: int,
         session.close()
 
 
+def update_camera_meta(camera_id: str, name: Optional[str] = None,
+                       location: Optional[str] = None, rtsp_url: Optional[str] = None,
+                       fps: Optional[int] = None) -> bool:
+    """Edit an existing camera row's user-facing fields in place.
+
+    Only fields passed as non-None are touched, so a partial edit (e.g. just the
+    station name) leaves the rest alone. For name/location an empty string is
+    treated as "clear to NULL"; rtsp_url is never cleared (it's required to run).
+    Returns False if no such camera_id exists. Powers the dashboard's inline
+    edit on the onboarding list.
+    """
+    session = SessionLocal()
+    try:
+        cam = session.query(Camera).filter(Camera.camera_id == camera_id).one_or_none()
+        if cam is None:
+            return False
+        if name is not None:
+            cam.name = name.strip() or None
+        if location is not None:
+            cam.location = location.strip() or None
+        if rtsp_url is not None and rtsp_url.strip():
+            cam.rtsp_url = rtsp_url.strip()
+        if fps is not None:
+            cam.fps = fps
+        session.commit()
+        return True
+    finally:
+        session.close()
+
+
 def upsert_camera_rois(camera_id: str, rois: List[Dict[str, Any]]) -> int:
     """Replace a camera's parking-zone (non-logo) ROIs with `rois`.
 

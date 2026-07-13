@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>GOEC Surveillance — Login</title>
+  <title>Sakshi.AI · GOEC — Sign in</title>
+  <link rel="icon" href="sakshi-logo.png" />
   <link rel="stylesheet" href="shared.css"/>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -49,9 +50,9 @@
       flex-direction: column;
       justify-content: space-between;
       background:
-        radial-gradient(120% 120% at 15% 12%, #3b82f6 0%, transparent 45%),
-        radial-gradient(100% 120% at 90% 90%, #6366f1 0%, transparent 50%),
-        linear-gradient(155deg, #1e3a8a 0%, #1d4ed8 45%, #1e40af 100%);
+        radial-gradient(120% 120% at 12% 10%, #22d3ee 0%, transparent 42%),
+        radial-gradient(100% 120% at 90% 92%, #2563eb 0%, transparent 52%),
+        linear-gradient(155deg, #0c111d 0%, #14204a 46%, #1e3a8a 100%);
     }
     /* Subtle grid overlay for depth */
     .auth-hero::before {
@@ -243,14 +244,14 @@
   <!-- Brand hero -->
   <aside class="auth-hero">
     <div class="hero-brand">
-      <div class="hero-logo">⚡</div>
-      <div class="name">GO<span>EC</span> Surveillance</div>
+      <img src="sakshi-logo.png" alt="Sakshi.AI" style="height:40px;width:auto;" />
     </div>
 
     <div class="hero-copy">
-      <h2>Intelligent monitoring for every charging bay.</h2>
-      <p>Real-time vehicle detection, parking-compliance alerts, and per-session
-         energy reconciliation — all in one operations console.</p>
+      <h2>Intelligent Vision<br/>for Every Camera.</h2>
+      <p>Sakshi.AI transforms your CCTV infrastructure into a real-time intelligence
+         platform — deployed for <strong style="color:#fff;font-weight:600">GOEC</strong>
+         charging stations.</p>
 
       <div class="hero-features">
         <div class="hero-feature">
@@ -274,15 +275,17 @@
       </div>
     </div>
 
-    <div class="hero-foot">GOEC Surveillance Platform &copy; 2026</div>
+    <div class="hero-foot" style="display:flex;align-items:center;gap:10px;">
+      <span>Powered by</span>
+      <img src="thinkneuralai_logo.png" alt="thinkneural.ai" style="height:22px;width:auto;border-radius:4px;" />
+    </div>
   </aside>
 
   <!-- Sign-in form -->
   <main class="auth-panel">
     <div class="auth-card">
       <div class="mobile-brand">
-        <div class="logo">⚡</div>
-        <div class="name">GO<span>EC</span> Surveillance</div>
+        <img src="sakshi-logo.png" alt="Sakshi.AI" style="height:32px;width:auto;" />
       </div>
 
       <h1>Welcome back</h1>
@@ -316,7 +319,7 @@
         </div>
       </form>
 
-      <div class="auth-foot">Authorized personnel only · GOEC &copy; 2026</div>
+      <div class="auth-foot">Authorized personnel only · GOEC &copy; 2026 · powered by thinkneural.ai</div>
     </div>
   </main>
 </div>
