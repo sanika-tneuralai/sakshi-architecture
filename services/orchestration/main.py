@@ -582,6 +582,12 @@ async def send_camera_state_alert(camera_id: str, state: str, detail: str = "") 
 DECODE_DETECT_PUSH_TIMEOUT = float(os.getenv("DECODE_DETECT_PUSH_TIMEOUT", "15.0"))
 DECODE_DETECT_HEARTBEAT_INTERVAL = float(os.getenv("DECODE_DETECT_HEARTBEAT_INTERVAL", "15.0"))
 
+# When a camera pipeline hits max_errors_before_pause consecutive failures, re-POST
+# /camera/start to force decode-detect to rebuild the pipeline. Recovers a silent
+# frame stall (status=running, frame_count frozen) that the /health heartbeat can't
+# see. Set to "0" to disable if a detection backend rebuilds pipelines destructively.
+SELF_HEAL_PIPELINE_RESTART = os.getenv("SELF_HEAL_PIPELINE_RESTART", "1") not in ("0", "false", "False", "")
+
 
 async def push_camera_to_decode_detect(camera_id: str, rtsp_url: str, fps: int) -> bool:
     """POST /camera/start on decode-detect. Returns True on success or already-running.
@@ -879,6 +885,23 @@ class PipelineManager:
 
                 logger.debug(f"{tag} starting")
 
+                # STEP 0: Periodically close stale open sessions (Issue #8).
+                # Runs at the TOP of the loop, BEFORE detection, so it still
+                # fires during a detection outage. It used to live after STEP 3
+                # inside this try block, which meant any run_detection failure hit
+                # the `continue` in the except handler and skipped the sweep — so
+                # the very outage that leaves sessions open past SESSION_STALE_HOURS
+                # also disabled the sweep meant to close them (observed 2026-07-14:
+                # a silent DeepStream frame stall left 5 sessions stuck at >4h
+                # because every iteration 400'd before reaching the sweep). The
+                # sweep is global + idempotent, so all camera workers running it
+                # every 60 iterations (~1 min at 1fps) is harmless.
+                if iteration % 60 == 0:
+                    try:
+                        await loop.run_in_executor(None, close_stale_sessions)
+                    except Exception as e:
+                        logger.warning(f"{tag} stale session sweep failed (non-critical): {e!r}")
+
                 # STEP 1: Static config (cached). Cold/stale path runs the 3
                 # blocking DB calls in the executor; warm path is in-memory.
                 t0 = loop.time()
@@ -957,16 +980,6 @@ class PipelineManager:
                 except Exception as e:
                     logger.warning(f"{tag} alert persistence failed (non-critical): {e!r}")
                 t_alerts = (loop.time() - t0) * 1000
-
-                # STEP 3.7: Periodically close stale open sessions (Issue #8)
-                # Every 60 iterations (~1 min at 1fps) sweep for sessions open > 4h.
-                if iteration % 60 == 0:
-                    try:
-                        await loop.run_in_executor(
-                            None, close_stale_sessions
-                        )
-                    except Exception as e:
-                        logger.warning(f"{tag} stale session sweep failed (non-critical): {e!r}")
 
                 # STEP 4: Send dashboard alerts for parking_compliance and safety_monitoring only
                 _DASHBOARD_USECASES = {"parking_compliance", "safety_monitoring"}
@@ -1049,6 +1062,34 @@ class PipelineManager:
                         f"[{camera_id}] Too many consecutive errors ({stats.consecutive_errors}), "
                         f"pausing for 30s"
                     )
+                    # Self-heal: sustained detection failures are usually a stalled
+                    # decode-detect pipeline (observed 2026-07-14: DeepStream reported
+                    # status=running with frame_count frozen at 0, so /detection/detect
+                    # 400'd forever and /health stayed 'healthy' — the heartbeat's
+                    # down→up recovery never triggered). Re-POST /camera/start to force
+                    # the pipeline to rebuild. Gated behind the pause threshold + the
+                    # 30s sleep, so this fires at most once per outage cycle (no storm).
+                    if SELF_HEAL_PIPELINE_RESTART:
+                        try:
+                            cam = await loop.run_in_executor(
+                                None,
+                                lambda: next(
+                                    (c for c in list_registered_cameras()
+                                     if c["camera_id"] == camera_id),
+                                    None,
+                                ),
+                            )
+                            rtsp_url = (cam["rtsp_url"] if cam else None) or config.rtsp_url
+                            if rtsp_url:
+                                logger.warning(
+                                    f"[{camera_id}] self-heal: re-pushing /camera/start "
+                                    f"to rebuild a possibly-stalled pipeline"
+                                )
+                                await push_camera_to_decode_detect(
+                                    camera_id, rtsp_url, cam["fps"] if cam else config.fps
+                                )
+                        except Exception as e:
+                            logger.warning(f"[{camera_id}] self-heal restart failed (non-critical): {e!r}")
                     await asyncio.sleep(30)
                     stats.consecutive_errors = 0  # Reset after pause
                 else:
