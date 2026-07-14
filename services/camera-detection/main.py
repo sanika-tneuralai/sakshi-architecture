@@ -202,6 +202,77 @@ async def health_check():
     }
 
 
+# ---------------------------------------------------------------------------
+# System metrics — consumed by orchestration /dashboard/system-metrics to
+# populate the dashboard System page (this is the GPU box, so it reports GPU%).
+# ---------------------------------------------------------------------------
+import psutil
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
+
+
+def _gpu_percent():
+    """GPU utilization % of device 0, or None if NVML is unavailable."""
+    if not _NVML_OK:
+        return None
+    try:
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        return round(float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu), 1)
+    except Exception:
+        return None
+
+
+def _camera_perf():
+    """Per-camera perf from the live DeepStream pipeline (best-effort, defensive).
+
+    Surfaces what the pipeline actually tracks: frame_count, configured fps, and
+    the current detection count. queue/dropped/inference/tracking are NOT measured
+    by the pipeline yet, so they're reported null (dashboard shows "—") until the
+    nvinfer/nvstreammux probes are instrumented.
+    """
+    out = {}
+    try:
+        from camera.service import camera_manager
+        pipe = getattr(camera_manager, "ds_pipeline", None)
+        if pipe is None:
+            return out
+        for cam_id in pipe.list_cameras():
+            try:
+                st = pipe.get_status(cam_id) or {}
+                latest = pipe.get_latest(cam_id)
+                out[cam_id] = {
+                    "frame_count":    st.get("frame_count", 0),
+                    "fps":            st.get("fps"),
+                    "detections":     len(latest.detections) if latest else 0,
+                    "queue_size":     None,
+                    "dropped_frames": None,
+                    "inference_ms":   None,
+                    "tracking_ms":    None,
+                }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+# Plain `def` → FastAPI runs it in a threadpool; cpu_percent() blocks 0.2s.
+@app.get("/system/metrics", tags=["system"])
+def system_metrics():
+    """Host CPU/RAM + GPU% + per-camera DeepStream perf for the dashboard System page."""
+    return {
+        "cpu": round(psutil.cpu_percent(interval=0.2), 1),
+        "ram": round(psutil.virtual_memory().percent, 1),
+        "gpu": _gpu_percent(),
+        "cameras": _camera_perf(),
+    }
+
+
 # Import and include routers
 from camera.api import router as camera_router
 from detection.api import router as detection_router
