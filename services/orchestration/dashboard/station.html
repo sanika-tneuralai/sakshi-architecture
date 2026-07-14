@@ -79,6 +79,7 @@ const activeViolationsUrl = (cid, sid) => `${BASE}/dashboard/active-violations?c
 const CAMERAS_URL    = `${BASE}/pipeline/cameras`;
 const OVERVIEW_URL   = `${BASE}/dashboard/overview`;
 const HEALTH_URL     = `${BASE}/health`;
+const METRICS_URL    = `${BASE}/dashboard/system-metrics`;
 const POLL_MS        = 2000;
 
 /* GPU stream budget: the DeepStream box tops out around 15–16 concurrent
@@ -1875,7 +1876,7 @@ function ServiceRow({ name, status }) {
   );
 }
 
-function ServerCard({ server, services, runningStreams }) {
+function ServerCard({ server, services, runningStreams, metrics }) {
   const status = overallServerStatus(server, services);
   const statusMap = {
     healthy:     { chip: 'bg-success-50 text-success-600', dot: 'bg-success-500', label: 'Online' },
@@ -1885,6 +1886,13 @@ function ServerCard({ server, services, runningStreams }) {
   };
   const sm = statusMap[status] || statusMap.unknown;
   const isGpu = server.kind === 'GPU';
+  // Resolve this host's live metrics: 'orchestration' for the self host, else the
+  // first role that reported (usecase/alert/analytics share a box, so any hit is
+  // the same host). null until the service ships GET /system/metrics → tiles show "—".
+  const m = server.self
+    ? metrics?.servers?.orchestration
+    : (server.roles.map(r => metrics?.servers?.[r]).find(Boolean) || null);
+  const pctTile = (v) => (v === null || v === undefined) ? '—' : `${v}%`;
   const host = (() => {
     const svc = server.roles.map(r => services?.[r]?.url).find(Boolean);
     const raw = svc || (server.self ? BASE : null);
@@ -1908,9 +1916,9 @@ function ServerCard({ server, services, runningStreams }) {
         {host && <span className="text-[11px] text-slate-400 font-mono truncate">{host}</span>}
       </div>
       <div className="grid grid-cols-3 gap-2 mb-4">
-        <ResourceTile label="CPU" value="—" />
-        <ResourceTile label="GPU" value={isGpu ? '—' : 'n/a'} />
-        <ResourceTile label="RAM" value="—" />
+        <ResourceTile label="CPU" value={pctTile(m?.cpu)} />
+        <ResourceTile label="GPU" value={isGpu ? pctTile(m?.gpu) : 'n/a'} />
+        <ResourceTile label="RAM" value={pctTile(m?.ram)} />
       </div>
       <div className="pt-3 border-t border-slate-50">
         <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest mb-2">Services</p>
@@ -1943,7 +1951,7 @@ function Metric({ label, value, unit }) {
 // goes quiet flips to "No recent frames". See SystemPage for the tracking.
 const STREAM_STALE_SEC = 45;
 
-function PipelineCard({ cam, health }) {
+function PipelineCard({ cam, health, perf }) {
   const state = health.state;
   const age   = health.age != null ? health.age : null;
   const live  = state === 'live';
@@ -1978,10 +1986,10 @@ function PipelineCard({ cam, health }) {
         </div>
         <div>
           <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest py-1.5">Timing &amp; buffers</p>
-          <Metric label="Queue Size"     value={null} />
-          <Metric label="Dropped Frames" value={null} />
-          <Metric label="Inference Time" value={null} unit="ms" />
-          <Metric label="Tracking Time"  value={null} unit="ms" />
+          <Metric label="Queue Size"     value={perf?.queue_size ?? null} />
+          <Metric label="Dropped Frames" value={perf?.dropped_frames ?? null} />
+          <Metric label="Inference Time" value={perf?.inference_ms != null ? perf.inference_ms.toFixed(1) : null} unit="ms" />
+          <Metric label="Tracking Time"  value={perf?.tracking_ms != null ? perf.tracking_ms.toFixed(1) : null} unit="ms" />
           <Metric label="Round-trip"     value={live && cam.avg_latency_ms ? cam.avg_latency_ms.toFixed(0) : null} unit="ms" />
         </div>
       </div>
@@ -2000,13 +2008,14 @@ function PipelineCard({ cam, health }) {
 function SystemPage() {
   const [health, setHealth] = React.useState(null);
   const [cams, setCams]     = React.useState([]);
+  const [metrics, setMetrics] = React.useState(null);
   const [err, setErr]       = React.useState(null);
   // camera_id -> { lastRun, sinceMs }: browser time when last_run last changed.
   const seenRef = React.useRef({});
   React.useEffect(() => {
     async function load() {
       try {
-        const [hRes, cRes] = await Promise.all([fetch(HEALTH_URL), fetch(CAMERAS_URL)]);
+        const [hRes, cRes, mRes] = await Promise.all([fetch(HEALTH_URL), fetch(CAMERAS_URL), fetch(METRICS_URL)]);
         if (hRes.ok) setHealth(await hRes.json());
         if (cRes.ok) {
           const d = await cRes.json();
@@ -2018,6 +2027,7 @@ function SystemPage() {
           }
           setCams(list);
         }
+        if (mRes.ok) setMetrics(await mRes.json());
         setErr(null);
       } catch (e) { setErr(e.message); }
     }
@@ -2044,13 +2054,13 @@ function SystemPage() {
         <section>
           <SectionHeader icon={<IconServer />} title="Servers" sub="Three-server deployment" />
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {SERVERS.map(s => <ServerCard key={s.id} server={s} services={services} runningStreams={running} />)}
+            {SERVERS.map(s => <ServerCard key={s.id} server={s} services={services} runningStreams={running} metrics={metrics} />)}
           </div>
         </section>
         <section>
           <SectionHeader icon={<IconCamera />} title="Camera Pipelines" sub={`${cams.length} stream${cams.length === 1 ? '' : 's'} · ${liveNow} live`} />
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-            {cams.map(c => <PipelineCard key={c.camera_id} cam={c} health={healthOf(c)} />)}
+            {cams.map(c => <PipelineCard key={c.camera_id} cam={c} health={healthOf(c)} perf={metrics?.cameras?.[c.camera_id]} />)}
             {cams.length === 0 && (
               <div className="col-span-full text-center text-slate-400 py-16 border border-dashed border-slate-200 rounded-2xl bg-white">
                 <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-100 text-slate-300 flex items-center justify-center"><IconCamera /></div>

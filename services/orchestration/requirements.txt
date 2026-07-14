@@ -28,5 +28,8 @@ openai==1.54.0
 # AWS S3 — pre-signed snapshot URLs for the dashboard
 boto3==1.42.97
 
+# Host CPU/RAM metrics for the dashboard System page
+psutil==5.9.8
+
 # Utilities
 python-dotenv==1.0.0

@@ -3468,6 +3468,72 @@ async def health_check():
     return health_status
 
 
+# Each dependent service MAY expose GET /system/metrics returning
+# {"cpu": <pct>, "ram": <pct>, "gpu": <pct|null>, "cameras": {cam_id: {...}}}.
+# Services that don't implement it yet contribute nulls → the dashboard renders
+# "—", so this endpoint degrades gracefully as services are upgraded.
+SYSTEM_METRICS_PATH = "/system/metrics"
+
+
+def _self_system_metrics() -> dict:
+    """CPU% (short sample) + RAM% for the host running orchestration.
+
+    cpu_percent(interval=0.2) blocks for the sample window, so this is always
+    called via run_in_executor to keep the event loop responsive.
+    """
+    import psutil
+    return {
+        "cpu": round(psutil.cpu_percent(interval=0.2), 1),
+        "ram": round(psutil.virtual_memory().percent, 1),
+        "gpu": None,  # orchestration box has no GPU
+    }
+
+
+@app.get("/dashboard/system-metrics", tags=["dashboard"])
+async def system_metrics():
+    """Live CPU/GPU/RAM per server + per-camera DeepStream perf for the System page.
+
+    Orchestration reports its own host via psutil and fans out to each dependent
+    service's GET /system/metrics (mirrors the /health fanout). Any service that
+    hasn't shipped the endpoint yet contributes nulls, which the dashboard shows
+    as "—". Per-camera DeepStream perf (queue/dropped/inference/tracking) rides
+    in on the camera_detection service's "cameras" block.
+    """
+    loop = asyncio.get_event_loop()
+    out: Dict[str, Any] = {"servers": {}, "cameras": {}}
+
+    try:
+        out["servers"]["orchestration"] = await loop.run_in_executor(None, _self_system_metrics)
+    except Exception as e:
+        logger.warning(f"[system-metrics] self metrics failed: {e!r}")
+        out["servers"]["orchestration"] = {"cpu": None, "ram": None, "gpu": None}
+
+    services = {
+        "camera_detection": CAMERA_DETECTION_URL,
+        "usecase": USECASE_SERVICE_URL,
+        "alert": ALERT_SERVICE_URL,
+        "analytics": ANALYTICS_SERVICE_URL,
+    }
+
+    async def fetch(name: str, url: str):
+        try:
+            r = await http_client.get(f"{url}{SYSTEM_METRICS_PATH}", timeout=5.0)
+            if r.status_code == 200:
+                d = r.json()
+                out["servers"][name] = {
+                    "cpu": d.get("cpu"), "ram": d.get("ram"), "gpu": d.get("gpu"),
+                }
+                if isinstance(d.get("cameras"), dict):
+                    out["cameras"].update(d["cameras"])
+                return
+        except Exception as e:
+            logger.debug(f"[system-metrics] {name} metrics unavailable: {e!r}")
+        out["servers"][name] = {"cpu": None, "ram": None, "gpu": None}
+
+    await asyncio.gather(*(fetch(n, u) for n, u in services.items()))
+    return out
+
+
 @app.get("/", tags=["root"])
 async def root():
     """API Root - Welcome and Quick Links"""
