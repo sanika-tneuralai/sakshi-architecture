@@ -197,6 +197,23 @@ async def health_check():
     }
 
 
+# System metrics — consumed by orchestration /dashboard/system-metrics for the
+# dashboard System page. This service shares its host with alert + analytics, so
+# it reports the CPU/RAM for that whole box (orchestration only needs one of the
+# three co-located services to answer). No GPU on this box. Sync def → FastAPI
+# runs the blocking cpu_percent() sample in a threadpool.
+import psutil
+
+@app.get("/system/metrics", tags=["system"])
+def system_metrics():
+    """Host CPU%/RAM% for the dashboard System page."""
+    return {
+        "cpu": round(psutil.cpu_percent(interval=0.2), 1),
+        "ram": round(psutil.virtual_memory().percent, 1),
+        "gpu": None,
+    }
+
+
 # Import and include usecase router
 from usecase.api import router as usecase_router
 app.include_router(usecase_router)
