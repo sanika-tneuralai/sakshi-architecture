@@ -95,19 +95,27 @@ async def lifespan(app: FastAPI):
     email_enabled = os.getenv('ALERT_EMAIL_ENABLED', 'false').lower() == 'true'
     sms_enabled = os.getenv('ALERT_SMS_ENABLED', 'false').lower() == 'true'
     webhook_enabled = os.getenv('ALERT_WEBHOOK_ENABLED', 'false').lower() == 'true'
-    
+    mobile_push_enabled = os.getenv('MOBILE_PUSH_ENABLED', 'false').lower() == 'true'
+
     logger.info("Alert Channels Configuration:")
     logger.info(f"  - Email: {'Enabled' if email_enabled else 'Disabled'}")
     logger.info(f"  - SMS: {'Enabled' if sms_enabled else 'Disabled'}")
     logger.info(f"  - Webhook: {'Enabled' if webhook_enabled else 'Disabled'}")
-    
+    logger.info(f"  - Mobile Push: {'Enabled' if mobile_push_enabled else 'Disabled'}")
+
     if email_enabled:
         smtp_host = os.getenv('ALERT_EMAIL_SMTP_HOST', 'Not configured')
         logger.info(f"  - SMTP Host: {smtp_host}")
-    
+
     if webhook_enabled:
         webhook_url = os.getenv('ALERT_WEBHOOK_URL', 'Not configured')
         logger.info(f"  - Webhook URL: {webhook_url}")
+
+    if mobile_push_enabled:
+        mobile_push_url = os.getenv('MOBILE_PUSH_URL', 'Not configured')
+        mobile_push_usecases = os.getenv('MOBILE_PUSH_USECASES', 'parking_compliance')
+        logger.info(f"  - Mobile Push URL: {mobile_push_url}")
+        logger.info(f"  - Mobile Push usecases: {mobile_push_usecases}")
     
     logger.info("✓ Alert service started successfully")
     

@@ -18,6 +18,7 @@ from alert.schemas import (
     PipelineAlertRequest,
     PipelineAlertResponse,
 )
+from alert.mobile_push import build_mobile_payload, is_mobile_push_target, send_mobile_push
 from alert.telegram import is_telegram_target, send_telegram
 
 
@@ -150,6 +151,21 @@ def process_pipeline_alerts(request: PipelineAlertRequest) -> PipelineAlertRespo
         if is_telegram_target(usecase_id):
             send_telegram(_build_telegram_text(
                 request.camera_id, usecase_id, message, timestamp, extras))
+
+        # Fan out to GoEC's mobile app for allowlisted usecases (default:
+        # parking_compliance — i.e. wrong-parking violations). We push the
+        # structured event and let the agency decide how to prioritise the
+        # notification on their end. Guarded + non-fatal inside send_mobile_push.
+        if is_mobile_push_target(usecase_id):
+            send_mobile_push(build_mobile_payload(
+                camera_id=request.camera_id,
+                usecase_id=usecase_id,
+                alert_type=alert_type,
+                message=message,
+                timestamp=timestamp,
+                matched_count=matched_count,
+                extras=extras,
+            ))
 
     print(f"[SERVICE] process_pipeline_alerts done | alerts_sent={len(alerts_sent)}\n")
 
