@@ -35,6 +35,18 @@ x-worker-env: &worker-env
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
   AWS_REGION: ${AWS_REGION:-ap-south-1}
   AWS_S3_BUCKET: ${AWS_S3_BUCKET:-sakshi-vehicle-detection-frames}
+  # Vision-LLM usecase toggles — default OFF to avoid per-frame LLM cost.
+  # The four vehicle usecases each hit a vision LLM (gpt-4o/claude/gemini);
+  # these switch them to no-LLM behavior. Re-enable any one by setting its env
+  # var in .env (e.g. VEHICLE_LLM_PROVIDER=openai) and `docker compose up -d`.
+  #   VEHICLE_LLM_PROVIDER=off       → vehicle_extraction makes no call (empty plate/model)
+  #   GUN_LLM_PROVIDER=off           → gun_detection skips LLM; inferred-plug timer still runs
+  #   COMPLIANCE_LLM_ENABLED=0       → parking_compliance disabled
+  #   PARKING_DETECTION_BACKEND=yolo → parking_detection is YOLO-only (no YOLO-miss LLM poll)
+  VEHICLE_LLM_PROVIDER: ${VEHICLE_LLM_PROVIDER:-off}
+  GUN_LLM_PROVIDER: ${GUN_LLM_PROVIDER:-off}
+  COMPLIANCE_LLM_ENABLED: ${COMPLIANCE_LLM_ENABLED:-0}
+  PARKING_DETECTION_BACKEND: ${PARKING_DETECTION_BACKEND:-yolo}
 
 x-shard-worker: &shard-worker
   build: .
