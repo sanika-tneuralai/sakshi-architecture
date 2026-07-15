@@ -41,11 +41,16 @@ x-worker-env: &worker-env
   # var in .env (e.g. VEHICLE_LLM_PROVIDER=openai) and `docker compose up -d`.
   #   VEHICLE_LLM_PROVIDER=off       → vehicle_extraction makes no call (empty plate/model)
   #   GUN_LLM_PROVIDER=off           → gun_detection skips LLM; inferred-plug timer still runs
-  #   COMPLIANCE_LLM_ENABLED=0       → parking_compliance disabled
-  #   PARKING_DETECTION_BACKEND=yolo → parking_detection is YOLO-only (no YOLO-miss LLM poll)
+  #   COMPLIANCE_LLM_ENABLED=0        → skips parking_compliance's compliance-specific LLM
+  #   PARKING_COMPLIANCE_BACKEND=yolo → master switch: skips BOTH of parking_compliance's LLM
+  #        paths (its shared frame call + compliance call). Needed because the shared frame
+  #        call keys on VEHICLE_LLM_PROVIDER, so without this, re-enabling vehicle_extraction
+  #        would silently re-fire parking_compliance's frame LLM.
+  #   PARKING_DETECTION_BACKEND=yolo  → parking_detection is YOLO-only (no YOLO-miss LLM poll)
   VEHICLE_LLM_PROVIDER: ${VEHICLE_LLM_PROVIDER:-off}
   GUN_LLM_PROVIDER: ${GUN_LLM_PROVIDER:-off}
   COMPLIANCE_LLM_ENABLED: ${COMPLIANCE_LLM_ENABLED:-0}
+  PARKING_COMPLIANCE_BACKEND: ${PARKING_COMPLIANCE_BACKEND:-yolo}
   PARKING_DETECTION_BACKEND: ${PARKING_DETECTION_BACKEND:-yolo}
 
 x-shard-worker: &shard-worker
