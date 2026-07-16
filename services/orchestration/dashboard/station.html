@@ -2195,7 +2195,7 @@ const LIVE_STAT = {
   stopped:  { chip: 'bg-slate-600/80 text-white',   dot: 'bg-slate-300', label: 'Stopped' },
 };
 
-function LiveTile({ c, health, station }) {
+function LiveTile({ c, health, station, onClick }) {
   const [frame, setFrame] = React.useState(null);
   const [visible, setVisible] = React.useState(false);
   const [err, setErr] = React.useState(false);
@@ -2232,7 +2232,8 @@ function LiveTile({ c, health, station }) {
 
   const s = LIVE_STAT[health] || LIVE_STAT.stopped;
   return (
-    <div ref={ref} className="relative rounded-xl overflow-hidden bg-slate-900 aspect-video shadow-card">
+    <div ref={ref} onClick={onClick}
+      className="relative rounded-xl overflow-hidden bg-slate-900 aspect-video shadow-card cursor-pointer transition hover:ring-2 hover:ring-brand-400 hover:shadow-lg">
       {frame
         ? <img src={frame} alt={c.camera_id} className="w-full h-full object-cover" />
         : <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs">
@@ -2256,9 +2257,63 @@ function LiveTile({ c, health, station }) {
   );
 }
 
+/* Full-screen live view for one camera — opened by tapping a tile. Polls faster
+   (~400ms) since it's the single focused feed; object-contain so the whole frame
+   shows uncropped. Esc or backdrop click closes. */
+function LiveModal({ c, station, health, onClose }) {
+  const [frame, setFrame] = React.useState(null);
+  const [err, setErr] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false, timer = null;
+    async function tick() {
+      try {
+        const r = await fetch(`${BASE}/camera/${encodeURIComponent(c.camera_id)}/snapshot`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (!cancelled && d.frame) { setFrame(`data:image/jpeg;base64,${d.frame}`); setErr(false); }
+        else if (!cancelled) setErr(true);
+      } catch (e) { if (!cancelled) setErr(true); }
+      if (!cancelled) timer = setTimeout(tick, 400);
+    }
+    if (c.running) tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [c.camera_id, c.running]);
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const s = LIVE_STAT[health] || LIVE_STAT.stopped;
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 sm:p-8" onClick={onClose}>
+      <div className="relative w-full max-w-6xl" onClick={e => e.stopPropagation()}>
+        <div className="relative rounded-2xl overflow-hidden bg-slate-900 aspect-video shadow-2xl">
+          {frame
+            ? <img src={frame} alt={c.camera_id} className="w-full h-full object-contain" />
+            : <div className="w-full h-full flex items-center justify-center text-slate-400 text-sm">{c.running ? (err ? 'No signal' : 'Loading…') : 'Stopped'}</div>}
+          <div className="absolute top-3 left-3 flex items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${s.chip}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${health === 'live' ? 'animate-pulse-dot' : ''}`} />{s.label}
+            </span>
+            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-black/50 text-white">{station}</span>
+          </div>
+          <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent px-4 py-3">
+            <div className="text-white text-lg font-bold">{c.name || c.camera_id}</div>
+            <div className="text-slate-300 text-xs font-mono">{c.camera_id}</div>
+          </div>
+        </div>
+        <button onClick={onClose} aria-label="Close"
+          className="absolute -top-3 -right-3 w-9 h-9 rounded-full bg-white text-slate-700 shadow-lg flex items-center justify-center hover:bg-slate-100 text-xl font-bold leading-none">×</button>
+      </div>
+    </div>
+  );
+}
+
 function LiveViewPage() {
   const [cams, setCams] = React.useState([]);
   const [err, setErr]   = React.useState(null);
+  const [expanded, setExpanded] = React.useState(null);   // camera_id opened full-screen
   const seenRef = React.useRef({});
   React.useEffect(() => {
     async function load() {
@@ -2288,6 +2343,7 @@ function LiveViewPage() {
   const ordered = [...cams].sort((a, b) =>
     (a.location || 'zzz').localeCompare(b.location || 'zzz')
     || (a.name || a.camera_id).localeCompare(b.name || b.camera_id));
+  const expandedCam = expanded ? cams.find(x => x.camera_id === expanded) : null;
   return (
     <div>
       <PageHeader title="Live View" sub={`${stations.length} station${stations.length === 1 ? '' : 's'} · ${cams.length} stream${cams.length === 1 ? '' : 's'} · ${liveNow} live`} right={<LiveDot ok={cams.length > 0} />} />
@@ -2300,10 +2356,11 @@ function LiveViewPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
-            {ordered.map(c => <LiveTile key={c.camera_id} c={c} health={healthOf(c)} station={c.location || 'No station'} />)}
+            {ordered.map(c => <LiveTile key={c.camera_id} c={c} health={healthOf(c)} station={c.location || 'No station'} onClick={() => setExpanded(c.camera_id)} />)}
           </div>
         )}
       </main>
+      {expandedCam && <LiveModal c={expandedCam} station={expandedCam.location || 'No station'} health={healthOf(expandedCam)} onClose={() => setExpanded(null)} />}
     </div>
   );
 }
