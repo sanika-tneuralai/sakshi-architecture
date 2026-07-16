@@ -2170,25 +2170,13 @@ function SystemPage() {
   const liveNow = cams.filter(c => healthOf(c).state === 'live').length;
   return (
     <div>
-      <PageHeader title="System" sub="Server health and per-camera pipeline telemetry" right={<LiveDot ok={!!health} />} />
+      <PageHeader title="System" sub="Server health & resources" right={<LiveDot ok={!!health} />} />
       <main className="w-full px-4 sm:px-6 lg:px-10 py-8 space-y-8">
         {err && <ErrorBanner msg={err} />}
         <section>
           <SectionHeader icon={<IconServer />} title="Servers" sub="Three-server deployment" />
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             {SERVERS.map(s => <ServerCard key={s.id} server={s} services={services} runningStreams={running} metrics={metrics} />)}
-          </div>
-        </section>
-        <section>
-          <SectionHeader icon={<IconCamera />} title="Camera Pipelines" sub={`${cams.length} stream${cams.length === 1 ? '' : 's'} · ${liveNow} live`} />
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-            {cams.map(c => <PipelineCard key={c.camera_id} cam={c} health={healthOf(c)} perf={metrics?.cameras?.[c.camera_id]} />)}
-            {cams.length === 0 && (
-              <div className="col-span-full text-center text-slate-400 py-16 border border-dashed border-slate-200 rounded-2xl bg-white">
-                <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-100 text-slate-300 flex items-center justify-center"><IconCamera /></div>
-                <p className="text-sm">No camera pipelines yet. Add a station from <span className="font-semibold text-slate-500">Onboarding</span>.</p>
-              </div>
-            )}
           </div>
         </section>
       </main>
