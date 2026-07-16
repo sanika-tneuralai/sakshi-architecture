@@ -1831,6 +1831,7 @@ function LiveDot({ ok }) {
 /* ── Sidebar navigation ── */
 const NAV = [
   { key: 'monitor',  label: 'Monitor',              sub: 'Live stations',        icon: <IconMonitor /> },
+  { key: 'live',     label: 'Live View',            sub: 'Camera wall',          icon: <IconCamera /> },
   { key: 'capacity', label: 'Onboarding', sub: 'Add & manage stations',  icon: <IconGauge /> },
   { key: 'system',   label: 'System',               sub: 'Servers & cameras',    icon: <IconServer /> },
 ];
@@ -2195,6 +2196,122 @@ function SystemPage() {
   );
 }
 
+/* ── Live View: auto-refreshing snapshot wall, grouped by station ──
+   Not true RTSP video (browsers can't play RTSP) — we poll /camera/{id}/snapshot
+   and swap the JPEG (~1 fps look). Tiles poll only while on-screen and running
+   (IntersectionObserver) so it scales to many streams. */
+const LIVE_STAT = {
+  live:     { chip: 'bg-success-500/90 text-white', dot: 'bg-white',     label: 'Live' },
+  stale:    { chip: 'bg-amber-500/90 text-white',   dot: 'bg-white',     label: 'No frames' },
+  starting: { chip: 'bg-slate-500/80 text-white',   dot: 'bg-white',     label: 'Starting…' },
+  stopped:  { chip: 'bg-slate-600/80 text-white',   dot: 'bg-slate-300', label: 'Stopped' },
+};
+
+function LiveTile({ c, health }) {
+  const [frame, setFrame] = React.useState(null);
+  const [visible, setVisible] = React.useState(false);
+  const [err, setErr] = React.useState(false);
+  const ref = React.useRef(null);
+
+  // Poll only while the tile is on screen — lazy-load keeps the wall cheap at scale.
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el || !('IntersectionObserver' in window)) { setVisible(true); return; }
+    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting), { rootMargin: '200px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  React.useEffect(() => {
+    if (!visible || !c.running) return;
+    let cancelled = false, timer = null;
+    async function tick() {
+      try {
+        const r = await fetch(`${BASE}/camera/${encodeURIComponent(c.camera_id)}/snapshot`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (!cancelled && d.frame) { setFrame(`data:image/jpeg;base64,${d.frame}`); setErr(false); }
+        else if (!cancelled) setErr(true);
+      } catch (e) { if (!cancelled) setErr(true); }
+      if (!cancelled) timer = setTimeout(tick, 2000);
+    }
+    tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [visible, c.running, c.camera_id]);
+
+  const s = LIVE_STAT[health] || LIVE_STAT.stopped;
+  return (
+    <div ref={ref} className="relative rounded-xl overflow-hidden bg-slate-900 aspect-video shadow-card">
+      {frame
+        ? <img src={frame} alt={c.camera_id} className="w-full h-full object-cover" />
+        : <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs">
+            {c.running ? (err ? 'No signal' : 'Loading…') : 'Stopped'}
+          </div>}
+      <div className="absolute top-2 left-2">
+        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${s.chip}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${health === 'live' ? 'animate-pulse-dot' : ''}`} />{s.label}
+        </span>
+      </div>
+      <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent px-3 py-2">
+        <div className="text-white text-sm font-semibold truncate">{c.name || c.camera_id}</div>
+        <div className="text-slate-300 text-[11px] font-mono truncate">{c.camera_id}</div>
+      </div>
+    </div>
+  );
+}
+
+function LiveViewPage() {
+  const [cams, setCams] = React.useState([]);
+  const [err, setErr]   = React.useState(null);
+  const seenRef = React.useRef({});
+  React.useEffect(() => {
+    async function load() {
+      try {
+        const r = await fetch(CAMERAS_URL);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        const list = d.cameras || [];
+        const now = Date.now(), seen = seenRef.current;
+        for (const c of list) { const p = seen[c.camera_id]; if (!p || p.lastRun !== c.last_run) seen[c.camera_id] = { lastRun: c.last_run, sinceMs: now }; }
+        setCams(list); setErr(null);
+      } catch (e) { setErr(e.message); }
+    }
+    load(); const id = setInterval(load, 5000); return () => clearInterval(id);
+  }, []);
+  const healthOf = (c) => {
+    if (!c.running) return 'stopped';
+    if (!c.last_run) return 'starting';
+    const seen = seenRef.current[c.camera_id];
+    const age = (Date.now() - (seen ? seen.sinceMs : Date.now())) / 1000;
+    return age <= STREAM_STALE_SEC ? 'live' : 'stale';
+  };
+  const stations = groupByLocation(cams);
+  const liveNow  = cams.filter(c => healthOf(c) === 'live').length;
+  return (
+    <div>
+      <PageHeader title="Live View" sub={`${stations.length} station${stations.length === 1 ? '' : 's'} · ${cams.length} stream${cams.length === 1 ? '' : 's'} · ${liveNow} live`} right={<LiveDot ok={cams.length > 0} />} />
+      <main className="w-full px-4 sm:px-6 lg:px-10 py-8 space-y-8">
+        {err && <ErrorBanner msg={err} />}
+        {stations.length === 0 && (
+          <div className="text-center text-slate-400 py-16 border border-dashed border-slate-200 rounded-2xl bg-white">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-100 text-slate-300 flex items-center justify-center"><IconCamera /></div>
+            <p className="text-sm">No camera streams yet. Add one from <span className="font-semibold text-slate-500">Onboarding</span>.</p>
+          </div>
+        )}
+        {stations.map(g => (
+          <section key={g.location}>
+            <SectionHeader icon={<IconStation />} title={g.named ? g.location : (g.cameras[0]?.name || g.location)}
+              sub={`${g.streamCount} stream${g.streamCount === 1 ? '' : 's'} · ${g.cameras.filter(c => healthOf(c) === 'live').length} live`} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              {g.cameras.map(c => <LiveTile key={c.camera_id} c={c} health={healthOf(c)} />)}
+            </div>
+          </section>
+        ))}
+      </main>
+    </div>
+  );
+}
+
 function App() {
   const [stationData, setStationData] = React.useState(null);
   const [sessions,    setSessions]    = React.useState([]);
@@ -2322,6 +2439,7 @@ function App() {
   };
 
   // Non-monitor pages render inside the shell without the station polling UI.
+  if (page === 'live')     return <AppShell page={page} setPage={setPage}><LiveViewPage /></AppShell>;
   if (page === 'capacity') return <AppShell page={page} setPage={setPage}><CapacityPage /></AppShell>;
   if (page === 'system')   return <AppShell page={page} setPage={setPage}><SystemPage /></AppShell>;
 
