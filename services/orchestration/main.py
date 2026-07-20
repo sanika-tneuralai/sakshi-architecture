@@ -2868,6 +2868,51 @@ Return ONLY this JSON shape, filled in:
     return {"insight": structured, "aggregates": aggregates}
 
 
+@app.post("/dashboard/energy-deviations", tags=["dashboard"])
+def dashboard_energy_deviations(request: dict):
+    """
+    Flag charging sessions whose energy is abnormal for that car model, track
+    the specific vehicle, and surface cars that deviate more than once (and,
+    where the upload spans stations, across stations).
+
+    Runs entirely on the authoritative client (OCPP Excel) side — units_kwh,
+    make/model, VRN, duration and charge_point all come from the billing
+    system, so a flag never depends on a CCTV match landing. The CCTV meter
+    estimate is an equal-share allocation of a shared meter and is far too
+    noisy to baseline against (see shared/energy_comparison.py).
+
+    Baseline per car model, robust (median + MAD, Iglewicz-Hoaglin modified
+    z), on two axes:
+      - energy : units_kwh          vs the model's typical session energy
+      - rate   : units_kwh / hours  vs the model's typical charging rate
+    A session flags if either axis clears the z cutoff. Models with too few
+    samples for their own baseline fall back to the global rate distribution.
+
+    Request body: { "results": [...] }  — the `results` array returned by
+    /dashboard/energy-comparison/upload. Optional overrides: `z_threshold`
+    (default 3.5), `min_samples` (default 4).
+
+    Returns: { baselines, deviations, vehicles, summary }.
+    """
+    from shared.energy_comparison import (
+        flag_energy_deviations,
+        DEVIATION_Z_THRESHOLD,
+        DEVIATION_MIN_SAMPLES,
+    )
+
+    results = request.get("results", [])
+    if not results:
+        raise HTTPException(status_code=400, detail="No results provided; upload the OCPP Excel first")
+
+    try:
+        z_threshold = float(request.get("z_threshold", DEVIATION_Z_THRESHOLD))
+        min_samples = int(request.get("min_samples", DEVIATION_MIN_SAMPLES))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="z_threshold must be a number and min_samples an integer")
+
+    return flag_energy_deviations(results, z_threshold=z_threshold, min_samples=min_samples)
+
+
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])
 def dashboard_parking_compliance(
     camera_id: Optional[str] = None,

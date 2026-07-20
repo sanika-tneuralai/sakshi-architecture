@@ -25,12 +25,10 @@ them to CCTV plug_time / in_time (both normalised to naive IST).
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
-
-from openpyxl import load_workbook
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -275,6 +273,7 @@ def _header_key(h: Any) -> str:
 def parse_excel(file_bytes: bytes) -> list[ExcelRow]:
     """Parse the client OCPP export xlsx into ExcelRow records."""
     from io import BytesIO
+    from openpyxl import load_workbook
     wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
     ws = wb.active
     rows_iter = ws.iter_rows(values_only=True)
@@ -751,4 +750,290 @@ def result_to_dict(r: MatchResult) -> dict[str, Any]:
         "stop_reason": ex.stop_reason,
         "closed_by": ex.closed_by,
         "id_tag": ex.id_tag,
+        "charge_point": ex.charge_point,
+    }
+
+
+# ── Charging-deviation detection ─────────────────────────────────────────────
+#
+# "Flag sessions whose energy is abnormal for that car model, track the
+# specific vehicle, and see if the same car deviates elsewhere."
+#
+# We baseline off the CLIENT (OCPP Excel) side ONLY. units_kwh is the
+# authoritative meter of record and make/model/vrn/duration/charge_point all
+# come from the billing system — so a deviation flag never depends on a CCTV
+# match landing. (Our CCTV meter estimate is an equal-share allocation of a
+# shared physical meter and is far too noisy to baseline against.)
+#
+# Baseline = per-car-model robust statistics. We flag on TWO axes because raw
+# kWh conflates with how long the car charged:
+#   - energy : units_kwh            vs the model's typical session energy
+#   - rate   : units_kwh / hours    vs the model's typical charging rate
+# A session is flagged if EITHER axis exceeds the cutoff. Rate is the sharper
+# "consumed so much energy" signal — a car pulling far more kWh per hour than
+# its model normally does is the real anomaly, independent of session length.
+#
+# Robust stats (median + MAD, Iglewicz-Hoaglin modified z) rather than
+# mean/std: the per-model sample is small and itself contains the outliers we
+# are hunting, so a single 60 kWh session would inflate a std-based band
+# enough to hide itself. Models with too few samples for their own baseline
+# fall back to the GLOBAL rate distribution so those cars are never silently
+# skipped (we record which baseline was used in the reasons trail).
+#
+# Vehicle tracking: deviations are rolled up by normalized VRN. The rollup
+# also carries the distinct charge_points a plate appeared on — so when a
+# single upload spans multiple stations, a recurring deviant is visible
+# ACROSS stations on the billing side today. (CCTV-side cross-station
+# tracking still needs reliable ANPR + multi-station wiring — out of scope
+# here.)
+
+DEVIATION_Z_THRESHOLD  = 3.5        # Iglewicz-Hoaglin standard cutoff
+DEVIATION_MIN_SAMPLES  = 4          # need a real baseline before flagging a model
+DEVIATION_MIN_HOURS    = 1.0 / 60   # 1 min floor — sub-minute rows give a garbage rate
+
+
+def _median(xs: list[float]) -> float | None:
+    s = sorted(xs)
+    n = len(s)
+    if n == 0:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _modified_z(x: float, med: float | None, mad: float | None, meanad: float | None) -> float | None:
+    """Iglewicz-Hoaglin modified z-score. Falls back to a mean-abs-deviation
+    scale when MAD is 0 (e.g. a run of identical values with one outlier),
+    so the outlier still flags instead of dividing by zero."""
+    if med is None:
+        return None
+    if mad and mad > 0:
+        return 0.6745 * (x - med) / mad
+    if meanad and meanad > 0:
+        return (x - med) / (1.253314 * meanad)
+    return None
+
+
+def _baseline(values: list[float]) -> dict[str, Any] | None:
+    """Median / MAD / mean-abs-deviation for one metric of one group."""
+    if not values:
+        return None
+    med = _median(values)
+    devs = [abs(v - med) for v in values]
+    mad = _median(devs)
+    meanad = sum(devs) / len(devs) if devs else 0.0
+    return {
+        "samples": len(values),
+        "median": round(med, 3),
+        "mad": round(mad, 3) if mad is not None else None,
+        "_med": med, "_mad": mad, "_meanad": meanad,   # unrounded, for scoring
+    }
+
+
+def _model_key(make: str | None, model: str | None) -> str:
+    """Group key for a car model, tolerant of case / spacing. Matches the
+    make+model label used by the energy-analysis endpoint."""
+    norm = normalize_model_text(f"{make or ''} {model or ''}")
+    return norm or "unknown"
+
+
+def _model_label(make: str | None, model: str | None) -> str:
+    return " ".join(filter(None, [make, model])).strip() or "Unknown"
+
+
+def flag_energy_deviations(
+    results: list[dict[str, Any]],
+    *,
+    z_threshold: float = DEVIATION_Z_THRESHOLD,
+    min_samples: int = DEVIATION_MIN_SAMPLES,
+) -> dict[str, Any]:
+    """
+    Flag charging sessions whose energy deviates from normal for their car
+    model, and roll deviations up per vehicle.
+
+    Input: the `results` list produced by result_to_dict (one dict per OCPP
+    row, matched or not — we only read the authoritative Excel-side fields:
+    client_kwh, make, model, vrn, duration_seconds, connector_id,
+    charge_point, transaction_id).
+
+    Returns { baselines, deviations, vehicles, summary }.
+    """
+    # ── Considered rows: authoritative energy present and positive ────────────
+    considered: list[dict[str, Any]] = []
+    for r in results:
+        kwh = r.get("client_kwh")
+        if kwh is None or kwh <= 0:
+            continue
+        dur_s = r.get("duration_seconds")
+        hours = (dur_s / 3600.0) if isinstance(dur_s, (int, float)) and dur_s else None
+        rate = (kwh / hours) if (hours is not None and hours >= DEVIATION_MIN_HOURS) else None
+        considered.append({
+            "row": r,
+            "mkey": _model_key(r.get("make"), r.get("model")),
+            "label": _model_label(r.get("make"), r.get("model")),
+            "kwh": float(kwh),
+            "hours": round(hours, 3) if hours is not None else None,
+            "rate": round(rate, 3) if rate is not None else None,
+            "_rate": rate,
+        })
+
+    # ── Per-model baselines (energy + rate) and a global rate fallback ────────
+    by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in considered:
+        by_model[c["mkey"]].append(c)
+
+    model_baselines: dict[str, dict[str, Any]] = {}
+    for mkey, group in by_model.items():
+        kwh_base = _baseline([c["kwh"] for c in group])
+        rate_base = _baseline([c["_rate"] for c in group if c["_rate"] is not None])
+        model_baselines[mkey] = {
+            "model": group[0]["label"],
+            "sessions": len(group),
+            "energy": kwh_base,
+            "rate": rate_base,
+        }
+
+    global_rate = _baseline([c["_rate"] for c in considered if c["_rate"] is not None])
+
+    # ── Score each session on both axes ───────────────────────────────────────
+    deviations: list[dict[str, Any]] = []
+    for c in considered:
+        mb = model_baselines[c["mkey"]]
+        reasons: list[str] = []
+        kwh_z = rate_z = None
+
+        # Energy axis — only within a model that has a real baseline.
+        eb = mb["energy"]
+        if eb and eb["samples"] >= min_samples:
+            kwh_z = _modified_z(c["kwh"], eb["_med"], eb["_mad"], eb["_meanad"])
+            if kwh_z is not None and abs(kwh_z) >= z_threshold:
+                reasons.append(f"energy {'high' if kwh_z > 0 else 'low'} vs {mb['model']} "
+                               f"(z={kwh_z:.1f}, median={eb['median']} kWh)")
+
+        # Rate axis — prefer the model baseline; fall back to global.
+        if c["_rate"] is not None:
+            rb = mb["rate"]
+            if rb and rb["samples"] >= min_samples:
+                rate_z = _modified_z(c["_rate"], rb["_med"], rb["_mad"], rb["_meanad"])
+                base_lbl, base_med = mb["model"], rb["median"]
+            elif global_rate and global_rate["samples"] >= min_samples:
+                rate_z = _modified_z(c["_rate"], global_rate["_med"], global_rate["_mad"], global_rate["_meanad"])
+                base_lbl, base_med = "all models", global_rate["median"]
+            else:
+                base_lbl = base_med = None
+            if rate_z is not None and abs(rate_z) >= z_threshold:
+                reasons.append(f"rate {'high' if rate_z > 0 else 'low'} vs {base_lbl} "
+                               f"(z={rate_z:.1f}, median={base_med} kWh/h)")
+
+        if not reasons:
+            continue
+
+        r = c["row"]
+        severity = max(abs(z) for z in (kwh_z, rate_z) if z is not None)
+        deviations.append({
+            "transaction_id": r.get("transaction_id"),
+            "excel_row": r.get("excel_row"),
+            "ocpp_start_time": r.get("ocpp_start_time"),
+            "vrn": r.get("vrn"),
+            "vrn_norm": normalize_vrn(r.get("vrn")),
+            "make": r.get("make"),
+            "model": r.get("model"),
+            "model_label": c["label"],
+            "connector_id": r.get("connector_id"),
+            "charge_point": r.get("charge_point"),
+            "client_kwh": round(c["kwh"], 3),
+            "duration_hours": c["hours"],
+            "charge_rate_kwh_h": c["rate"],
+            "energy_z": round(kwh_z, 2) if kwh_z is not None else None,
+            "rate_z": round(rate_z, 2) if rate_z is not None else None,
+            "direction": "high" if severity and (kwh_z or rate_z or 0) > 0 else "low",
+            "severity": round(severity, 2),
+            "reasons": reasons,
+            # Carry the CCTV match through so the operator can jump to footage.
+            "matched_session_id": r.get("matched_session_id"),
+            "matched_car_number": r.get("matched_car_number"),
+            "confidence": r.get("confidence"),
+        })
+
+    deviations.sort(key=lambda d: -d["severity"])
+    flagged_txn = {d["transaction_id"] for d in deviations if d["transaction_id"]}
+
+    # ── Per-vehicle rollup — track the specific car across the dataset ────────
+    # Keyed on normalized VRN (the only cross-session car handle we have).
+    # `stations` exposes cross-station recurrence on the billing side.
+    veh: dict[str, dict[str, Any]] = {}
+    for c in considered:
+        r = c["row"]
+        vnorm = normalize_vrn(r.get("vrn"))
+        if not vnorm:
+            continue
+        v = veh.setdefault(vnorm, {
+            "vrn_norm": vnorm,
+            "vrn": r.get("vrn"),
+            "sessions": 0,
+            "deviations": 0,
+            "stations": set(),
+            "connectors": set(),
+            "models": set(),
+            "deviation_txns": [],
+        })
+        v["sessions"] += 1
+        if r.get("charge_point"):
+            v["stations"].add(r["charge_point"])
+        if r.get("connector_id") is not None:
+            v["connectors"].add(r["connector_id"])
+        if c["label"] != "Unknown":
+            v["models"].add(c["label"])
+        if r.get("transaction_id") in flagged_txn:
+            v["deviations"] += 1
+            v["deviation_txns"].append(r.get("transaction_id"))
+
+    vehicles = []
+    for v in veh.values():
+        if v["deviations"] == 0:
+            continue   # only surface cars that actually deviated
+        vehicles.append({
+            "vrn": v["vrn"],
+            "vrn_norm": v["vrn_norm"],
+            "sessions": v["sessions"],
+            "deviations": v["deviations"],
+            "recurring": v["deviations"] >= 2,           # deviated more than once
+            "multi_station": len(v["stations"]) > 1,     # same car, different stations
+            "stations": sorted(v["stations"]),
+            "connectors": sorted(v["connectors"]),
+            "models": sorted(v["models"]),
+            "deviation_txns": v["deviation_txns"],
+        })
+    vehicles.sort(key=lambda x: (-x["deviations"], -x["sessions"]))
+
+    # ── Serializable baseline table (drop the unrounded scoring internals) ────
+    baseline_table = []
+    for mkey, mb in model_baselines.items():
+        def _clean(b):
+            return {k: val for k, val in b.items() if not k.startswith("_")} if b else None
+        baseline_table.append({
+            "model": mb["model"],
+            "sessions": mb["sessions"],
+            "energy": _clean(mb["energy"]),
+            "rate": _clean(mb["rate"]),
+            "baselined": bool(mb["energy"] and mb["energy"]["samples"] >= min_samples),
+        })
+    baseline_table.sort(key=lambda x: -x["sessions"])
+
+    return {
+        "baselines": {
+            "by_model": baseline_table,
+            "global_rate": {k: val for k, val in global_rate.items() if not k.startswith("_")} if global_rate else None,
+            "z_threshold": z_threshold,
+            "min_samples": min_samples,
+        },
+        "deviations": deviations,
+        "vehicles": vehicles,
+        "summary": {
+            "considered": len(considered),
+            "flagged": len(deviations),
+            "vehicles_flagged": len(vehicles),
+            "recurring_vehicles": sum(1 for v in vehicles if v["recurring"]),
+            "multi_station_vehicles": sum(1 for v in vehicles if v["multi_station"]),
+        },
     }
