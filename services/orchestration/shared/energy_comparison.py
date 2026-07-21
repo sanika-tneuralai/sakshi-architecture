@@ -841,11 +841,25 @@ def _model_label(make: str | None, model: str | None) -> str:
     return " ".join(filter(None, [make, model])).strip() or "Unknown"
 
 
+def _axis_fires(z: float | None, threshold: float, direction: str) -> bool:
+    """Whether an axis's modified-z clears the threshold in the wanted
+    direction. 'high' = over-consumption only (z>0), 'low' = under only,
+    'both' = either side."""
+    if z is None or abs(z) < threshold:
+        return False
+    if direction == "high":
+        return z > 0
+    if direction == "low":
+        return z < 0
+    return True
+
+
 def flag_energy_deviations(
     results: list[dict[str, Any]],
     *,
     z_threshold: float = DEVIATION_Z_THRESHOLD,
     min_samples: int = DEVIATION_MIN_SAMPLES,
+    direction: str = "high",
 ) -> dict[str, Any]:
     """
     Flag charging sessions whose energy deviates from normal for their car
@@ -856,8 +870,22 @@ def flag_energy_deviations(
     client_kwh, make, model, vrn, duration_seconds, connector_id,
     charge_point, transaction_id).
 
+    direction — which deviations to flag:
+      "high" (default) : only OVER-consumption (abnormally high energy/rate),
+                         matching the "a car that consumed so much energy"
+                         goal. Drops slow-charge noise; also stops a tight
+                         small-sample model group from flagging a session
+                         purely for charging slightly slower than usual.
+      "low"            : only under-consumption / slow charges.
+      "both"           : either side.
+    Both z-scores are always reported for transparency; only axes that fire
+    in the wanted direction drive `reasons`, `severity`, and the count.
+
     Returns { baselines, deviations, vehicles, summary }.
     """
+    direction = (direction or "high").strip().lower()
+    if direction not in ("high", "low", "both"):
+        direction = "high"
     # ── Considered rows: authoritative energy present and positive ────────────
     considered: list[dict[str, Any]] = []
     for r in results:
@@ -901,14 +929,16 @@ def flag_energy_deviations(
         mb = model_baselines[c["mkey"]]
         reasons: list[str] = []
         kwh_z = rate_z = None
+        firing: list[float] = []   # signed z of axes that fired in-direction
 
         # Energy axis — only within a model that has a real baseline.
         eb = mb["energy"]
         if eb and eb["samples"] >= min_samples:
             kwh_z = _modified_z(c["kwh"], eb["_med"], eb["_mad"], eb["_meanad"])
-            if kwh_z is not None and abs(kwh_z) >= z_threshold:
+            if _axis_fires(kwh_z, z_threshold, direction):
                 reasons.append(f"energy {'high' if kwh_z > 0 else 'low'} vs {mb['model']} "
                                f"(z={kwh_z:.1f}, median={eb['median']} kWh)")
+                firing.append(kwh_z)
 
         # Rate axis — prefer the model baseline; fall back to global.
         if c["_rate"] is not None:
@@ -921,15 +951,20 @@ def flag_energy_deviations(
                 base_lbl, base_med = "all models", global_rate["median"]
             else:
                 base_lbl = base_med = None
-            if rate_z is not None and abs(rate_z) >= z_threshold:
+            if _axis_fires(rate_z, z_threshold, direction):
                 reasons.append(f"rate {'high' if rate_z > 0 else 'low'} vs {base_lbl} "
                                f"(z={rate_z:.1f}, median={base_med} kWh/h)")
+                firing.append(rate_z)
 
         if not reasons:
             continue
 
         r = c["row"]
-        severity = max(abs(z) for z in (kwh_z, rate_z) if z is not None)
+        # Severity and direction come from the FIRING axes only, so an
+        # out-of-direction axis (e.g. a slow-charge rate when direction="high")
+        # never inflates severity or mislabels the row.
+        dominant = max(firing, key=abs)
+        severity = abs(dominant)
         deviations.append({
             "transaction_id": r.get("transaction_id"),
             "excel_row": r.get("excel_row"),
@@ -946,7 +981,7 @@ def flag_energy_deviations(
             "charge_rate_kwh_h": c["rate"],
             "energy_z": round(kwh_z, 2) if kwh_z is not None else None,
             "rate_z": round(rate_z, 2) if rate_z is not None else None,
-            "direction": "high" if severity and (kwh_z or rate_z or 0) > 0 else "low",
+            "direction": "high" if dominant > 0 else "low",
             "severity": round(severity, 2),
             "reasons": reasons,
             # Carry the CCTV match through so the operator can jump to footage.
@@ -1026,6 +1061,7 @@ def flag_energy_deviations(
             "global_rate": {k: val for k, val in global_rate.items() if not k.startswith("_")} if global_rate else None,
             "z_threshold": z_threshold,
             "min_samples": min_samples,
+            "direction": direction,
         },
         "deviations": deviations,
         "vehicles": vehicles,

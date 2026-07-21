@@ -2910,7 +2910,12 @@ def dashboard_energy_deviations(request: dict):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="z_threshold must be a number and min_samples an integer")
 
-    return flag_energy_deviations(results, z_threshold=z_threshold, min_samples=min_samples)
+    # direction: "high" (default, over-consumption only) | "low" | "both"
+    direction = str(request.get("direction", "high")).strip().lower()
+
+    return flag_energy_deviations(
+        results, z_threshold=z_threshold, min_samples=min_samples, direction=direction,
+    )
 
 
 @app.get("/dashboard/parking-compliance", tags=["dashboard"])

@@ -636,6 +636,131 @@ function fmtDurationSecs(secs) {
   return `${s}s`;
 }
 
+/* ── Charging Anomalies (per-model energy deviation) ── */
+
+// Severity is the modified-z magnitude from the backend. Bands are visual
+// only — anything shown here already cleared the backend's flag threshold.
+function sevTone(sev) {
+  if (sev >= 10) return 'bg-rose-100 text-rose-700 border-rose-200';
+  if (sev >= 5)  return 'bg-amber-100 text-amber-700 border-amber-200';
+  return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+}
+
+function DeviationsPanel({ data, loading, error }) {
+  if (loading) {
+    return <div className="py-10 text-center text-slate-400 text-sm">Detecting anomalies…</div>;
+  }
+  if (error) {
+    return (
+      <div className="m-4 flex items-center gap-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-xl px-4 py-3 text-sm">
+        <IconWarning /><span className="font-medium">Anomaly detection failed:</span> {error}
+      </div>
+    );
+  }
+  if (!data) {
+    return (
+      <div className="py-12 text-center text-slate-400 text-sm">
+        Upload the client OCPP Excel to flag sessions with abnormal energy for their car model.
+      </div>
+    );
+  }
+
+  const { deviations = [], vehicles = [], summary = {}, baselines = {} } = data;
+  const cols = ['VRN', 'Make / Model', 'Station', 'Conn', 'Client kWh', 'kWh/h', 'Severity', 'Why it flagged'];
+
+  if (!deviations.length) {
+    return (
+      <div className="py-12 text-center text-slate-400 text-sm">
+        No abnormal-energy sessions found (checked {summary.considered ?? 0} session{summary.considered === 1 ? '' : 's'}
+        {baselines.z_threshold != null ? `, cutoff ${baselines.z_threshold}` : ''}).
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Summary strip */}
+      <div className="flex flex-wrap items-center gap-4 px-4 py-3 bg-slate-50 border-b border-slate-100 text-xs text-slate-600">
+        <div><span className="font-semibold text-rose-600">{summary.flagged}</span> flagged</div>
+        <div>of <span className="font-semibold text-slate-700">{summary.considered}</span> sessions</div>
+        <div><span className="font-semibold text-slate-700">{summary.vehicles_flagged}</span> vehicles</div>
+        {summary.recurring_vehicles > 0 && (
+          <div><span className="font-semibold text-rose-600">{summary.recurring_vehicles}</span> recurring</div>
+        )}
+        {summary.multi_station_vehicles > 0 && (
+          <div><span className="font-semibold text-violet-600">{summary.multi_station_vehicles}</span> multi-station</div>
+        )}
+        {baselines.z_threshold != null && (
+          <div className="text-slate-400">cutoff z≥{baselines.z_threshold}</div>
+        )}
+      </div>
+
+      {/* Repeat-offender vehicles */}
+      {vehicles.length > 0 && (
+        <div className="px-4 py-4 border-b border-slate-100 bg-slate-50/40">
+          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            Tracked vehicles
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {vehicles.map((v, i) => (
+              <div key={(v.vrn_norm || v.vrn || i) + '-' + i}
+                   className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-2 shadow-sm">
+                <span className="font-mono text-xs font-semibold text-slate-700">{display(v.vrn) || <NA />}</span>
+                <span className="text-[11px] text-slate-500">{v.deviations}/{v.sessions} flagged</span>
+                {v.recurring && (
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-200">recurring</span>
+                )}
+                {v.multi_station && (
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200"
+                        title={(v.stations || []).join(', ')}>
+                    {(v.stations || []).length} stations
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Flagged sessions, ranked by severity */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50/80">
+            <tr>
+              {cols.map(c => (
+                <th key={c} className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 whitespace-nowrap">
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {deviations.map((d, i) => (
+              <tr key={(d.transaction_id || d.excel_row || i) + '-' + i}
+                  className={`transition-colors hover:bg-brand-50/40 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}`}>
+                <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-700 whitespace-nowrap">{display(d.vrn) || <NA />}</td>
+                <td className="px-4 py-3 text-slate-600 whitespace-nowrap">{display(d.model_label) || <NA />}</td>
+                <td className="px-4 py-3 text-slate-500 text-xs whitespace-nowrap">{display(d.charge_point) || <NA text="—" />}</td>
+                <td className="px-4 py-3 text-slate-600 text-xs">{d.connector_id ?? <NA text="—" />}</td>
+                <td className="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">{d.client_kwh != null ? d.client_kwh.toFixed(2) : <NA text="—" />}</td>
+                <td className="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">{d.charge_rate_kwh_h != null ? d.charge_rate_kwh_h.toFixed(1) : <NA text="—" />}</td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${sevTone(d.severity)}`}>
+                    {d.direction === 'high' ? '▲' : '▼'} z {d.severity != null ? d.severity.toFixed(1) : '—'}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-slate-500 text-xs max-w-[320px]">
+                  {(d.reasons || []).map((r, j) => <div key={j}>{r}</div>)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function EnergyLossTable({ results, summary }) {
   const cols = ['OCPP Date', 'VRN', 'Make / Model', 'Match Quality', 'Connector', 'Duration', 'Client kWh', 'Meter kWh', 'Loss (kWh)'/*, 'Loss %'*/];
   const [dateFilter, setDateFilter] = React.useState('all');
@@ -2383,6 +2508,9 @@ function App() {
   const [insightAggregates,  setInsightAggregates]  = React.useState(null);
   const [analysing,          setAnalysing]          = React.useState(false);
   const [analyseError,       setAnalyseError]       = React.useState(null);
+  const [deviations,         setDeviations]         = React.useState(null);
+  const [devLoading,         setDevLoading]         = React.useState(false);
+  const [devError,           setDevError]           = React.useState(null);
   const [page,               setPage]               = React.useState('monitor'); // 'monitor' | 'capacity' | 'system'
   const [view,               setView]               = React.useState('overview');  // 'overview' | 'station' (within Monitor)
   const [cameraId,           setCameraId]           = React.useState(null);
@@ -2410,12 +2538,40 @@ function App() {
       const data = await res.json();
       setLossResults(data.results || []);
       setLossSummary(data.summary || null);
+      // Deviation detection is cheap and deterministic (no LLM) — run it
+      // automatically off the same upload so the operator sees anomalies
+      // without a second click.
+      fetchDeviations(data.results || []);
     } catch (e) {
       setUploadError(e.message);
       setLossResults(null);
       setLossSummary(null);
+      setDeviations(null);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const fetchDeviations = async (results) => {
+    if (!results || !results.length) { setDeviations(null); return; }
+    setDevLoading(true);
+    setDevError(null);
+    setDeviations(null);
+    try {
+      const res = await fetch(`${BASE}/dashboard/energy-deviations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ results }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`HTTP ${res.status}: ${detail}`);
+      }
+      setDeviations(await res.json());
+    } catch (e) {
+      setDevError(e.message);
+    } finally {
+      setDevLoading(false);
     }
   };
 
@@ -2661,6 +2817,22 @@ function App() {
           )}
           {insight && <InsightPanel insight={insight} aggregates={insightAggregates} results={lossResults} onDismiss={() => { setInsight(null); setInsightAggregates(null); }} />}
         </div>
+
+        {/* ── Charging Anomalies (per-model energy deviation + vehicle tracking) ── */}
+        {lossResults && lossResults.length > 0 && (
+          <div className="mb-8">
+            <div className="mb-3">
+              <SectionHeader
+                icon={<IconWarning />}
+                title="Charging Anomalies"
+                sub="Sessions using abnormal energy for their car model — with repeat-offender vehicle tracking"
+              />
+            </div>
+            <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+              <DeviationsPanel data={deviations} loading={devLoading} error={devError} />
+            </div>
+          </div>
+        )}
         </React.Fragment>
         )}
 
