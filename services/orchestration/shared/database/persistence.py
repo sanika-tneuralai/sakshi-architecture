@@ -12,6 +12,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from shared.database.connection import SessionLocal
 from shared.database.models import ROIConfig, CameraUsecase, ChargingSession, Alert, Camera
 
@@ -129,6 +131,59 @@ def list_registered_cameras() -> List[Dict[str, Any]]:
             }
             for r in rows
         ]
+    finally:
+        session.close()
+
+
+def delete_camera(camera_id: str) -> Dict[str, Any]:
+    """Remove a camera from the dashboard/registry.
+
+    First drops the camera's config rows (ROIs + usecase mappings), then tries to
+    delete the Camera row itself. A camera that has accumulated history — detections,
+    usecase_results, alerts, analytics_daily, charging_sessions all FK to
+    camera.camera_id — cannot be hard-deleted without violating those constraints
+    (and we don't want to silently wipe operational history). In that case we fall
+    back to a *soft delete*: clear rtsp_url so the row drops out of
+    list_registered_cameras() — the orchestrator won't replay it and it disappears
+    from the dashboard — while the historical rows stay intact.
+
+    Returns {"found": bool, "hard_deleted": bool, "soft_deleted": bool}. A re-add
+    with the same camera_id works either way (upsert_camera_rtsp updates the row
+    in place if a soft-deleted one lingers).
+    """
+    session = SessionLocal()
+    try:
+        cam = session.query(Camera).filter(Camera.camera_id == camera_id).one_or_none()
+        if cam is None:
+            return {"found": False, "hard_deleted": False, "soft_deleted": False}
+
+        # Drop config that only makes sense while the camera exists. Safe to delete
+        # outright — these are admin config, not audit history.
+        session.query(ROIConfig).filter(ROIConfig.camera_id == camera_id).delete(
+            synchronize_session=False
+        )
+        session.query(CameraUsecase).filter(CameraUsecase.camera_id == camera_id).delete(
+            synchronize_session=False
+        )
+        session.commit()
+
+        # Try the hard delete of the camera row itself.
+        try:
+            session.delete(cam)
+            session.commit()
+            return {"found": True, "hard_deleted": True, "soft_deleted": False}
+        except IntegrityError:
+            # Has history rows (detections / sessions / alerts / analytics). Keep the
+            # row for referential integrity but detach it from the live registry.
+            session.rollback()
+            cam = session.query(Camera).filter(Camera.camera_id == camera_id).one_or_none()
+            if cam is not None:
+                cam.rtsp_url = None
+                session.commit()
+            return {"found": True, "hard_deleted": False, "soft_deleted": True}
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 

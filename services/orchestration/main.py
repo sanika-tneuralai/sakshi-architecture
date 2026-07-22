@@ -61,6 +61,7 @@ from shared.database.persistence import (
     update_camera_meta,
     upsert_camera_rois,
     list_registered_cameras,
+    delete_camera,
 )
 from shared.database.connection import SessionLocal, ensure_schema
 
@@ -618,6 +619,40 @@ async def push_camera_to_decode_detect(camera_id: str, rtsp_url: str, fps: int) 
         return False
     except Exception as e:
         logger.warning(f"[{camera_id}] Failed to push /camera/start: {e}")
+        return False
+
+
+async def stop_camera_on_decode_detect(camera_id: str) -> bool:
+    """Best-effort: tell decode-detect to tear down a camera's decode pipeline so
+    it stops consuming a GPU stream slot.
+
+    Called when a camera is deleted from the dashboard — without this the GPU box
+    keeps decoding a stream that no longer has an analytics loop until the next
+    decode-detect restart, wasting one of the limited stream slots. This is
+    non-fatal: if the detection backend has no stop endpoint (older builds only
+    expose /camera/start), we log and move on — the slot frees on the next
+    decode-detect restart. Tries /camera/stop/{id} then /camera/{id} (DELETE).
+    """
+    try:
+        r = await http_client.post(
+            f"{CAMERA_DETECTION_URL}/camera/stop/{camera_id}",
+            timeout=DECODE_DETECT_PUSH_TIMEOUT,
+        )
+        if r.status_code in (200, 204, 404):
+            logger.info(f"[{camera_id}] decode-detect stop -> {r.status_code}")
+            return True
+        # Fall back to a RESTful DELETE for backends that use that shape.
+        r2 = await http_client.delete(
+            f"{CAMERA_DETECTION_URL}/camera/{camera_id}",
+            timeout=DECODE_DETECT_PUSH_TIMEOUT,
+        )
+        logger.info(f"[{camera_id}] decode-detect DELETE camera -> {r2.status_code}")
+        return r2.status_code in (200, 204, 404)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[{camera_id}] decode-detect stop failed (non-fatal, slot frees on "
+            f"next decode-detect restart): {e}"
+        )
         return False
 
 
@@ -1554,6 +1589,56 @@ async def update_camera(camera_id: str, patch: CameraMetaUpdate):
 
     _config_cache.pop(camera_id, None)   # force config reload on next tick
     return {"status": "success", "camera_id": camera_id, "camera": after, "stream_restarted": restarted}
+
+
+@app.delete("/pipeline/cameras/{camera_id}", tags=["pipeline"], response_model=dict)
+async def delete_camera_endpoint(camera_id: str):
+    """Remove a camera from the dashboard/registry entirely.
+
+    Order matters, so a delete frees the resources it was holding:
+      1. Stop the orchestration pipeline (the analytics polling loop).
+      2. Ask decode-detect to tear down the decode pipeline (best-effort — frees
+         the GPU stream slot; harmless if that backend has no stop endpoint).
+      3. Delete the camera + its config (ROIs, usecase mappings) from Postgres.
+         A camera with accumulated history is soft-deleted (rtsp_url cleared) so
+         it leaves the registry without wiping its detections/sessions/alerts.
+
+    Powers the dashboard's per-stream "Delete" button. Deleting every stream in a
+    station effectively removes that station (stations are just a grouping by the
+    shared `location` field).
+    """
+    loop = asyncio.get_event_loop()
+
+    # 1. Stop the analytics pipeline if it's running (idempotent — 'not_running' ok).
+    try:
+        await pipeline_manager.stop_pipeline(camera_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{camera_id}] stop_pipeline during delete failed: {e}")
+
+    # 2. Best-effort: release the decode-detect / GPU stream slot.
+    await stop_camera_on_decode_detect(camera_id)
+
+    # 3. Remove from the registry (hard delete, or soft delete if it has history).
+    try:
+        result = await loop.run_in_executor(None, delete_camera, camera_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[{camera_id}] delete_camera failed: {e}")
+        raise HTTPException(status_code=500, detail=f"delete failed: {e}")
+
+    if not result["found"]:
+        raise HTTPException(status_code=404, detail=f"camera '{camera_id}' not found")
+
+    _config_cache.pop(camera_id, None)
+    logger.info(
+        f"[{camera_id}] deleted from dashboard "
+        f"(hard={result['hard_deleted']}, soft={result['soft_deleted']})"
+    )
+    return {
+        "status": "deleted",
+        "camera_id": camera_id,
+        "hard_deleted": result["hard_deleted"],
+        "soft_deleted": result["soft_deleted"],
+    }
 
 
 class ROIItem(BaseModel):
