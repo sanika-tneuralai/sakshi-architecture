@@ -1147,19 +1147,28 @@ function ViolationToasts({ active }) {
 }
 
 /* ── App ── */
-/* ── ROI drawing: draw the parking-slot polygon on a live snapshot ── */
+/* ── ROI drawing: draw one or MORE parking-slot polygons on a live snapshot ──
+   Each committed polygon becomes a slot (ROI_1, ROI_2, … in draw order). Existing
+   slots are loaded on open so re-editing adds to them instead of silently wiping
+   them (POST /rois replaces ALL non-logo ROIs). */
 function ROIEditor({ cameraId, onClose, onSaved }) {
   const canvasRef = React.useRef(null);
   const imgRef    = React.useRef(null);
-  const [pts, setPts]       = React.useState([]);   // image-pixel coords [[x,y],...]
+  const [pts, setPts]       = React.useState([]);   // current in-progress polygon [[x,y],...]
+  const [slots, setSlots]   = React.useState([]);   // committed slots: [{points:[[x,y],...]}]
   const [status, setStatus] = React.useState('loading'); // loading|ready|error|saving|saved
   const [err, setErr]       = React.useState(null);
   const [dims, setDims]     = React.useState({ w: 900, h: 506, scale: 1 });
   const DISPLAY_W = 900;
+  const COLORS = ['#e11d48', '#2563eb', '#16a34a', '#d97706', '#7c3aed', '#0891b2'];
 
-  // Pull a live frame (retry while the pipeline warms up ~10s).
+  // Pull a live frame (retry while the pipeline warms up ~10s) AND load existing slots.
   React.useEffect(() => {
     let cancelled = false, tries = 0;
+    fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/rois`)
+      .then(r => (r.ok ? r.json() : { rois: [] }))
+      .then(d => { if (!cancelled && Array.isArray(d.rois)) setSlots(d.rois.map(r => ({ points: r.points }))); })
+      .catch(() => {});
     async function loadSnap() {
       try {
         const r = await fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/snapshot`);
@@ -1185,29 +1194,32 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
     return () => { cancelled = true; };
   }, [cameraId]);
 
-  // Redraw frame + polygon on every change.
+  // Redraw frame + every committed slot + the in-progress polygon.
   React.useEffect(() => {
     const c = canvasRef.current, img = imgRef.current;
     if (!c || !img || !(status === 'ready' || status === 'saving' || status === 'saved')) return;
     c.width = dims.w; c.height = dims.h;
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0, dims.w, dims.h);
-    if (pts.length) {
+
+    const drawPoly = (poly, color, labelIdx) => {
+      if (!poly.length) return;
       ctx.beginPath();
-      pts.forEach((p, i) => {
-        const x = p[0] * dims.scale, y = p[1] * dims.scale;
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      if (pts.length > 2) ctx.closePath();
-      ctx.strokeStyle = '#e11d48'; ctx.lineWidth = 2; ctx.stroke();
-      if (pts.length > 2) { ctx.fillStyle = 'rgba(225,29,72,0.15)'; ctx.fill(); }
-      pts.forEach(p => {
-        ctx.beginPath();
-        ctx.arc(p[0] * dims.scale, p[1] * dims.scale, 4, 0, 2 * Math.PI);
-        ctx.fillStyle = '#e11d48'; ctx.fill();
-      });
-    }
-  }, [pts, status, dims]);
+      poly.forEach((p, i) => { const x = p[0] * dims.scale, y = p[1] * dims.scale; i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+      if (poly.length > 2) ctx.closePath();
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+      if (poly.length > 2) { ctx.fillStyle = color + '26'; ctx.fill(); }
+      poly.forEach(p => { ctx.beginPath(); ctx.arc(p[0] * dims.scale, p[1] * dims.scale, 4, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill(); });
+      if (labelIdx != null && poly.length > 2) {
+        const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length * dims.scale;
+        const cy = poly.reduce((s, p) => s + p[1], 0) / poly.length * dims.scale;
+        ctx.fillStyle = color; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(`Slot ${labelIdx + 1}`, cx, cy);
+      }
+    };
+    slots.forEach((s, i) => drawPoly(s.points, COLORS[i % COLORS.length], i));
+    drawPoly(pts, COLORS[slots.length % COLORS.length], null);
+  }, [pts, slots, status, dims]);
 
   const onCanvasClick = (e) => {
     if (status !== 'ready') return;
@@ -1217,45 +1229,80 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
     setPts(prev => [...prev, [Math.round(x), Math.round(y)]]);
   };
 
+  function addSlot() {
+    if (pts.length < 3) { setErr('Draw at least 3 points, then Add slot.'); return; }
+    setSlots(prev => [...prev, { points: pts }]);
+    setPts([]); setErr(null);
+  }
+  function removeSlot(i) { setSlots(prev => prev.filter((_, idx) => idx !== i)); }
+
   async function save() {
-    if (pts.length < 3) { setErr('Draw at least 3 points around the slot.'); return; }
+    // Auto-commit an in-progress polygon so the operator doesn't have to press "Add slot" first.
+    const all = pts.length >= 3 ? [...slots, { points: pts }] : slots;
+    if (!all.length) { setErr('Draw at least one slot (≥3 points).'); return; }
     setStatus('saving'); setErr(null);
     try {
+      const rois = all.map((s, i) => ({ roi_id: `ROI_${i + 1}`, points: s.points, label: `Slot ${i + 1}` }));
       const r = await fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/rois`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rois: [{ roi_id: 'ROI_1', points: pts, label: 'Slot 1' }] }),
+        body: JSON.stringify({ rois }),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
+      setSlots(all); setPts([]);
       setStatus('saved');
       if (onSaved) onSaved();
       setTimeout(onClose, 900);
     } catch (e) { setErr(e.message); setStatus('ready'); }
   }
 
+  const savedCount = slots.length + (pts.length >= 3 ? 1 : 0);
   return (
     <div className="fixed inset-0 z-[70] bg-black/50 flex items-start justify-center overflow-y-auto py-8 px-4" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-          <h2 className="text-base font-bold text-slate-800">Draw parking slot — {cameraId}</h2>
+          <h2 className="text-base font-bold text-slate-800">Draw parking slots — {cameraId}</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div className="p-6 space-y-4">
-          <p className="text-sm text-slate-500">Click around the parking slot to outline it (≥3 points). This region defines the slot for detection.</p>
+          <p className="text-sm text-slate-500">
+            Click around a parking slot to outline it (≥3 points), then <span className="font-semibold text-slate-600">Add slot</span> to
+            start the next one. Draw <span className="font-semibold text-slate-600">one polygon per slot</span> — they become ROI_1, ROI_2, …
+            in order. <span className="font-semibold text-slate-600">Save</span> writes all slots at once.
+          </p>
           {status === 'loading' && <div className="text-sm text-slate-500">Waiting for a live frame (camera warming up)…</div>}
           {status === 'error' && <div className="text-sm text-rose-600">Couldn't get a frame: {err}. Is the camera running?</div>}
           {(status === 'ready' || status === 'saving' || status === 'saved') && (
             <div className="space-y-3">
               <canvas ref={canvasRef} onClick={onCanvasClick} className="border border-slate-200 rounded-lg cursor-crosshair max-w-full" />
+              {/* committed slots */}
+              {slots.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {slots.map((s, i) => (
+                    <span key={i} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border"
+                      style={{ borderColor: COLORS[i % COLORS.length], color: COLORS[i % COLORS.length] }}>
+                      <span className="w-2 h-2 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />
+                      Slot {i + 1} · {s.points.length} pts
+                      <button onClick={() => removeSlot(i)} className="ml-1 text-slate-400 hover:text-rose-600" title="Remove this slot">&times;</button>
+                    </span>
+                  ))}
+                </div>
+              )}
               {err && <div className="text-sm text-rose-600">{err}</div>}
-              {status === 'saved' && <div className="text-sm text-success-600">Saved ✓</div>}
+              {status === 'saved' && <div className="text-sm text-success-600">Saved {savedCount} slot(s) ✓</div>}
               <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-500">{pts.length} point(s)</span>
+                <span className="text-xs text-slate-500">
+                  {slots.length} slot(s) added · current polygon {pts.length} point(s)
+                </span>
                 <div className="flex gap-2">
-                  <button onClick={() => setPts(p => p.slice(0, -1))} className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50">Undo</button>
-                  <button onClick={() => setPts([])} className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50">Clear</button>
-                  <button onClick={save} disabled={status === 'saving' || pts.length < 3}
-                    className={`px-4 py-1.5 rounded-lg text-sm font-semibold text-white ${status === 'saving' || pts.length < 3 ? 'bg-slate-300' : 'bg-brand-600 hover:bg-brand-700'}`}>
-                    {status === 'saving' ? 'Saving…' : 'Save slot'}
+                  <button onClick={() => setPts(p => p.slice(0, -1))} disabled={!pts.length}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40">Undo point</button>
+                  <button onClick={() => setPts([])} disabled={!pts.length}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40">Clear</button>
+                  <button onClick={addSlot} disabled={pts.length < 3}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${pts.length < 3 ? 'border-slate-200 text-slate-300 cursor-not-allowed' : 'border-brand-600 text-brand-600 hover:bg-brand-50'}`}>+ Add slot</button>
+                  <button onClick={save} disabled={status === 'saving' || savedCount < 1}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-semibold text-white ${status === 'saving' || savedCount < 1 ? 'bg-slate-300' : 'bg-brand-600 hover:bg-brand-700'}`}>
+                    {status === 'saving' ? 'Saving…' : `Save ${savedCount || ''} slot${savedCount === 1 ? '' : 's'}`.trim()}
                   </button>
                 </div>
               </div>
@@ -1282,7 +1329,7 @@ function CameraOnboardingPanel({ capUsed = 0, capTotal = STREAM_CAP }) {
   const [fps, setFps]         = React.useState(5);
   const [conf, setConf]       = React.useState(0.5);
   const [poll, setPoll]       = React.useState(1.0);
-  const [ucs, setUcs]         = React.useState(['parking_detection']);
+  const [ucs, setUcs]         = React.useState([...USECASE_OPTIONS]);   // all usecases on by default
   const [busy, setBusy]       = React.useState(false);
   const [msg, setMsg]         = React.useState(null);
   const [roiCam, setRoiCam]   = React.useState(null);   // camera_id whose ROI editor is open

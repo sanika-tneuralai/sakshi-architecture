@@ -62,6 +62,7 @@ from shared.database.persistence import (
     upsert_camera_rois,
     list_registered_cameras,
     delete_camera,
+    set_camera_usecases,
 )
 from shared.database.connection import SessionLocal, ensure_schema
 
@@ -299,8 +300,8 @@ class CameraConfig(BaseModel):
         description="Frame extraction rate sent to decode-detect /camera/start",
     )
     usecases: List[str] = Field(
-        default=["person_in_roi", "crowd_in_roi", "restricted_zone_breach"],
-        description="List of usecases to evaluate"
+        default=["parking_detection", "vehicle_extraction", "gun_detection", "parking_compliance"],
+        description="List of usecases to evaluate (seeded into camera_usecases on first registration)"
     )
     confidence_threshold: float = Field(
         default=0.5,
@@ -1399,6 +1400,17 @@ async def start_camera_pipeline(camera_id: str, config: CameraConfig):
         if stored:
             rtsp_url = stored["rtsp_url"]
             config.fps = stored["fps"]
+
+    # Seed the camera's usecases on FIRST registration so the dashboard's usecase
+    # selection actually persists (get_camera_usecases reads camera_usecases at
+    # runtime). Only when the camera has none yet — a plain restart carries
+    # CameraConfig's default usecases and must NOT clobber an existing selection.
+    try:
+        if config.usecases and not get_camera_usecases(camera_id):
+            n = set_camera_usecases(camera_id, config.usecases)
+            logger.info(f"[{camera_id}] Seeded {n} usecase(s): {config.usecases}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{camera_id}] Failed to seed usecases: {e}")
 
     # Push to decode-detect. A failure here doesn't block the pipeline from
     # starting — the heartbeat task will retry on the next recovery. The polling

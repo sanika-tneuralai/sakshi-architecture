@@ -110,6 +110,49 @@ def upsert_camera_rois(camera_id: str, rois: List[Dict[str, Any]]) -> int:
         session.close()
 
 
+# Canonical per-usecase default config applied when a camera is onboarded from
+# the dashboard. Matches the confidence thresholds the existing production
+# cameras run with. A usecase not listed here is seeded with an empty config.
+DEFAULT_USECASE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "parking_detection":  {"confidence_threshold": 0.5},
+    "gun_detection":      {"confidence_threshold": 0.2},
+    "parking_compliance": {},
+    "vehicle_extraction": {},
+}
+
+
+def set_camera_usecases(camera_id: str, usecases: List[str]) -> int:
+    """Enable exactly `usecases` for a camera (replace-style).
+
+    Deletes the camera's existing camera_usecases rows and inserts one enabled
+    row per usecase_id, seeding each with its canonical default config. Called
+    from POST /pipeline/start on *first* registration so the usecases picked on
+    the dashboard onboarding form actually persist (the pipeline reads them back
+    via get_camera_usecases). A no-op for an empty list. Returns rows written.
+    """
+    if not usecases:
+        return 0
+    session = SessionLocal()
+    try:
+        session.query(CameraUsecase).filter(
+            CameraUsecase.camera_id == camera_id
+        ).delete(synchronize_session=False)
+        for uc in usecases:
+            session.add(CameraUsecase(
+                camera_id=camera_id,
+                usecase_id=uc,
+                enabled=True,
+                config=DEFAULT_USECASE_CONFIG.get(uc, {}),
+            ))
+        session.commit()
+        return len(usecases)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def list_registered_cameras() -> List[Dict[str, Any]]:
     """Return every camera row that has an rtsp_url set (with name/location).
 
