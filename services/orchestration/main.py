@@ -805,7 +805,33 @@ class PipelineManager:
                 "camera_id": camera_id,
                 "message": f"Pipeline stopped for {camera_id}"
             }
-    
+
+    async def purge_camera(self, camera_id: str) -> None:
+        """Forget a camera entirely — drop its task, config, and stats.
+
+        stop_pipeline() leaves the CameraStats entry in place (running=False) so
+        /pipeline/status still reports a stopped camera. On DELETE we want the
+        camera gone from every in-memory map so it stops showing up in
+        /pipeline/cameras (which unions the registry with tracked stats). Safe to
+        call whether or not a pipeline is currently running.
+        """
+        async with self.lock:
+            ev = self.stop_events.get(camera_id)
+            if ev:
+                ev.set()
+            task = self.pipelines.get(camera_id)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.pipelines.pop(camera_id, None)
+            self.stop_events.pop(camera_id, None)
+            self.configs.pop(camera_id, None)
+            self.stats.pop(camera_id, None)
+            logger.info(f"[{camera_id}] Purged from pipeline manager")
+
     async def stop_all(self) -> dict:
         """Stop all active pipelines"""
         async with self.lock:
@@ -1609,11 +1635,13 @@ async def delete_camera_endpoint(camera_id: str):
     """
     loop = asyncio.get_event_loop()
 
-    # 1. Stop the analytics pipeline if it's running (idempotent — 'not_running' ok).
+    # 1. Stop AND forget the analytics pipeline. purge_camera (not stop_pipeline)
+    #    is what makes the camera vanish from /pipeline/cameras — stop_pipeline
+    #    leaves a stopped CameraStats entry that the list endpoint would re-add.
     try:
-        await pipeline_manager.stop_pipeline(camera_id)
+        await pipeline_manager.purge_camera(camera_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"[{camera_id}] stop_pipeline during delete failed: {e}")
+        logger.warning(f"[{camera_id}] purge_camera during delete failed: {e}")
 
     # 2. Best-effort: release the decode-detect / GPU stream slot.
     await stop_camera_on_decode_detect(camera_id)
