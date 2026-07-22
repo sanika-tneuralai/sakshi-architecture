@@ -1156,8 +1156,9 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
   const imgRef    = React.useRef(null);
   const [pts, setPts]       = React.useState([]);   // current in-progress polygon [[x,y],...]
   const [slots, setSlots]   = React.useState([]);   // committed slots: [{points:[[x,y],...]}]
-  const [status, setStatus] = React.useState('loading'); // loading|ready|error|saving|saved
+  const [status, setStatus] = React.useState('loading'); // loading|ready|error|saving
   const [err, setErr]       = React.useState(null);
+  const [saved, setSaved]   = React.useState(false);   // transient "saved ✓" toast; editor stays open
   const [dims, setDims]     = React.useState({ w: 900, h: 506, scale: 1 });
   const DISPLAY_W = 900;
   const COLORS = ['#e11d48', '#2563eb', '#16a34a', '#d97706', '#7c3aed', '#0891b2'];
@@ -1197,7 +1198,7 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
   // Redraw frame + every committed slot + the in-progress polygon.
   React.useEffect(() => {
     const c = canvasRef.current, img = imgRef.current;
-    if (!c || !img || !(status === 'ready' || status === 'saving' || status === 'saved')) return;
+    if (!c || !img || !(status === 'ready' || status === 'saving')) return;
     c.width = dims.w; c.height = dims.h;
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0, dims.w, dims.h);
@@ -1223,9 +1224,17 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
 
   const onCanvasClick = (e) => {
     if (status !== 'ready') return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / dims.scale;
-    const y = (e.clientY - rect.top) / dims.scale;
+    if (saved) setSaved(false);   // starting a new polygon after a save clears the toast
+    const c = canvasRef.current;
+    const rect = c.getBoundingClientRect();
+    // The canvas is rendered at 900px internal width but CSS (max-w-full) may
+    // DISPLAY it smaller, so rect.width != c.width. Map display px -> internal
+    // canvas px first (that factor was missing → clicks landed off-target), then
+    // internal px -> original image px via dims.scale.
+    const toInternalX = c.width / rect.width;
+    const toInternalY = c.height / rect.height;
+    const x = ((e.clientX - rect.left) * toInternalX) / dims.scale;
+    const y = ((e.clientY - rect.top) * toInternalY) / dims.scale;
     setPts(prev => [...prev, [Math.round(x), Math.round(y)]]);
   };
 
@@ -1240,7 +1249,7 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
     // Auto-commit an in-progress polygon so the operator doesn't have to press "Add slot" first.
     const all = pts.length >= 3 ? [...slots, { points: pts }] : slots;
     if (!all.length) { setErr('Draw at least one slot (≥3 points).'); return; }
-    setStatus('saving'); setErr(null);
+    setStatus('saving'); setErr(null); setSaved(false);
     try {
       const rois = all.map((s, i) => ({ roi_id: `ROI_${i + 1}`, points: s.points, label: `Slot ${i + 1}` }));
       const r = await fetch(`${BASE}/camera/${encodeURIComponent(cameraId)}/rois`, {
@@ -1248,12 +1257,15 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
         body: JSON.stringify({ rois }),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
+      // Commit the in-progress polygon into the slot list and STAY OPEN so more
+      // slots can be drawn. Closing is an explicit "Done" — saving is not the exit.
       setSlots(all); setPts([]);
-      setStatus('saved');
+      setStatus('ready'); setSaved(true);
       if (onSaved) onSaved();
-      setTimeout(onClose, 900);
     } catch (e) { setErr(e.message); setStatus('ready'); }
   }
+
+  function done() { onClose(); }
 
   const savedCount = slots.length + (pts.length >= 3 ? 1 : 0);
   return (
@@ -1265,13 +1277,14 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
         </div>
         <div className="p-6 space-y-4">
           <p className="text-sm text-slate-500">
-            Click around a parking slot to outline it (≥3 points), then <span className="font-semibold text-slate-600">Add slot</span> to
-            start the next one. Draw <span className="font-semibold text-slate-600">one polygon per slot</span> — they become ROI_1, ROI_2, …
-            in order. <span className="font-semibold text-slate-600">Save</span> writes all slots at once.
+            Click around a parking slot to outline it (≥3 points), then <span className="font-semibold text-slate-600">+ Add slot</span> and
+            draw the next one. Draw <span className="font-semibold text-slate-600">one polygon per slot</span> — they become ROI_1, ROI_2, …
+            in order. <span className="font-semibold text-slate-600">Save</span> writes all slots and <span className="font-semibold text-slate-600">keeps the editor open</span> so you
+            can keep adding; click <span className="font-semibold text-slate-600">Done</span> when finished.
           </p>
           {status === 'loading' && <div className="text-sm text-slate-500">Waiting for a live frame (camera warming up)…</div>}
           {status === 'error' && <div className="text-sm text-rose-600">Couldn't get a frame: {err}. Is the camera running?</div>}
-          {(status === 'ready' || status === 'saving' || status === 'saved') && (
+          {(status === 'ready' || status === 'saving') && (
             <div className="space-y-3">
               <canvas ref={canvasRef} onClick={onCanvasClick} className="border border-slate-200 rounded-lg cursor-crosshair max-w-full" />
               {/* committed slots */}
@@ -1288,7 +1301,7 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
                 </div>
               )}
               {err && <div className="text-sm text-rose-600">{err}</div>}
-              {status === 'saved' && <div className="text-sm text-success-600">Saved {savedCount} slot(s) ✓</div>}
+              {saved && <div className="text-sm text-success-600">Saved {slots.length} slot(s) ✓ — draw another, or click Done.</div>}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-slate-500">
                   {slots.length} slot(s) added · current polygon {pts.length} point(s)
@@ -1304,6 +1317,8 @@ function ROIEditor({ cameraId, onClose, onSaved }) {
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold text-white ${status === 'saving' || savedCount < 1 ? 'bg-slate-300' : 'bg-brand-600 hover:bg-brand-700'}`}>
                     {status === 'saving' ? 'Saving…' : `Save ${savedCount || ''} slot${savedCount === 1 ? '' : 's'}`.trim()}
                   </button>
+                  <button onClick={done}
+                    className="px-4 py-1.5 rounded-lg text-sm font-semibold border border-slate-300 text-slate-700 hover:bg-slate-50">Done</button>
                 </div>
               </div>
             </div>
